@@ -10,13 +10,25 @@ mod runtime;
 #[allow(dead_code)]
 mod window;
 
+use std::env::var_os;
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use argh::FromArgs;
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
-use crate::runtime::Pipeline;
+use crate::macos::ax::accessibility_is_trusted;
+use crate::macos::events::EventThread;
+use crate::providers::browser_history::{BrowserHistoryProvider, directory_for, user_data_dir};
+use crate::providers::windows::{MacSources, WindowProvider};
+use crate::providers::{Backoff, Ctx, supervise};
 use crate::runtime::ship::endpoint;
+use crate::runtime::{EMISSION_QUEUE, Pipeline, absorb};
+
+const PROVIDERS: &str = "windows, browser_history";
 
 /// nikki captures what happens on this Mac and ships it to the nikki service.
 #[derive(FromArgs)]
@@ -63,22 +75,110 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let pipeline = match Pipeline::open(&config) {
-        Ok(pipeline) => pipeline,
-        Err(error) => {
-            tracing::error!(%error, "the runtime could not start");
-            return ExitCode::FAILURE;
+    match run(config).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(reason) => {
+            tracing::error!(%reason, "nikki stopped");
+            ExitCode::FAILURE
         }
+    }
+}
+
+async fn run(config: Config) -> Result<(), String> {
+    let Some(home) = var_os("HOME").map(PathBuf::from) else {
+        return Err("HOME is not set, so the browser profile cannot be resolved".to_string());
     };
-    match endpoint(&config.service_url) {
-        Ok(endpoint) => tracing::info!(%endpoint, "records will be shipped here"),
-        Err(error) => tracing::error!(%error, "the records endpoint is not usable"),
+    let user_data = user_data_dir(&home);
+    let directory = directory_for(&user_data, &config.browser.profile)?;
+
+    let endpoint = match endpoint(&config.service_url) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return Err(error.to_string()),
+    };
+
+    let mut pipeline = match Pipeline::open(&config) {
+        Ok(pipeline) => pipeline,
+        Err(error) => return Err(error.to_string()),
+    };
+    let records = pipeline.records();
+
+    let (events, inbox) = mpsc::unbounded_channel();
+    let event_thread = match EventThread::spawn(events) {
+        Ok(event_thread) => event_thread,
+        Err(source) => return Err(format!("the event thread could not start: {source}")),
+    };
+
+    tracing::info!(
+        device = %config.device,
+        service = %endpoint,
+        accessibility = accessibility_is_trusted(),
+        profile = %config.browser.profile,
+        directory = %directory,
+        providers = PROVIDERS,
+        "nikki is running"
+    );
+
+    let ctx = Ctx {
+        config: Arc::new(config),
+    };
+    let (emissions, drafts) = mpsc::channel(EMISSION_QUEUE);
+    let (shutdown, listener) = watch::channel(false);
+
+    let absorbing = tokio::spawn(absorb(records.clone(), drafts, listener.clone()));
+    let windows = tokio::spawn(supervise(
+        WindowProvider::new(MacSources, inbox),
+        ctx.clone(),
+        emissions.clone(),
+        Backoff::default(),
+    ));
+    let history = tokio::spawn(supervise(
+        BrowserHistoryProvider::new(user_data, records),
+        ctx,
+        emissions.clone(),
+        Backoff::default(),
+    ));
+    drop(emissions);
+
+    tokio::select! {
+        _ = terminate() => tracing::info!("a termination signal arrived"),
+        _ = pipeline.shipper().run(listener) => {
+            tracing::error!("the shipper stopped before the daemon did");
+        }
     }
 
-    tracing::info!("no providers are registered yet");
-    if let Err(error) = pipeline.close().await {
-        tracing::error!(%error, "the runtime did not shut down cleanly");
-        return ExitCode::FAILURE;
+    windows.abort();
+    history.abort();
+    let _ = windows.await;
+    let _ = history.await;
+    event_thread.stop();
+
+    let _ = shutdown.send(true);
+    if absorbing.await.is_err() {
+        tracing::error!("the record writer did not finish cleanly");
     }
-    ExitCode::SUCCESS
+
+    match pipeline.shipper().ship_once().await {
+        Ok(progress) => tracing::info!(?progress, "the final batch was flushed"),
+        Err(error) => tracing::error!(%error, "the final batch could not be flushed"),
+    }
+
+    match pipeline.close().await {
+        Ok(()) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+async fn terminate() {
+    let (Ok(mut terminate), Ok(mut interrupt)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        tracing::error!("the termination signals cannot be observed");
+        std::future::pending::<()>().await;
+        return;
+    };
+    tokio::select! {
+        _ = terminate.recv() => {}
+        _ = interrupt.recv() => {}
+    }
 }

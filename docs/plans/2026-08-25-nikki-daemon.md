@@ -733,12 +733,12 @@ max_bytes = 536870912
 **Files:**
 - Modify: `src/main.rs`, `src/runtime/mod.rs`
 
-- [ ] main starts the event thread and the runtime, registers both providers, and runs until SIGTERM
-- [ ] graceful shutdown: stop providers, `CFRunLoopStop` the event thread and join it, flush one final batch, close the buffer
-- [ ] structured logging with a one-line startup summary naming the device, service URL, granted permissions, resolved browser profile and enabled providers
-- [ ] a provider that panics is caught, logged and restarted without taking down the process
-- [ ] write a test asserting a panicking provider restarts while the other keeps emitting
-- [ ] run the per-task gate - must pass before Task 10
+- [x] main starts the event thread and the runtime, registers both providers, and runs until SIGTERM
+- [x] graceful shutdown: stop providers, `CFRunLoopStop` the event thread and join it, flush one final batch, close the buffer
+- [x] structured logging with a one-line startup summary naming the device, service URL, granted permissions, resolved browser profile and enabled providers
+- [x] a provider that panics is caught, logged and restarted without taking down the process
+- [x] write a test asserting a panicking provider restarts while the other keeps emitting
+- [x] run the per-task gate - must pass before Task 10
 
 ### Task 10: Verify acceptance criteria
 

@@ -141,7 +141,7 @@ pub async fn supervise<P: Provider + Send + 'static>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use url::Url;

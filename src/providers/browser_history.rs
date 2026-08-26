@@ -190,7 +190,7 @@ async fn stored_state(
     Ok(HistoryState::decode(&stored))
 }
 
-fn directory_for(user_data: &Path, profile: &str) -> Result<String, String> {
+pub fn directory_for(user_data: &Path, profile: &str) -> Result<String, String> {
     let path = user_data.join(LOCAL_STATE_FILE);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,

@@ -6,14 +6,18 @@ pub mod ship;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
+use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
+use crate::providers::Emission;
 use crate::runtime::buffer::{Buffer, BufferConfig, BufferError, BufferHandle};
 use crate::runtime::dedup::{browser_key, windows_key};
 use crate::runtime::ship::{HttpTransport, ShipError, Shipper};
 
 const RFC3339_MILLIS: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
 const UNREPRESENTABLE_INSTANT: &str = "1970-01-01T00:00:00.000Z";
+
+pub const EMISSION_QUEUE: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -219,10 +223,68 @@ impl Pipeline {
     }
 }
 
+pub async fn absorb(
+    records: BufferHandle,
+    mut emissions: mpsc::Receiver<Emission>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            emission = emissions.recv() => {
+                let Some(emission) = emission else {
+                    return;
+                };
+                store(&records, emission).await;
+            }
+            _ = shutdown.changed() => break,
+        }
+    }
+
+    emissions.close();
+    loop {
+        let Some(emission) = emissions.recv().await else {
+            return;
+        };
+        store(&records, emission).await;
+    }
+}
+
+async fn store(records: &BufferHandle, emission: Emission) {
+    let Emission {
+        records: drafts,
+        cursor,
+        committed,
+    } = emission;
+    let count = drafts.len();
+    match records.enqueue(drafts, cursor).await {
+        Ok(envelopes) => tracing::debug!(count = envelopes.len(), "records were buffered"),
+        Err(error) => tracing::error!(%error, count, "records could not be buffered"),
+    }
+
+    let Some(committed) = committed else {
+        return;
+    };
+    if let Err(error) = records.flush_now().await {
+        tracing::error!(%error, "the buffer could not be flushed before the acknowledgement");
+    }
+    let _ = committed.send(());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::mpsc::Sender;
+
+    use crate::config::{Keep, RedactRule};
+    use crate::providers::tests::test_ctx;
+    use crate::providers::{Backoff, Ctx, Provider as Supervised, ProviderError, supervise};
+    use crate::runtime::redact::WILDCARD_HOST;
 
     fn tick_draft(ts: Timestamp) -> RecordDraft {
         RecordDraft {
@@ -330,5 +392,181 @@ mod tests {
 
         let regenerated = visit_draft(929_269, 2).into_envelope("mbp-21", 1);
         assert_ne!(first.dedup_key, regenerated.dedup_key);
+    }
+
+    struct TempState {
+        path: PathBuf,
+    }
+
+    impl TempState {
+        fn new(name: &str) -> TempState {
+            let path = std::env::temp_dir().join(format!("nikki-runtime-test-{name}"));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("the temporary state directory could not be created");
+            TempState { path }
+        }
+    }
+
+    impl Drop for TempState {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn open_buffer(state: &TempState) -> Buffer {
+        Buffer::open(BufferConfig {
+            state_dir: state.path.clone(),
+            device: "mbp-21".to_string(),
+            max_rows: 10_000,
+            max_bytes: 10_000_000,
+            redact: vec![RedactRule {
+                url_host: Some(WILDCARD_HOST.to_string()),
+                keep: Some(Keep::Host),
+                bundle_id: None,
+                drop: Vec::new(),
+            }],
+        })
+        .expect("the buffer opens")
+    }
+
+    struct Steady {
+        emitted: Arc<AtomicUsize>,
+    }
+
+    impl Supervised for Steady {
+        fn name(&self) -> &'static str {
+            "steady"
+        }
+
+        async fn run(&mut self, _ctx: Ctx, out: Sender<Emission>) -> Result<(), ProviderError> {
+            loop {
+                let draft = tick_draft(Timestamp::now());
+                if out.send(Emission::new(vec![draft])).await.is_err() {
+                    return Ok(());
+                }
+                self.emitted.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+    }
+
+    struct Exploding {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl Supervised for Exploding {
+        fn name(&self) -> &'static str {
+            "exploding"
+        }
+
+        async fn run(&mut self, _ctx: Ctx, _out: Sender<Emission>) -> Result<(), ProviderError> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                panic!("the provider fell over");
+            }
+            loop {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+    }
+
+    fn quick_backoff() -> Backoff {
+        Backoff {
+            start: Duration::from_millis(1),
+            ceiling: Duration::from_millis(4),
+        }
+    }
+
+    async fn buffered(records: &BufferHandle) -> usize {
+        records
+            .take_batch(1_000)
+            .await
+            .expect("the buffer answers")
+            .len()
+    }
+
+    async fn wait_for(what: &str, mut ready: impl AsyncFnMut() -> bool) {
+        for _ in 0..2_000 {
+            if ready().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!("{what} did not happen in time");
+    }
+
+    #[tokio::test]
+    async fn a_panicking_provider_restarts_while_the_other_keeps_emitting() {
+        let state = TempState::new("supervision");
+        let buffer = open_buffer(&state);
+        let records = buffer.handle();
+
+        let (emissions, drafts) = mpsc::channel(EMISSION_QUEUE);
+        let (shutdown, listener) = watch::channel(false);
+        let absorbing = tokio::spawn(absorb(records.clone(), drafts, listener));
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let exploding = tokio::spawn(supervise(
+            Exploding {
+                attempts: Arc::clone(&attempts),
+            },
+            test_ctx(30),
+            emissions.clone(),
+            quick_backoff(),
+        ));
+        let steady = tokio::spawn(supervise(
+            Steady {
+                emitted: Arc::clone(&emitted),
+            },
+            test_ctx(30),
+            emissions.clone(),
+            quick_backoff(),
+        ));
+        drop(emissions);
+
+        wait_for("the panicking provider restarted", async || {
+            attempts.load(Ordering::SeqCst) >= 2
+        })
+        .await;
+
+        let restarted_at = buffered(&records).await;
+        wait_for("the steady provider kept emitting", async || {
+            buffered(&records).await >= restarted_at + 2
+        })
+        .await;
+
+        assert!(!exploding.is_finished());
+        exploding.abort();
+        steady.abort();
+        let _ = exploding.await;
+        let _ = steady.await;
+
+        let _ = shutdown.send(true);
+        absorbing.await.expect("the record writer finishes");
+        buffer.close().await.expect("the buffer closes");
+    }
+
+    #[tokio::test]
+    async fn an_emission_awaiting_a_commit_is_acknowledged_once_it_is_buffered() {
+        let state = TempState::new("commit");
+        let buffer = open_buffer(&state);
+        let records = buffer.handle();
+
+        let (emissions, drafts) = mpsc::channel(EMISSION_QUEUE);
+        let (shutdown, listener) = watch::channel(false);
+        let absorbing = tokio::spawn(absorb(records.clone(), drafts, listener));
+
+        let (emission, committed) =
+            Emission::awaiting_commit(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))]);
+        emissions.send(emission).await.expect("the writer listens");
+
+        committed.await.expect("the record was acknowledged");
+        assert_eq!(buffered(&records).await, 1);
+
+        drop(emissions);
+        let _ = shutdown.send(true);
+        absorbing.await.expect("the record writer finishes");
+        buffer.close().await.expect("the buffer closes");
     }
 }

@@ -20,11 +20,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "signal", "sync", "time"] }
 toml = "1.1.4"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 url = "2.5.8"
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "test-util"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "signal", "sync", "time", "test-util"] }
