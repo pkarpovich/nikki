@@ -119,6 +119,7 @@ async fn run(config: Config) -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     };
     let records = pipeline.records();
+    let ship_now = pipeline.shipper().ship_now();
 
     let (events, inbox) = mpsc::unbounded_channel();
     let event_thread = match EventThread::spawn(events) {
@@ -142,7 +143,7 @@ async fn run(config: Config) -> Result<(), String> {
     let (emissions, drafts) = mpsc::channel(EMISSION_QUEUE);
     let (shutdown, listener) = watch::channel(false);
 
-    let absorbing = tokio::spawn(absorb(records.clone(), drafts, listener.clone()));
+    let absorbing = tokio::spawn(absorb(records.clone(), ship_now, drafts, listener.clone()));
     let windows = tokio::spawn(supervise(
         WindowProvider::new(MacSources, inbox),
         ctx.clone(),

@@ -58,14 +58,19 @@ impl Redactor {
             return;
         };
 
+        let drops_title = self.drops_title(payload.get("bundle_id"));
+
         self.redact_url(payload.get_mut("url"));
         if let Some(details) = payload.get_mut("details")
             && let Some(details) = details.as_object_mut()
         {
             self.redact_url(details.get_mut("url"));
+            if drops_title && let Some(tab) = details.get_mut("tab") {
+                *tab = Value::Null;
+            }
         }
 
-        if self.drops_title(payload.get("bundle_id")) {
+        if drops_title {
             payload.insert("title".to_string(), Value::Null);
         }
 
@@ -322,6 +327,38 @@ mod tests {
         assert_eq!(payload["title"], Value::Null);
         assert_eq!(payload["visible"][0]["title"], Value::Null);
         assert_eq!(payload["visible"][1]["title"], "Home Assistant");
+    }
+
+    #[test]
+    fn dropping_a_title_covers_the_browser_tab_title_in_details() {
+        let dia = "company.thebrowser.dia";
+        let redactor = Redactor::new(&[RedactRule {
+            url_host: None,
+            keep: None,
+            bundle_id: Some(dia.to_string()),
+            drop: vec![RedactField::Title],
+        }]);
+        let mut payload = json!({
+            "app": "Dia",
+            "bundle_id": dia,
+            "title": "Home – Home Assistant",
+            "details": {"url": "https://example.com/private", "tab": "Home – Home Assistant", "profile": "MBP_21"},
+        });
+        redactor.apply(&mut payload);
+        assert_eq!(payload["title"], Value::Null);
+        assert_eq!(payload["details"]["tab"], Value::Null);
+        assert_eq!(payload["details"]["profile"], "MBP_21");
+    }
+
+    #[test]
+    fn a_bundle_without_a_drop_rule_keeps_its_tab_title() {
+        let mut payload = json!({
+            "app": "Dia",
+            "bundle_id": "company.thebrowser.dia",
+            "details": {"tab": "Home – Home Assistant"},
+        });
+        full_configured().apply(&mut payload);
+        assert_eq!(payload["details"]["tab"], "Home – Home Assistant");
     }
 
     #[test]

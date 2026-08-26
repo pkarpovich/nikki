@@ -2,7 +2,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use serde::Deserialize;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::timeout;
 use url::Url;
 
 use super::buffer::{BufferError, BufferHandle, PendingRecord};
@@ -15,6 +16,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const BACKOFF_START: Duration = Duration::from_secs(1);
 pub const BACKOFF_CEILING: Duration = Duration::from_secs(300);
 pub const IDLE_POLL: Duration = Duration::from_secs(1);
+pub const SHIP_NOW_QUEUE: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ShipError {
@@ -77,9 +79,14 @@ pub fn decide(status: u16, body: &str, batch_len: usize) -> Disposition {
     if status == 200 {
         return decide_accepted(body, batch_len);
     }
-    if status == 401 || status == 403 || status == 404 || status == 405 {
+    if status == 401 || status == 403 || status == 404 || status == 405 || status == 407 {
         return Disposition::Keep {
             reason: format!("{status} is a configuration failure, not a bad batch"),
+        };
+    }
+    if status == 408 || status == 425 || status == 429 {
+        return Disposition::Keep {
+            reason: format!("{status} asks for the same batch again later"),
         };
     }
     if status == 413 {
@@ -145,18 +152,56 @@ pub fn body_for(batch: &[PendingRecord]) -> String {
     body
 }
 
+#[derive(Clone)]
+pub struct ShipNow {
+    requests: mpsc::Sender<oneshot::Sender<()>>,
+}
+
+impl ShipNow {
+    pub async fn within(&self, budget: Duration) {
+        let (shipped, waiting) = oneshot::channel();
+        let Ok(()) = self.requests.try_send(shipped) else {
+            tracing::error!("no shipment could be asked for, so the record ships on the next pass");
+            return;
+        };
+        if timeout(budget, waiting).await.is_err() {
+            tracing::warn!(
+                ?budget,
+                "the shipment outlasted its budget and was abandoned"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn ship_now_channel() -> (ShipNow, mpsc::Receiver<oneshot::Sender<()>>) {
+    let (requests, answers) = mpsc::channel(SHIP_NOW_QUEUE);
+    (ShipNow { requests }, answers)
+}
+
 pub struct Shipper<T> {
     buffer: BufferHandle,
     transport: T,
     batch_size: usize,
+    requests: mpsc::Sender<oneshot::Sender<()>>,
+    urgent: mpsc::Receiver<oneshot::Sender<()>>,
 }
 
 impl<T: Transport> Shipper<T> {
     pub fn new(buffer: BufferHandle, transport: T) -> Shipper<T> {
+        let (requests, urgent) = mpsc::channel(SHIP_NOW_QUEUE);
         Shipper {
             buffer,
             transport,
             batch_size: MAX_BATCH,
+            requests,
+            urgent,
+        }
+    }
+
+    pub fn ship_now(&self) -> ShipNow {
+        ShipNow {
+            requests: self.requests.clone(),
         }
     }
 
@@ -251,9 +296,30 @@ impl<T: Transport> Shipper<T> {
             if pause.is_zero() {
                 continue;
             }
+            let mut requested = None;
             tokio::select! {
                 _ = tokio::time::sleep(pause) => {}
                 _ = shutdown.changed() => {}
+                request = self.urgent.recv() => requested = request,
+            }
+            let Some(shipped) = requested else {
+                continue;
+            };
+            if let Err(error) = self.drain().await {
+                tracing::error!(%error, "the shipper lost the buffer");
+                return;
+            }
+            let _ = shipped.send(());
+        }
+    }
+
+    async fn drain(&mut self) -> Result<(), BufferError> {
+        loop {
+            match self.ship_once().await? {
+                Progress::Idle | Progress::Kept { .. } => return Ok(()),
+                Progress::Shipped { .. }
+                | Progress::DeadLettered { .. }
+                | Progress::Shrunk { .. } => continue,
             }
         }
     }
@@ -479,6 +545,46 @@ mod tests {
         format!("{{\"accepted\":{count},\"duplicates\":0,\"rejected\":[]}}")
     }
 
+    #[tokio::test]
+    async fn an_urgent_request_ships_without_waiting_out_the_retry_pause() {
+        let state = TempState::new("run-urgent");
+        let buffer = open(&state, host_only());
+        fill(&buffer, 1).await;
+
+        let mut shipper = Shipper::new(
+            buffer.handle(),
+            Scripted::new(vec![
+                Ok(HttpResponse {
+                    status: 503,
+                    body: String::new(),
+                }),
+                Ok(HttpResponse {
+                    status: 200,
+                    body: accepted(1),
+                }),
+            ]),
+        );
+        let ship_now = shipper.ship_now();
+        let (_shutdown, listener) = watch::channel(false);
+        let shipping = tokio::spawn(async move { shipper.run(listener).await });
+
+        let started = tokio::time::Instant::now();
+        ship_now.within(Duration::from_secs(10)).await;
+        let elapsed = started.elapsed();
+        shipping.abort();
+
+        assert_eq!(state.count("pending"), 0, "the record never shipped");
+        assert!(
+            elapsed < BACKOFF_START,
+            "an urgent request must preempt the {BACKOFF_START:?} pause, but took {elapsed:?}"
+        );
+
+        buffer
+            .close()
+            .await
+            .expect("the buffer could not be closed");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_kept_batch_doubles_the_retry_pause_until_one_ships() {
         let state = TempState::new("run-backoff");
@@ -650,7 +756,17 @@ mod tests {
 
     #[test]
     fn every_configuration_status_keeps_the_batch() {
-        for status in [401, 403, 404, 405] {
+        for status in [401, 403, 404, 405, 407] {
+            match decide(status, "", 2) {
+                Disposition::Keep { .. } => {}
+                other => panic!("expected {status} to keep the batch, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_retry_later_status_keeps_the_batch() {
+        for status in [408, 425, 429] {
             match decide(status, "", 2) {
                 Disposition::Keep { .. } => {}
                 other => panic!("expected {status} to keep the batch, got {other:?}"),

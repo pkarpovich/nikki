@@ -128,7 +128,9 @@ nothing unredacted is ever written to disk. Three rules that are silent when wro
 - **A host-less URL** (`file://`, `data:`) is reduced to its scheme by the `url_host = "*"` rule
   rather than falling through it. `chrome-extension://<id>/page.html` has an authority, so it is not
   host-less and goes through the ordinary host rule, shipping as `chrome-extension://<id>/`.
-- **`drop = ["title"]` applies to `visible[]` entries too**, not only the top-level title.
+- **`drop = ["title"]` applies to `visible[]` entries too**, not only the top-level title, and to the
+  browser tab title in `details.tab`, which for a browser window is the same string the rule just
+  nulled.
 - **Host-only is the floor, not a rule that can be deleted.** Replacing the `[[redact]]` list replaces
   the rules, not the default posture: a host with no matching rule is still reduced to its host.
   Shipping whole URLs takes an explicit `url_host = "*"`, `keep = "full"`.
@@ -410,7 +412,8 @@ Always `200` when the request parsed:
 |---|---|
 | `200`, well-formed body | delete every record of the batch **including those in `rejected`**, and log each rejection at warn. A rejected record will never be accepted by retrying, so keeping it would block the queue forever. |
 | `200`, body that does not parse or whose counts do not add up | treat as `5xx`: keep and retry. Deleting on the strength of a status line alone would discard records to any proxy that answers 200 with something else. |
-| `401`, `403`, `404`, `405` | **keep** the batch, back off, log at error every time. These are configuration - a wrong `service_url`, a proxy, a service not deployed yet - and dead-lettering here would feed the entire capture into a bin one batch at a time while the daemon looked healthy. |
+| `401`, `403`, `404`, `405`, `407` | **keep** the batch, back off, log at error every time. These are configuration - a wrong `service_url`, a proxy, a service not deployed yet - and dead-lettering here would feed the entire capture into a bin one batch at a time while the daemon looked healthy. |
+| `408`, `425`, `429` | **keep** the batch and back off. These ask for the same bytes again later - a throttling gateway in front of the service is not a malformed batch, and dead-lettering one would destroy the capture exactly while the service was busiest. |
 | other `4xx` (400, 409, 422) | move to `dead_letter`, log at error, continue with the next batch. |
 | `413` | halve the batch size and retry, down to a floor of 10 records; below that, dead-letter. |
 | `5xx`, timeout, connection failure | keep and back off. The only path that retries the same bytes. |
@@ -465,9 +468,13 @@ and blocks on the flush acknowledgement for at most 2 seconds. The service's liv
 `sleep` marker as expected quiet and alarms without one, so a marker that only reaches the server
 after wake inverts the check: the machine reads stale all night and healthy the moment it returns.
 Only blocking inside the notification callback can delay the suspension; a handler that posts to a
-channel and returns has already let the machine sleep. The 2s budget is a hard ceiling rather than a
-target - macOS grants a short window and blocking past it risks the process being killed - and on
-expiry the callback returns anyway, leaving the record durable in the buffer to ship on wake.
+channel and returns has already let the machine sleep. **The acknowledgement therefore waits on a
+shipment, not only on the write**: the runtime commits the record, checkpoints the buffer, and asks
+the shipper to drain now, which is what puts the marker on the server before the machine suspends. A
+checkpoint alone would leave the marker on disk until wake, which is the inverted check the exception
+exists to prevent. The 2s budget is a hard ceiling rather than a target - macOS grants a short window
+and blocking past it risks the process being killed - and on expiry the callback returns anyway,
+leaving the record durable in the buffer to ship on wake.
 
 `NIKKI_TEST_EVENTS=<path>` makes the event thread read newline-delimited event values from that file
 instead of registering OS sources. Without this seam the entire event half of the daemon could only

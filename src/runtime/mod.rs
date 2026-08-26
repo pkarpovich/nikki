@@ -14,10 +14,11 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
+use crate::macos::events::SLEEP_FLUSH_BUDGET;
 use crate::providers::Emission;
 use crate::runtime::buffer::{Buffer, BufferConfig, BufferError, BufferHandle};
 use crate::runtime::dedup::{browser_key, windows_key};
-use crate::runtime::ship::{HttpTransport, ShipError, Shipper};
+use crate::runtime::ship::{HttpTransport, ShipError, ShipNow, Shipper};
 
 const RFC3339_MILLIS: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
 const UNREPRESENTABLE_INSTANT: &str = "1970-01-01T00:00:00.000Z";
@@ -240,6 +241,7 @@ impl Pipeline {
 
 pub async fn absorb(
     records: BufferHandle,
+    ship_now: ShipNow,
     mut emissions: mpsc::Receiver<Emission>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -249,7 +251,7 @@ pub async fn absorb(
                 let Some(emission) = emission else {
                     return;
                 };
-                store(&records, emission).await;
+                store(&records, &ship_now, emission).await;
             }
             _ = shutdown.changed() => break,
         }
@@ -260,11 +262,11 @@ pub async fn absorb(
         let Some(emission) = emissions.recv().await else {
             return;
         };
-        store(&records, emission).await;
+        store(&records, &ship_now, emission).await;
     }
 }
 
-async fn store(records: &BufferHandle, emission: Emission) {
+async fn store(records: &BufferHandle, ship_now: &ShipNow, emission: Emission) {
     let Emission {
         records: drafts,
         cursor,
@@ -286,6 +288,7 @@ async fn store(records: &BufferHandle, emission: Emission) {
     if let Err(error) = records.flush_now().await {
         tracing::error!(%error, "the buffer could not be flushed before the acknowledgement");
     }
+    ship_now.within(SLEEP_FLUSH_BUDGET).await;
     let _ = committed.send(());
 }
 
@@ -299,11 +302,23 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::mpsc::Sender;
+    use tokio::sync::oneshot;
 
     use crate::config::{Keep, RedactRule};
     use crate::providers::tests::test_ctx;
     use crate::providers::{Backoff, Ctx, Provider as Supervised, ProviderError, supervise};
     use crate::runtime::redact::WILDCARD_HOST;
+    use crate::runtime::ship::ship_now_channel;
+
+    fn shipping_at_once() -> ShipNow {
+        let (ship_now, mut requests) = ship_now_channel();
+        tokio::spawn(async move {
+            while let Some(shipped) = requests.recv().await {
+                let _ = shipped.send(());
+            }
+        });
+        ship_now
+    }
 
     fn tick_draft(ts: Timestamp) -> RecordDraft {
         RecordDraft {
@@ -545,7 +560,12 @@ mod tests {
 
         let (emissions, drafts) = mpsc::channel(EMISSION_QUEUE);
         let (shutdown, listener) = watch::channel(false);
-        let absorbing = tokio::spawn(absorb(records.clone(), drafts, listener));
+        let absorbing = tokio::spawn(absorb(
+            records.clone(),
+            shipping_at_once(),
+            drafts,
+            listener,
+        ));
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let emitted = Arc::new(AtomicUsize::new(0));
@@ -598,7 +618,7 @@ mod tests {
 
         let (emission, committed) =
             Emission::awaiting_commit(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))], None);
-        store(&records, emission).await;
+        store(&records, &shipping_at_once(), emission).await;
 
         assert!(
             committed.await.is_err(),
@@ -622,7 +642,7 @@ mod tests {
         }
 
         let _ = shutdown.send(true);
-        absorb(records.clone(), drafts, listener).await;
+        absorb(records.clone(), shipping_at_once(), drafts, listener).await;
 
         assert_eq!(buffered(&records).await, 8);
         drop(emissions);
@@ -637,7 +657,12 @@ mod tests {
 
         let (emissions, drafts) = mpsc::channel(EMISSION_QUEUE);
         let (shutdown, listener) = watch::channel(false);
-        let absorbing = tokio::spawn(absorb(records.clone(), drafts, listener));
+        let absorbing = tokio::spawn(absorb(
+            records.clone(),
+            shipping_at_once(),
+            drafts,
+            listener,
+        ));
 
         let (emission, committed) =
             Emission::awaiting_commit(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))], None);
@@ -649,6 +674,60 @@ mod tests {
         drop(emissions);
         let _ = shutdown.send(true);
         absorbing.await.expect("the record writer finishes");
+        buffer.close().await.expect("the buffer closes");
+    }
+
+    #[tokio::test]
+    async fn an_emission_awaiting_a_commit_is_shipped_before_it_is_acknowledged() {
+        let state = TempState::new("commit-ships");
+        let buffer = open_buffer(&state);
+        let records = buffer.handle();
+
+        let (ship_now, mut requests) = ship_now_channel();
+        let (emission, mut committed) =
+            Emission::awaiting_commit(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))], None);
+        let storing = tokio::spawn({
+            let records = records.clone();
+            async move { store(&records, &ship_now, emission).await }
+        });
+
+        let shipped = requests
+            .recv()
+            .await
+            .expect("the commit path asks for a shipment");
+        assert!(
+            matches!(
+                committed.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "the acknowledgement must not arrive before the shipment does"
+        );
+        let _ = shipped.send(());
+
+        storing.await.expect("the record was stored");
+        committed.await.expect("the record was acknowledged");
+        assert_eq!(buffered(&records).await, 1);
+        buffer.close().await.expect("the buffer closes");
+    }
+
+    #[tokio::test]
+    async fn a_shipment_that_outlasts_its_budget_still_acknowledges() {
+        let state = TempState::new("commit-budget");
+        let buffer = open_buffer(&state);
+        let records = buffer.handle();
+
+        let (ship_now, requests) = ship_now_channel();
+        let (emission, committed) =
+            Emission::awaiting_commit(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))], None);
+
+        tokio::time::pause();
+        store(&records, &ship_now, emission).await;
+        drop(requests);
+
+        committed
+            .await
+            .expect("the record is acknowledged once the budget expires");
+        assert_eq!(buffered(&records).await, 1);
         buffer.close().await.expect("the buffer closes");
     }
 }
