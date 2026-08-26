@@ -53,15 +53,19 @@ Settings.
 
 When Accessibility is not granted, or its calls fail, capture continues: application, bundle id,
 geometry, `display` and every activity signal still work, because none of them touch Accessibility.
-Titles, paths and extractor details go null and the record carries `degraded: true`, which reaches
-the service and the API - a degraded day must not be indistinguishable from a quiet one to whoever
-reads the timeline later.
+The window title and the `AXDocument` path go null, `visible[]` entries lose their titles, and the
+record carries `degraded: true`, which reaches the service and the API - a degraded day must not be
+indistinguishable from a quiet one to whoever reads the timeline later. Extractor `details` survive,
+because the Dia and agterm extractors need Automation rather than Accessibility.
 
 ## Configuration
 
 `~/.config/nikki/config.toml`, or the path in `NIKKI_CONFIG`. `NIKKI_STATE_DIR` overrides the
-directory holding `buffer.db` (default `~/Library/Application Support/nikki`). Both overrides exist
-so a test harness never touches the operator's real state.
+directory holding `buffer.db` and the per-poll `history-snapshot/` clone (default
+`~/Library/Application Support/nikki`). Both overrides exist so a test harness never touches the
+operator's real state. `HOME` is still required with both of them set: the browser profile is
+resolved under `$HOME/Library/Application Support/Dia/User Data`, which no variable overrides, and an
+unset `HOME` is a startup failure.
 
 `nikki --check-config` loads and validates the configuration, logs the summary and exits.
 
@@ -94,14 +98,14 @@ drop = ["title"]
 
 | Field | Default | Notes |
 |---|---|---|
-| `service_url` | none, required | must parse as an absolute http or https URL with a non-empty host |
+| `service_url` | none, required | must parse as an absolute http or https URL with a non-empty host, and carry no query or fragment, because `/api/v1/records` is appended to it |
 | `device` | none, required | a component of every `dedup_key` and an indexed server column, so an empty one produces records that store but can never be attributed to a machine |
 | `tick_interval` | 30 | validated at startup against the same `[1, 3600]` bound the server enforces per record |
-| `history_poll_interval` | 300 | |
+| `history_poll_interval` | 300 | at least 1 second: a poll timer of zero panics the browser history provider on every supervised restart |
 | `revisit_window` | 500 | rows re-read below the cursor so a filled-in `visit_duration` is picked up |
-| `browser.profile` | none, required | resolved to a directory through `Local State` on every poll; a name absent at startup is fatal and lists the names that do exist |
-| `buffer.max_rows` | 200000 | roughly seven weeks at the real record rate |
-| `buffer.max_bytes` | 536870912 | 500 MB |
+| `browser.profile` | none, required | resolved to a directory through `Local State` on every poll; a name absent at startup is fatal and lists the names that do exist. The browser itself is not configurable - the read is always Dia's user data |
+| `buffer.max_rows` | 200000 | roughly seven weeks at the real record rate; at least 1, because a cap of zero evicts every record as it arrives |
+| `buffer.max_bytes` | 536870912 | 500 MB; must exceed the 512 bytes held back for the overflow record, for the same reason |
 | `[[redact]]` | one `url_host = "*"`, `keep = "host"` rule | replaced wholesale when the key is present |
 
 An unknown key is a startup error rather than silence, and every validation failure names the field
@@ -125,6 +129,11 @@ nothing unredacted is ever written to disk. Three rules that are silent when wro
   rather than falling through it. `chrome-extension://<id>/page.html` has an authority, so it is not
   host-less and goes through the ordinary host rule, shipping as `chrome-extension://<id>/`.
 - **`drop = ["title"]` applies to `visible[]` entries too**, not only the top-level title.
+- **Host-only is the floor, not a rule that can be deleted.** Replacing the `[[redact]]` list replaces
+  the rules, not the default posture: a host with no matching rule is still reduced to its host.
+  Shipping whole URLs takes an explicit `url_host = "*"`, `keep = "full"`.
+- **A value that does not parse as a URL ships as an empty string** rather than passing through
+  unredacted.
 
 A host-only value ships as a scheme-bearing URL with an empty path (`https://host/`), never as a bare
 hostname, and **the port is part of the host** (`http://localhost:3000/`). No URL, path or title ever
@@ -158,8 +167,10 @@ operations, a provider that reads up to `T`, sends, saves its cursor and then di
 commits resumes after `T` and loses those records permanently, silently, with no gap marker; saving
 the cursor first loses them the same way.
 
-`Emission::awaiting_commit` returns a receipt the caller can block on - this is how the sleep marker
-is made durable before macOS suspends the machine.
+`Emission::awaiting_commit` returns a receipt the caller can block on, sent only once the transaction
+committed and dropped when it failed. This is how the sleep marker is made durable before macOS
+suspends the machine, and how the browser provider advances its in-memory cursor: visits that never
+reached the buffer leave the cursor where it was and are read again on the next poll.
 
 Each provider runs as one tokio task under `providers::supervise`, which restarts it with
 exponential backoff from 1s to a 5-minute ceiling. A panic is caught and restarted like any other
@@ -315,6 +326,9 @@ retried** - so a kind missing from this table is destroyed permanently the first
 
 Unknown payload fields are never rejected - the server preserves them in its `raw` column.
 
+`focus` and `state_change` always carry `visible`; the table marks it optional because the server does
+not require it, and the bodies below omit it only for brevity.
+
 `tick_interval_sec` rides on **every** tick rather than being assumed as a server-side global, which
 is what keeps a second Mac on a 60-second interval from halving that day's reported totals and keeps
 historical rows meaning what they meant when recorded.
@@ -442,7 +456,24 @@ expiry the callback returns anyway, leaving the record durable in the buffer to 
 
 `NIKKI_TEST_EVENTS=<path>` makes the event thread read newline-delimited event values from that file
 instead of registering OS sources. Without this seam the entire event half of the daemon could only
-be exercised by a human doing things on a Mac.
+be exercised by a human doing things on a Mac. Each line is tab-separated and named by its first
+field:
+
+```
+application_activated <pid> [name] [bundle_id]
+focused_window_changed <pid>
+title_changed <pid>
+window_created <pid>
+window_destroyed <pid>
+displays_reconfigured
+screen_locked
+screen_unlocked
+did_wake
+will_sleep
+```
+
+A line that is not understood is logged at warn and skipped. The whole file is read at startup and
+delivered in one drain, so it scripts a burst rather than a timeline.
 
 ## Layout
 

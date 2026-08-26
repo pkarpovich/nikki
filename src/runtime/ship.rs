@@ -107,7 +107,9 @@ fn decide_accepted(body: &str, batch_len: usize) -> Disposition {
         rejected,
     } = response;
     let rejections = rejected.unwrap_or_default();
-    let counted = accepted + duplicates + rejections.len();
+    let counted = accepted
+        .saturating_add(duplicates)
+        .saturating_add(rejections.len());
     if counted != batch_len {
         return Disposition::Keep {
             reason: format!(
@@ -158,6 +160,7 @@ impl<T: Transport> Shipper<T> {
         }
     }
 
+    #[cfg(test)]
     pub fn batch_size(&self) -> usize {
         self.batch_size
     }
@@ -474,6 +477,70 @@ mod tests {
 
     fn accepted(count: usize) -> String {
         format!("{{\"accepted\":{count},\"duplicates\":0,\"rejected\":[]}}")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_kept_batch_doubles_the_retry_pause_until_one_ships() {
+        let state = TempState::new("run-backoff");
+        let buffer = open(&state, host_only());
+        fill(&buffer, 1).await;
+
+        let mut shipper = Shipper::new(
+            buffer.handle(),
+            Scripted::new(vec![
+                Ok(HttpResponse {
+                    status: 503,
+                    body: String::new(),
+                }),
+                Ok(HttpResponse {
+                    status: 503,
+                    body: String::new(),
+                }),
+                Ok(HttpResponse {
+                    status: 200,
+                    body: accepted(1),
+                }),
+            ]),
+        );
+        let (_shutdown, listener) = watch::channel(false);
+
+        let started = tokio::time::Instant::now();
+        let shipping = tokio::spawn(async move { shipper.run(listener).await });
+        let mut elapsed = None;
+        for _ in 0..1_000 {
+            if state.count("pending") == 0 {
+                elapsed = Some(started.elapsed());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        shipping.abort();
+
+        let elapsed = elapsed.expect("the record never shipped");
+        assert!(
+            elapsed >= BACKOFF_START * 3 && elapsed < BACKOFF_START * 4,
+            "two kept batches must pause 1s then 2s, but the record shipped after {elapsed:?}"
+        );
+
+        buffer
+            .close()
+            .await
+            .expect("the buffer could not be closed");
+    }
+
+    #[tokio::test]
+    async fn the_shipper_stops_rather_than_spinning_once_the_buffer_is_gone() {
+        let state = TempState::new("run-closed");
+        let buffer = open(&state, host_only());
+        let handle = buffer.handle();
+        buffer
+            .close()
+            .await
+            .expect("the buffer could not be closed");
+
+        let mut shipper = Shipper::new(handle, Scripted::new(Vec::new()));
+        let (_shutdown, listener) = watch::channel(false);
+        shipper.run(listener).await;
     }
 
     #[test]

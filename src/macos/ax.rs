@@ -34,6 +34,7 @@ impl AxApplication {
         windows
     }
 
+    #[cfg(test)]
     pub fn window_count(&self) -> usize {
         attribute_elements(&self.element, ATTRIBUTE_WINDOWS).len()
     }
@@ -43,6 +44,7 @@ impl AxApplication {
         Some(AxWindow { element })
     }
 
+    #[cfg(test)]
     pub(super) fn element(&self) -> &AXUIElement {
         &self.element
     }

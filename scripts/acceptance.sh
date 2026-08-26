@@ -28,4 +28,26 @@ if [ -z "$usage" ]; then
 	exit 1
 fi
 
+echo "acceptance: --check-config"
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+cat >"$scratch/config.toml" <<'TOML'
+service_url = "http://alpha:8080"
+device = "mbp-21"
+
+[browser]
+profile = "MBP_21"
+TOML
+
+if ! NIKKI_CONFIG="$scratch/config.toml" NIKKI_STATE_DIR="$scratch/state" "$app/Contents/MacOS/nikki" --check-config >/dev/null; then
+	echo "acceptance: --check-config rejected a valid configuration" >&2
+	exit 1
+fi
+
+printf 'device = "mbp-21"\n' >"$scratch/broken.toml"
+if NIKKI_CONFIG="$scratch/broken.toml" NIKKI_STATE_DIR="$scratch/state" "$app/Contents/MacOS/nikki" --check-config >/dev/null 2>&1; then
+	echo "acceptance: --check-config accepted a configuration with no service_url" >&2
+	exit 1
+fi
+
 echo "acceptance: every check passed, and $app is the bundle they ran against"

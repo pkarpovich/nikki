@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -7,14 +6,13 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{MissedTickBehavior, interval};
 
 use super::{Ctx, Emission, Provider, ProviderError};
 use crate::extract::{CommandOutput, SUBPROCESS_DEADLINE, run_with_deadline};
 use crate::runtime::buffer::BufferHandle;
-use crate::runtime::dedup::{KEY_HEX_CHARS, UNIT_SEPARATOR};
+use crate::runtime::dedup::key;
 use crate::runtime::{self, Cursor, KeySource, Kind, RecordDraft, Timestamp};
 
 pub const USER_DATA_RELATIVE: &str = "Library/Application Support/Dia/User Data";
@@ -35,16 +33,11 @@ pub fn user_data_dir(home: &Path) -> PathBuf {
 pub struct BrowserHistoryProvider {
     user_data: PathBuf,
     cursors: BufferHandle,
-    state: Option<HistoryState>,
 }
 
 impl BrowserHistoryProvider {
     pub fn new(user_data: PathBuf, cursors: BufferHandle) -> BrowserHistoryProvider {
-        BrowserHistoryProvider {
-            user_data,
-            cursors,
-            state: None,
-        }
+        BrowserHistoryProvider { user_data, cursors }
     }
 }
 
@@ -54,11 +47,7 @@ impl Provider for BrowserHistoryProvider {
     }
 
     async fn run(&mut self, ctx: Ctx, out: Sender<Emission>) -> Result<(), ProviderError> {
-        let BrowserHistoryProvider {
-            user_data,
-            cursors,
-            state,
-        } = self;
+        let BrowserHistoryProvider { user_data, cursors } = self;
         let profile = ctx.config.browser.profile.clone();
         let revisit_window = ctx.config.revisit_window as i64;
         let snapshot = ctx.config.state_dir.join(SNAPSHOT_DIR);
@@ -69,9 +58,7 @@ impl Provider for BrowserHistoryProvider {
         };
         tracing::info!(%profile, %directory, "the browser profile resolved");
 
-        if state.is_none() {
-            *state = stored_state(cursors, &profile).await?;
-        }
+        let mut state = stored_state(cursors, &profile).await?;
 
         let mut ticker = interval(Duration::from_secs(ctx.config.history_poll_interval));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -100,15 +87,18 @@ impl Provider for BrowserHistoryProvider {
                 key: profile.clone(),
                 value: polled.encode(),
             };
-            if out
-                .send(Emission::with_cursor(records, cursor))
-                .await
-                .is_err()
-            {
+            let (emission, committed) = Emission::awaiting_commit(records, Some(cursor));
+            if out.send(emission).await.is_err() {
                 tracing::info!("the runtime is gone, so the browser history provider stops");
                 return Ok(());
             }
-            *state = Some(polled);
+            if committed.await.is_err() {
+                tracing::error!(
+                    "the visits were not buffered, so the cursor stays where it was and they are read again"
+                );
+                continue;
+            }
+            state = Some(polled);
         }
     }
 }
@@ -459,13 +449,7 @@ fn digest(row: &VisitRow) -> String {
         ..
     } = row;
     let title = title.as_deref().unwrap_or_default();
-    let joined = [title, &transition.to_string(), &visit_duration.to_string()].join(UNIT_SEPARATOR);
-    let digest = Sha256::digest(joined.as_bytes());
-    let mut hex = String::with_capacity(KEY_HEX_CHARS);
-    for byte in &digest[..KEY_HEX_CHARS / 2] {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    key(&[title, &transition.to_string(), &visit_duration.to_string()])
 }
 
 fn visit_record(profile: &str, generation: u64, row: VisitRow) -> RecordDraft {
@@ -1042,6 +1026,39 @@ mod tests {
         let state = HistoryState::decode(&value).expect("the cursor value parses");
         assert_eq!(state.cursor, NEWEST_VISIT);
         assert_eq!(state.generation, 1);
+
+        running.abort();
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn visits_that_were_never_buffered_are_read_again_on_the_next_poll() {
+        let home = TempHome::new("uncommitted");
+        let buffer = home.buffer();
+        let mut provider = BrowserHistoryProvider::new(home.user_data(), buffer.handle());
+        let (out, mut emissions): (_, Receiver<Emission>) = channel(4);
+
+        let mut config = home.config();
+        config.history_poll_interval = 1;
+        let ctx = Ctx {
+            config: std::sync::Arc::new(config),
+        };
+        let running = tokio::spawn(async move { provider.run(ctx, out).await });
+
+        let Some(Emission { records, .. }) = emissions.recv().await else {
+            panic!("the provider stopped without emitting");
+        };
+        let first = visit_ids(&records);
+        assert_eq!(first, vec![901, 902, 903, 904, 905, 906]);
+
+        let Some(Emission { records, .. }) = emissions.recv().await else {
+            panic!("the provider stopped after the dropped receipt");
+        };
+        assert_eq!(
+            visit_ids(&records),
+            first,
+            "a poll whose records were never buffered must not advance the cursor"
+        );
 
         running.abort();
         buffer.close().await.expect("the buffer did not close");

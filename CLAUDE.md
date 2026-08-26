@@ -30,6 +30,10 @@ compiled unless something declares it, so it would sit unbuilt while the gate re
 Every new module file is declared the moment it is created - `mod x;` in its parent `mod.rs` or in
 `main.rs`. An undeclared module is not compiled, and neither are its inline tests.
 
+No module carries a blanket `#[allow(dead_code)]`: it is what the compiler uses to report a provider,
+extractor or helper that was written and never wired up. An item that exists only for tests is
+`#[cfg(test)]`, and a field held for ownership rather than reading carries its own narrow allow.
+
 ## Per-task gate
 
 ```
@@ -39,6 +43,10 @@ mise run check
 
 `mise run check` is `cargo fmt --all -- --check`, then `cargo clippy --all-targets -- -D warnings`,
 then `cargo test`. Both commands must pass before the next task starts.
+
+A change to `Info.plist.template` or `scripts/bundle.sh` additionally requires
+`./scripts/acceptance.sh`, which is the only thing that asserts `LSUIElement` and a non-empty
+`NSAppleEventsUsageDescription` on the assembled bundle.
 
 ## Style
 

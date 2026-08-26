@@ -734,6 +734,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sequence_counter_that_is_not_a_number_names_itself_rather_than_being_guessed_at() {
+        let state = TempState::new("counter-corrupt");
+        let buffer = open(&state, 1_000, 1_000_000);
+        let handle = buffer.handle();
+
+        handle
+            .enqueue(vec![tick(1_787_666_152_481)], None)
+            .await
+            .expect("the first batch could not be enqueued");
+        state
+            .reader()
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = ?2",
+                params!["not a number", SEQ_KEY],
+            )
+            .expect("the counter could not be corrupted");
+
+        let error = handle
+            .enqueue(vec![tick(1_787_666_152_482)], None)
+            .await
+            .expect_err("a corrupt counter must not be guessed at");
+
+        match error {
+            BufferError::Counter { key, value } => {
+                assert_eq!(key, SEQ_KEY);
+                assert_eq!(value, "not a number");
+            }
+            other => panic!("expected a counter error, got {other}"),
+        }
+
+        buffer
+            .close()
+            .await
+            .expect("the buffer could not be closed");
+    }
+
+    #[tokio::test]
     async fn enqueue_seals_every_draft_and_advances_the_cursor_together() {
         let state = TempState::new("enqueue-round-trip");
         let buffer = open(&state, 1_000, 1_000_000);

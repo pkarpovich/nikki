@@ -256,10 +256,14 @@ async fn store(records: &BufferHandle, emission: Emission) {
         committed,
     } = emission;
     let count = drafts.len();
-    match records.enqueue(drafts, cursor).await {
-        Ok(envelopes) => tracing::debug!(count = envelopes.len(), "records were buffered"),
-        Err(error) => tracing::error!(%error, count, "records could not be buffered"),
-    }
+    let buffered = match records.enqueue(drafts, cursor).await {
+        Ok(envelopes) => envelopes,
+        Err(error) => {
+            tracing::error!(%error, count, "records could not be buffered");
+            return;
+        }
+    };
+    tracing::debug!(count = buffered.len(), "records were buffered");
 
     let Some(committed) = committed else {
         return;
@@ -548,6 +552,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_emission_that_cannot_be_buffered_is_never_acknowledged() {
+        let state = TempState::new("failed-commit");
+        let buffer = open_buffer(&state);
+        let records = buffer.handle();
+        buffer.close().await.expect("the buffer closes");
+
+        let (emission, committed) =
+            Emission::awaiting_commit(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))], None);
+        store(&records, emission).await;
+
+        assert!(
+            committed.await.is_err(),
+            "a record that never reached the buffer must not be acknowledged"
+        );
+    }
+
+    #[tokio::test]
+    async fn emissions_still_queued_at_shutdown_are_drained_before_the_writer_finishes() {
+        let state = TempState::new("drain");
+        let buffer = open_buffer(&state);
+        let records = buffer.handle();
+
+        let (emissions, drafts) = mpsc::channel(EMISSION_QUEUE);
+        let (shutdown, listener) = watch::channel(false);
+        for _ in 0..8 {
+            emissions
+                .send(Emission::new(vec![tick_draft(Timestamp::now())]))
+                .await
+                .expect("the queue accepts the emission");
+        }
+
+        let _ = shutdown.send(true);
+        absorb(records.clone(), drafts, listener).await;
+
+        assert_eq!(buffered(&records).await, 8);
+        drop(emissions);
+        buffer.close().await.expect("the buffer closes");
+    }
+
+    #[tokio::test]
     async fn an_emission_awaiting_a_commit_is_acknowledged_once_it_is_buffered() {
         let state = TempState::new("commit");
         let buffer = open_buffer(&state);
@@ -558,7 +602,7 @@ mod tests {
         let absorbing = tokio::spawn(absorb(records.clone(), drafts, listener));
 
         let (emission, committed) =
-            Emission::awaiting_commit(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))]);
+            Emission::awaiting_commit(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))], None);
         emissions.send(emission).await.expect("the writer listens");
 
         committed.await.expect("the record was acknowledged");

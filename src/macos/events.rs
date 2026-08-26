@@ -84,15 +84,19 @@ pub enum MacEvent {
         application: RunningApplication,
     },
     FocusedWindowChanged {
+        #[cfg_attr(not(test), allow(dead_code))]
         pid: i32,
     },
     TitleChanged {
+        #[cfg_attr(not(test), allow(dead_code))]
         pid: i32,
     },
     WindowCreated {
+        #[cfg_attr(not(test), allow(dead_code))]
         pid: i32,
     },
     WindowDestroyed {
+        #[cfg_attr(not(test), allow(dead_code))]
         pid: i32,
     },
     DisplaysReconfigured,
@@ -128,7 +132,7 @@ struct RunLoopRef(CFRetained<CFRunLoop>);
 
 unsafe impl Send for RunLoopRef {}
 
-struct SourceRef(CFRetained<CFRunLoopSource>);
+struct SourceRef(#[cfg_attr(not(test), allow(dead_code))] CFRetained<CFRunLoopSource>);
 
 unsafe impl Send for SourceRef {}
 
@@ -142,6 +146,7 @@ struct ObserverRegistration {
     observer: CFRetained<AXObserver>,
     element: CFRetained<AXUIElement>,
     run_loop: CFRetained<CFRunLoop>,
+    #[allow(dead_code)]
     inbox: Arc<Inbox>,
 }
 
@@ -166,7 +171,9 @@ impl Drop for ObserverRegistration {
 
 pub struct EventThread {
     run_loop: RunLoopRef,
+    #[cfg_attr(not(test), allow(dead_code))]
     source: SourceRef,
+    #[cfg_attr(not(test), allow(dead_code))]
     inbox: Arc<Inbox>,
     thread: Option<JoinHandle<()>>,
 }
@@ -186,6 +193,7 @@ impl EventThread {
         Self::start(sender, RegisterSystemSources::No, scripted)
     }
 
+    #[cfg(test)]
     pub fn spawn_without_system_sources(
         sender: UnboundedSender<MacEvent>,
     ) -> std::io::Result<Self> {
@@ -224,6 +232,7 @@ impl EventThread {
         })
     }
 
+    #[cfg(test)]
     pub fn inject(&self, event: MacEvent) {
         let Ok(mut injected) = self.inbox.injected.lock() else {
             tracing::error!("the injection queue is poisoned");

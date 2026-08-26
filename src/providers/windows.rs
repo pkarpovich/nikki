@@ -299,13 +299,15 @@ async fn wait_until(deadline: Option<Instant>) {
 }
 
 async fn deliver_sleep(out: &Sender<Emission>, acknowledgement: SleepAcknowledgement) {
-    let (emission, committed) = Emission::awaiting_commit(vec![marker(Kind::Sleep)]);
+    let (emission, committed) = Emission::awaiting_commit(vec![marker(Kind::Sleep)], None);
     if out.send(emission).await.is_err() {
         acknowledgement.acknowledge();
         return;
     }
-    if timeout(SLEEP_FLUSH_BUDGET, committed).await.is_err() {
-        tracing::warn!("the sleep record was not committed within the budget");
+    match timeout(SLEEP_FLUSH_BUDGET, committed).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => tracing::error!("the sleep record was not buffered"),
+        Err(_) => tracing::warn!("the sleep record was not committed within the budget"),
     }
     acknowledgement.acknowledge();
 }

@@ -252,7 +252,10 @@ mod tests {
     fn an_active_session_in_an_inactive_workspace_is_never_reported() {
         let mut tree = captured();
         let workspaces = workspaces_of(&mut tree);
-        workspaces[1]["active"] = Value::Bool(false);
+        assert_eq!(workspaces[1]["active"], Value::Bool(true));
+        for session in sessions_of(&mut workspaces[1]) {
+            session["active"] = Value::Bool(false);
+        }
         for session in sessions_of(&mut workspaces[0]) {
             session["active"] = Value::Bool(true);
         }

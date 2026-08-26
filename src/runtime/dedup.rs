@@ -27,7 +27,7 @@ pub fn browser_key(device: &str, profile: &str, generation: u64, visit_id: i64) 
     ])
 }
 
-fn key(fields: &[&str]) -> String {
+pub fn key(fields: &[&str]) -> String {
     let digest = Sha256::digest(fields.join(UNIT_SEPARATOR).as_bytes());
     let mut hex = String::with_capacity(KEY_HEX_CHARS);
     for byte in &digest[..KEY_HEX_CHARS / 2] {

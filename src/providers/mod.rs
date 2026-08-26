@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::config::Config;
 use crate::runtime::{Cursor, RecordDraft};
@@ -38,24 +39,20 @@ impl Emission {
         }
     }
 
-    pub fn with_cursor(records: Vec<RecordDraft>, cursor: Cursor) -> Emission {
-        Emission {
-            records,
-            cursor: Some(cursor),
-            committed: None,
-        }
-    }
-
-    pub fn awaiting_commit(records: Vec<RecordDraft>) -> (Emission, oneshot::Receiver<()>) {
+    pub fn awaiting_commit(
+        records: Vec<RecordDraft>,
+        cursor: Option<Cursor>,
+    ) -> (Emission, oneshot::Receiver<()>) {
         let (committed, receipt) = oneshot::channel();
         let emission = Emission {
             records,
-            cursor: None,
+            cursor,
             committed: Some(committed),
         };
         (emission, receipt)
     }
 
+    #[cfg(test)]
     pub fn commit(self) {
         let Emission { committed, .. } = self;
         let Some(committed) = committed else {
@@ -89,6 +86,14 @@ impl Default for Backoff {
     }
 }
 
+struct Attempt(JoinHandle<Result<(), ProviderError>>);
+
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub async fn supervise<P: Provider + Send + 'static>(
     provider: P,
     ctx: Ctx,
@@ -101,17 +106,17 @@ pub async fn supervise<P: Provider + Send + 'static>(
     let mut pause = start;
 
     loop {
-        let attempt = {
+        let mut attempt = {
             let provider = Arc::clone(&provider);
             let ctx = ctx.clone();
             let out = out.clone();
-            tokio::spawn(async move {
+            Attempt(tokio::spawn(async move {
                 let mut provider = provider.lock().await;
                 provider.run(ctx, out).await
-            })
+            }))
         };
 
-        match attempt.await {
+        match (&mut attempt.0).await {
             Ok(Ok(())) => {
                 tracing::info!(
                     provider = name,
@@ -224,6 +229,27 @@ pub(crate) mod tests {
         }
     }
 
+    struct Ticking {
+        ticks: Arc<AtomicUsize>,
+    }
+
+    impl Provider for Ticking {
+        fn name(&self) -> &'static str {
+            "ticking"
+        }
+
+        async fn run(
+            &mut self,
+            _ctx: Ctx,
+            _out: mpsc::Sender<Emission>,
+        ) -> Result<(), ProviderError> {
+            loop {
+                self.ticks.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
     fn quick_backoff() -> Backoff {
         Backoff {
             start: Duration::from_millis(1),
@@ -272,9 +298,38 @@ pub(crate) mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn aborting_the_supervisor_stops_the_provider_rather_than_detaching_it() {
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let (out, _inbox) = mpsc::channel(4);
+        let supervisor = tokio::spawn(supervise(
+            Ticking {
+                ticks: Arc::clone(&ticks),
+            },
+            test_ctx(30),
+            out,
+            quick_backoff(),
+        ));
+
+        while ticks.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        supervisor.abort();
+        let _ = supervisor.await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let stopped_at = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            stopped_at,
+            "the provider kept running after its supervisor was aborted"
+        );
+    }
+
     #[test]
     fn an_emission_awaiting_a_commit_is_released_by_it() {
-        let (emission, receipt) = Emission::awaiting_commit(Vec::new());
+        let (emission, receipt) = Emission::awaiting_commit(Vec::new(), None);
         emission.commit();
         assert!(receipt.blocking_recv().is_ok());
     }

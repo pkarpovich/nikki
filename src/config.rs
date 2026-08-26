@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use url::Url;
 
+use crate::runtime::buffer::OVERFLOW_HEADROOM_BYTES;
+
 const TICK_INTERVAL_MIN: i64 = 1;
 const TICK_INTERVAL_MAX: i64 = 3600;
+const HISTORY_POLL_INTERVAL_MIN: u64 = 1;
 
 const DEFAULT_CONFIG_RELATIVE: &str = ".config/nikki/config.toml";
 const DEFAULT_STATE_RELATIVE: &str = "Library/Application Support/nikki";
@@ -185,6 +188,34 @@ fn parse(text: &str, path: &Path, state_dir: &Path) -> Result<Config, ConfigErro
         });
     }
 
+    if history_poll_interval < HISTORY_POLL_INTERVAL_MIN {
+        return Err(ConfigError::Invalid {
+            field: "history_poll_interval",
+            reason: format!(
+                "{history_poll_interval} is below {HISTORY_POLL_INTERVAL_MIN} second, and a poll timer of zero panics the browser history provider on every restart"
+            ),
+        });
+    }
+
+    let Buffer {
+        max_rows,
+        max_bytes,
+    } = buffer;
+    if max_rows < 1 {
+        return Err(ConfigError::Invalid {
+            field: "buffer.max_rows",
+            reason: "must be at least 1 row, because a cap of zero evicts every record as it arrives and ships nothing but overflow markers".to_string(),
+        });
+    }
+    if max_bytes <= OVERFLOW_HEADROOM_BYTES {
+        return Err(ConfigError::Invalid {
+            field: "buffer.max_bytes",
+            reason: format!(
+                "must exceed the {OVERFLOW_HEADROOM_BYTES} bytes held back for the overflow record, because a smaller cap evicts every record as it arrives"
+            ),
+        });
+    }
+
     Ok(Config {
         service_url,
         device,
@@ -236,6 +267,14 @@ fn service_url_from(value: &str) -> Result<Url, ConfigError> {
         return Err(ConfigError::Invalid {
             field,
             reason: format!("`{value}` has an empty host"),
+        });
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(ConfigError::Invalid {
+            field,
+            reason: format!(
+                "`{value}` carries a query or fragment, and the records path is appended to it, which would post to the wrong url"
+            ),
         });
     }
     Ok(url)
@@ -437,6 +476,57 @@ drop = ["title"]
                     assert!(reason.contains("[1, 3600]"), "reason was {reason}");
                 }
                 other => panic!("expected an invalid tick_interval, got {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_poll_interval_of_zero_names_the_field_rather_than_panicking_the_provider() {
+        let error = parse_text(&with_line("history_poll_interval = 0"))
+            .expect_err("a zero poll interval is rejected");
+        match error {
+            ConfigError::Invalid { field, .. } => assert_eq!(field, "history_poll_interval"),
+            other => panic!("expected an invalid history_poll_interval, got {other}"),
+        }
+        let lowest =
+            parse_text(&with_line("history_poll_interval = 1")).expect("one second is accepted");
+        assert_eq!(lowest.history_poll_interval, 1);
+    }
+
+    #[test]
+    fn a_buffer_cap_that_would_evict_every_record_names_the_field() {
+        let cases = [
+            ("buffer.max_rows", "[buffer]\nmax_rows = 0\n"),
+            ("buffer.max_bytes", "[buffer]\nmax_bytes = 512\n"),
+        ];
+        for (field, section) in cases {
+            let text = format!("{HEAD}{BROWSER}\n{section}");
+            let error = parse_text(&text).expect_err("a degenerate cap is rejected");
+            match error {
+                ConfigError::Invalid { field: named, .. } => assert_eq!(named, field),
+                other => panic!("expected `{field}` to be reported invalid, got {other}"),
+            }
+        }
+        let smallest = parse_text(&format!(
+            "{HEAD}{BROWSER}\n[buffer]\nmax_rows = 1\nmax_bytes = 513\n"
+        ))
+        .expect("the smallest usable caps are accepted");
+        assert_eq!(smallest.buffer.max_rows, 1);
+        assert_eq!(smallest.buffer.max_bytes, 513);
+    }
+
+    #[test]
+    fn a_service_url_carrying_a_query_or_fragment_names_the_field() {
+        let cases = [
+            "service_url = \"http://alpha:8080/?token=secret\"",
+            "service_url = \"http://alpha:8080/ingest#here\"",
+        ];
+        for case in cases {
+            let text = format!("{case}\ndevice = \"mbp-21\"\n[browser]\nprofile = \"MBP_21\"\n");
+            let error = parse_text(&text).expect_err("a query or fragment is rejected");
+            match error {
+                ConfigError::Invalid { field, .. } => assert_eq!(field, "service_url"),
+                other => panic!("expected `service_url` to be reported invalid, got {other}"),
             }
         }
     }
