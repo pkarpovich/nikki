@@ -624,11 +624,11 @@ max_bytes = 536870912
 - Create: `src/window/mod.rs`, `src/window/visibility.rs`
 - Modify: `src/main.rs`
 
-- [ ] declare `mod window;` in `main.rs` and `mod visibility;` in `src/window/mod.rs`
-- [ ] write the tests first from fixture rectangles: window wholly inside one display; wholly outside every display; straddling two displays with unequal overlap, asserting the larger one wins; straddling with an exact tie, asserting the lower index wins; intersecting exactly one pixel; intersecting exactly at the 20% threshold from both sides; layer non-zero; a window whose display is absent from the display list
-- [ ] implement the pure resolver over window and display rectangles, returning the visible set with each window's display and front-to-back index `z`
-- [ ] a window intersecting no listed display is not visible, and the case is logged rather than silently dropped
-- [ ] run the per-task gate - must pass before Task 4
+- [x] declare `mod window;` in `main.rs` and `mod visibility;` in `src/window/mod.rs`
+- [x] write the tests first from fixture rectangles: window wholly inside one display; wholly outside every display; straddling two displays with unequal overlap, asserting the larger one wins; straddling with an exact tie, asserting the lower index wins; intersecting exactly one pixel; intersecting exactly at the 20% threshold from both sides; layer non-zero; a window whose display is absent from the display list
+- [x] implement the pure resolver over window and display rectangles, returning the visible set with each window's display and front-to-back index `z`
+- [x] a window intersecting no listed display is not visible, and the case is logged rather than silently dropped
+- [x] run the per-task gate - must pass before Task 4
 
 ### Task 4: Buffer, sequence and cursors
 

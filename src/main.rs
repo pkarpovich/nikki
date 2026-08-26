@@ -1,6 +1,8 @@
 mod config;
 #[allow(dead_code)]
 mod macos;
+#[allow(dead_code)]
+mod window;
 
 use std::process::ExitCode;
 
