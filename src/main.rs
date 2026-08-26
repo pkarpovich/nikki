@@ -11,6 +11,8 @@ use std::process::ExitCode;
 use argh::FromArgs;
 
 use crate::config::Config;
+use crate::runtime::Pipeline;
+use crate::runtime::ship::endpoint;
 
 /// nikki captures what happens on this Mac and ships it to the nikki service.
 #[derive(FromArgs)]
@@ -57,6 +59,22 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    let pipeline = match Pipeline::open(&config) {
+        Ok(pipeline) => pipeline,
+        Err(error) => {
+            tracing::error!(%error, "the runtime could not start");
+            return ExitCode::FAILURE;
+        }
+    };
+    match endpoint(&config.service_url) {
+        Ok(endpoint) => tracing::info!(%endpoint, "records will be shipped here"),
+        Err(error) => tracing::error!(%error, "the records endpoint is not usable"),
+    }
+
     tracing::info!("no providers are registered yet");
+    if let Err(error) = pipeline.close().await {
+        tracing::error!(%error, "the runtime did not shut down cleanly");
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }

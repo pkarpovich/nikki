@@ -305,7 +305,7 @@ fn default_max_bytes() -> u64 {
     536_870_912
 }
 
-fn default_redact() -> Vec<RedactRule> {
+pub fn default_redact() -> Vec<RedactRule> {
     vec![RedactRule {
         url_host: Some("*".to_string()),
         keep: Some(Keep::Host),

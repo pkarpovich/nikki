@@ -8,7 +8,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
+use super::redact::Redactor;
 use super::{Cursor, Envelope, KeySource, Kind, Provider, RecordDraft, Timestamp};
+use crate::config::RedactRule;
 
 pub const DATABASE_FILE: &str = "buffer.db";
 pub const DEAD_LETTER_MAX_ROWS: u64 = 5_000;
@@ -71,6 +73,7 @@ pub struct BufferConfig {
     pub device: String,
     pub max_rows: u64,
     pub max_bytes: u64,
+    pub redact: Vec<RedactRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +95,7 @@ impl Buffer {
             device,
             max_rows,
             max_bytes,
+            redact,
         } = config;
         if let Err(source) = fs::create_dir_all(&state_dir) {
             return Err(BufferError::StateDir {
@@ -105,10 +109,11 @@ impl Buffer {
             max_rows,
             max_bytes,
         };
+        let redactor = Redactor::new(&redact);
         let (commands, inbox) = mpsc::unbounded_channel();
         let worker = std::thread::Builder::new()
             .name("nikki-buffer".to_owned())
-            .spawn(move || serve(connection, device, caps, inbox));
+            .spawn(move || serve(connection, device, caps, redactor, inbox));
         let worker = match worker {
             Ok(worker) => worker,
             Err(source) => return Err(BufferError::Worker { source }),
@@ -252,6 +257,7 @@ fn serve(
     mut connection: Connection,
     device: String,
     caps: Caps,
+    redactor: Redactor,
     mut inbox: mpsc::UnboundedReceiver<Command>,
 ) {
     loop {
@@ -264,7 +270,14 @@ fn serve(
                 cursor,
                 reply,
             } => {
-                let _ = reply.send(enqueue(&mut connection, &device, caps, drafts, cursor));
+                let _ = reply.send(enqueue(
+                    &mut connection,
+                    &device,
+                    caps,
+                    &redactor,
+                    drafts,
+                    cursor,
+                ));
             }
             Command::TakeBatch { limit, reply } => {
                 let _ = reply.send(take_batch(&connection, limit));
@@ -319,6 +332,7 @@ fn enqueue(
     connection: &mut Connection,
     device: &str,
     caps: Caps,
+    redactor: &Redactor,
     drafts: Vec<RecordDraft>,
     cursor: Option<Cursor>,
 ) -> Result<Vec<Envelope>, BufferError> {
@@ -327,7 +341,8 @@ fn enqueue(
     let mut seq = read_seq(&transaction)?;
     let mut sealed = Vec::with_capacity(drafts.len());
 
-    for draft in drafts {
+    for mut draft in drafts {
+        redactor.apply(&mut draft.payload);
         seq += 1;
         let envelope = draft.into_envelope(device, seq);
         insert_pending(&transaction, &envelope, &created_at)?;
@@ -676,6 +691,7 @@ mod tests {
             device: "mbp-21".to_string(),
             max_rows,
             max_bytes,
+            redact: crate::config::default_redact(),
         }
     }
 

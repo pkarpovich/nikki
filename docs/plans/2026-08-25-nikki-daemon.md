@@ -657,14 +657,14 @@ max_bytes = 536870912
 - Create: `src/runtime/ship.rs`, `src/runtime/redact.rs`
 - Modify: `src/runtime/mod.rs`, `src/runtime/buffer.rs`, `Cargo.toml`
 
-- [ ] add the HTTP client crate to `Cargo.toml`; declare `mod ship; mod redact;` in `src/runtime/mod.rs`
-- [ ] `redact.rs`: rules applied to the envelope **before it is buffered**; URL default host-only **keeping the port**, per-host opt-in, genuinely host-less URLs (`file://`, `data:`) reduced to their scheme while `chrome-extension://` goes through the ordinary host rule, `payload.path` never treated as a URL, and `drop = ["title"]` applied to `visible[]` entries as well as the top-level title
-- [ ] `ship.rs`: batches of up to 500, a 10s connect and 30s total deadline on every request, and the outcome split from the wire contract - 200 with a well-formed body deletes the whole batch and logs each rejection; a 200 whose body does not parse or whose counts do not add up is treated as 5xx; 401/403/404/405 keep the batch and back off, logging at error, because those are configuration rather than bad data; other 4xx dead-letter; 413 halves down to a floor of 10 then dead-letters; 5xx and transport errors back off from 1s to 5m
-- [ ] wire the pipeline as redact -> enqueue (which keys) -> ship, so redaction is on the live path and nothing unredacted is written to disk
-- [ ] write tests for each redaction rule, including a `file:///` reduced to scheme, a `chrome-extension://` keeping its extension id, a `localhost:3000` keeping its port, and `payload.path` surviving whole
-- [ ] write a test asserting no redacted path or query appears in the buffered envelope - constructed so it can fail, by redacting a URL whose path is a distinctive token and grepping the whole serialised envelope for that token
-- [ ] write tests for every branch of the outcome split, including a 200 carrying rejections, a 200 with a malformed body, a 404 that keeps the batch, a 400 that dead-letters, and a 413 halving to the floor
-- [ ] run the per-task gate - must pass before Task 6
+- [x] add the HTTP client crate to `Cargo.toml`; declare `mod ship; mod redact;` in `src/runtime/mod.rs`
+- [x] `redact.rs`: rules applied to the envelope **before it is buffered**; URL default host-only **keeping the port**, per-host opt-in, genuinely host-less URLs (`file://`, `data:`) reduced to their scheme while `chrome-extension://` goes through the ordinary host rule, `payload.path` never treated as a URL, and `drop = ["title"]` applied to `visible[]` entries as well as the top-level title
+- [x] `ship.rs`: batches of up to 500, a 10s connect and 30s total deadline on every request, and the outcome split from the wire contract - 200 with a well-formed body deletes the whole batch and logs each rejection; a 200 whose body does not parse or whose counts do not add up is treated as 5xx; 401/403/404/405 keep the batch and back off, logging at error, because those are configuration rather than bad data; other 4xx dead-letter; 413 halves down to a floor of 10 then dead-letters; 5xx and transport errors back off from 1s to 5m
+- [x] wire the pipeline as redact -> enqueue (which keys) -> ship, so redaction is on the live path and nothing unredacted is written to disk
+- [x] write tests for each redaction rule, including a `file:///` reduced to scheme, a `chrome-extension://` keeping its extension id, a `localhost:3000` keeping its port, and `payload.path` surviving whole
+- [x] write a test asserting no redacted path or query appears in the buffered envelope - constructed so it can fail, by redacting a URL whose path is a distinctive token and grepping the whole serialised envelope for that token
+- [x] write tests for every branch of the outcome split, including a 200 carrying rejections, a 200 with a malformed body, a 404 that keeps the batch, a 400 that dead-letters, and a 413 halving to the floor
+- [x] run the per-task gate - must pass before Task 6
 
 ### Task 6: Extractors
 

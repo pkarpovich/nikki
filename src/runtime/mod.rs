@@ -1,11 +1,16 @@
 pub mod buffer;
 pub mod dedup;
+pub mod redact;
+pub mod ship;
 
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
+use crate::config::Config;
+use crate::runtime::buffer::{Buffer, BufferConfig, BufferError, BufferHandle};
 use crate::runtime::dedup::{browser_key, windows_key};
+use crate::runtime::ship::{HttpTransport, ShipError, Shipper};
 
 const RFC3339_MILLIS: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
 const UNREPRESENTABLE_INSTANT: &str = "1970-01-01T00:00:00.000Z";
@@ -164,6 +169,54 @@ pub struct Envelope {
     pub dedup_key: String,
     pub degraded: bool,
     pub payload: Value,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeError {
+    #[error(transparent)]
+    Buffer(#[from] BufferError),
+    #[error(transparent)]
+    Ship(#[from] ShipError),
+}
+
+pub struct Pipeline {
+    buffer: Buffer,
+    shipper: Shipper<HttpTransport>,
+}
+
+impl Pipeline {
+    pub fn open(config: &Config) -> Result<Pipeline, RuntimeError> {
+        let Config {
+            service_url,
+            device,
+            buffer,
+            redact,
+            state_dir,
+            ..
+        } = config;
+        let buffer = Buffer::open(BufferConfig {
+            state_dir: state_dir.clone(),
+            device: device.clone(),
+            max_rows: buffer.max_rows,
+            max_bytes: buffer.max_bytes,
+            redact: redact.clone(),
+        })?;
+        let shipper = Shipper::new(buffer.handle(), HttpTransport::new(service_url)?);
+        Ok(Pipeline { buffer, shipper })
+    }
+
+    pub fn records(&self) -> BufferHandle {
+        self.buffer.handle()
+    }
+
+    pub fn shipper(&mut self) -> &mut Shipper<HttpTransport> {
+        &mut self.shipper
+    }
+
+    pub async fn close(self) -> Result<(), RuntimeError> {
+        self.buffer.close().await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
