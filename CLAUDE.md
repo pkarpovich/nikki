@@ -1,13 +1,13 @@
 # nikki daemon conventions
 
-The plan of record is `docs/plans/2026-08-25-nikki-daemon.md`. It carries the wire contract, the
-permission model and the verified API behaviour; this file carries only the rules that govern how
-code is written here.
+`README.md` carries the wire contract, the permission model and the provider model; this file carries
+only the rules that govern how code is written here. The plan that built the daemon, with the
+verified API behaviour behind every decision, is `docs/plans/completed/2026-08-25-nikki-daemon.md`.
 
 ## Everything runs natively on macOS
 
-From Task 2 onward the crate links Apple frameworks, so it does not build on any other target and
-cross-compiling needs the Apple SDK. A gate that cannot link is a gate that proves nothing.
+The crate links Apple frameworks, so it does not build on any other target and cross-compiling needs
+the Apple SDK. A gate that cannot link is a gate that proves nothing.
 
 ## Unsafe containment
 

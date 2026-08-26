@@ -772,9 +772,9 @@ max_bytes = 536870912
 **Files:**
 - Modify: `README.md`, `CLAUDE.md`
 
-- [ ] README: the permissions and why each is needed, the config file with every field, the provider model and how to add one, and the wire contract
-- [ ] CLAUDE.md: the unsafe-containment rule, the inline-test rule, the declare-every-module rule, the per-task gate
-- [ ] move this plan to `docs/plans/completed/`
+- [x] README: the permissions and why each is needed, the config file with every field, the provider model and how to add one, and the wire contract
+- [x] CLAUDE.md: the unsafe-containment rule, the inline-test rule, the declare-every-module rule, the per-task gate
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
