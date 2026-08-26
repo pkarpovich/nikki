@@ -584,17 +584,17 @@ max_bytes = 536870912
 - Create: `Cargo.toml`, `src/main.rs`, `src/config.rs`
 - Create: `.mise.toml`, `Info.plist.template`, `scripts/bundle.sh`, `CLAUDE.md`, `README.md`
 
-- [ ] `.mise.toml` pinning rust 1.98 with `rustfmt` and `clippy`, and tasks `build`, `test`, `lint` (`cargo clippy --all-targets -- -D warnings`), `fmt`, and `check` running fmt-check, clippy and tests in sequence
-- [ ] cargo project with tokio, tracing, serde, argh; crates at their latest releases, verified at add time
-- [ ] declare `mod config;` in `main.rs`
-- [ ] config from `~/.config/nikki/config.toml` with every field from Technical Details and its default; an unparseable file is a startup error naming the field
-- [ ] reject `tick_interval` outside `[1, 3600]` at startup with a named error - the server rejects such ticks per-record and the daemon then deletes them, so shipping them destroys the whole window stream while looking healthy
-- [ ] require `service_url` (absolute http/https), `device` (non-empty) and `browser.profile` (non-empty) at startup, each failure naming the field; honour `NIKKI_CONFIG` and `NIKKI_STATE_DIR` overrides
-- [ ] `Info.plist.template` with `LSUIElement` true, a stable `CFBundleIdentifier`, `CFBundleExecutable`, `CFBundleName`, `CFBundleVersion`, `CFBundleShortVersionString`, `CFBundlePackageType` `APPL`, `LSMinimumSystemVersion`, and **`NSAppleEventsUsageDescription`** - without that string macOS never shows the Automation prompt, the Dia extractor is denied for the life of the bundle, and the only symptom is a `-1743` in the log
-- [ ] `scripts/bundle.sh` assembling `nikki.app` from the built binary and the plist template; signing is out of scope here
-- [ ] `CLAUDE.md` recording the conventions, above all the unsafe-containment rule, the inline-test rule and the declare-every-module rule
-- [ ] write tests for config defaults, full parse, each error case, both ends of the `tick_interval` bound, each missing required field, and that `NIKKI_CONFIG`/`NIKKI_STATE_DIR` are honoured
-- [ ] run the per-task gate - must pass before Task 2
+- [x] `.mise.toml` pinning rust 1.98 with `rustfmt` and `clippy`, and tasks `build`, `test`, `lint` (`cargo clippy --all-targets -- -D warnings`), `fmt`, and `check` running fmt-check, clippy and tests in sequence
+- [x] cargo project with tokio, tracing, serde, argh; crates at their latest releases, verified at add time
+- [x] declare `mod config;` in `main.rs`
+- [x] config from `~/.config/nikki/config.toml` with every field from Technical Details and its default; an unparseable file is a startup error naming the field
+- [x] reject `tick_interval` outside `[1, 3600]` at startup with a named error - the server rejects such ticks per-record and the daemon then deletes them, so shipping them destroys the whole window stream while looking healthy
+- [x] require `service_url` (absolute http/https), `device` (non-empty) and `browser.profile` (non-empty) at startup, each failure naming the field; honour `NIKKI_CONFIG` and `NIKKI_STATE_DIR` overrides
+- [x] `Info.plist.template` with `LSUIElement` true, a stable `CFBundleIdentifier`, `CFBundleExecutable`, `CFBundleName`, `CFBundleVersion`, `CFBundleShortVersionString`, `CFBundlePackageType` `APPL`, `LSMinimumSystemVersion`, and **`NSAppleEventsUsageDescription`** - without that string macOS never shows the Automation prompt, the Dia extractor is denied for the life of the bundle, and the only symptom is a `-1743` in the log
+- [x] `scripts/bundle.sh` assembling `nikki.app` from the built binary and the plist template; signing is out of scope here
+- [x] `CLAUDE.md` recording the conventions, above all the unsafe-containment rule, the inline-test rule and the declare-every-module rule
+- [x] write tests for config defaults, full parse, each error case, both ends of the `tick_interval` bound, each missing required field, and that `NIKKI_CONFIG`/`NIKKI_STATE_DIR` are honoured
+- [x] run the per-task gate - must pass before Task 2
 
 ### Task 2: The macos module - all unsafe lives here
 
