@@ -1,0 +1,37 @@
+{
+  "browser": {
+    "enabled_labs_experiments": [],
+    "shortcut_migration_version": "142.0.7444.60"
+  },
+  "profile": {
+    "info_cache": {
+      "Default": {
+        "active_time": 1787666156.0,
+        "gaia_id": "",
+        "is_using_default_avatar": true,
+        "name": "MBP_21"
+      },
+      "Profile 1": {
+        "active_time": 1787579756.0,
+        "name": "MBA_22"
+      },
+      "Profile 2": {
+        "active_time": 1787493356.0,
+        "name": "Intapp"
+      },
+      "Profile 3": {
+        "active_time": 1787406956.0,
+        "is_ephemeral": true
+      },
+      "Profile 4": {
+        "active_time": 1787320556.0,
+        "name": 4
+      }
+    },
+    "last_active_profiles": ["Default"],
+    "last_used": "Default",
+    "profiles_order": ["Default", "Profile 1", "Profile 2"]
+  },
+  "variations_seed_signature": "anonymised",
+  "was_restarted": false
+}

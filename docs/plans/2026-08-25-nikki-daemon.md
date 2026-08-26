@@ -709,24 +709,24 @@ max_bytes = 536870912
 - Create: `fixtures/history_sample.db`
 - Modify: `src/providers/mod.rs`
 
-- [ ] declare `mod browser_history;` in `src/providers/mod.rs`
-- [ ] resolve the configured display name to a directory through `Local State` on **every** poll, reading only `profile.info_cache` and tolerating unknown fields; a name absent at **startup** is a fatal error listing the names that exist, while a name that disappears **at poll time** logs a warn and skips that poll rather than killing a running daemon
-- [ ] read by cloning `History` and `History-journal` with `clonefile` into a temporary directory, opening the copy read-only, running `PRAGMA quick_check`, and deleting the copy after the read; anything other than `ok` discards the copy and skips the poll without advancing the cursor
-- [ ] the captured query from Context, paged by `visits.id`, 5000 rows at a time, reading `id > cursor - revisit_window` so a filled-in `visit_duration` is picked up
-- [ ] **emit a re-read row only when its `title`, `transition` or `visit_duration` differs from the last shipped values for that `visits.id`**; persist those values per profile beside the cursor, pruned to the same window
-- [ ] convert `visit_time` with `visit_time / 1000000 - 11644473600` and `visit_duration` with `visit_duration / 1000`; store `transition` raw
-- [ ] first run starts from `max(id) - revisit_window` rather than backfilling the whole history
-- [ ] `max(id) < cursor` means the database was replaced: log at warn, increment the per-profile `generation`, reset the cursor and clear the last-shipped map - the generation is part of the dedup key, so without incrementing it the reused ids would collide with stored visits and the server would silently merge two unrelated ones
-- [ ] cursor and generation per profile, emitted together with the records they cover
-- [ ] poll on `history_poll_interval` (default 5m)
-- [ ] commit a small anonymised history database and a `Local State` fixture
-- [ ] write tests for both conversions against the captured live values (`22874541` microseconds becomes `22874` ms), paging across the limit, cursor advance, first-run cursor selection, and `Local State` parsing including an entry with a missing `name` and an unknown top-level field
-- [ ] write a test that an unchanged re-read row is **not** emitted while one whose duration changed **is**
-- [ ] write a test that a reset increments the generation and that keys before and after the reset differ for the same `visits.id`
-- [ ] write a test that a `file:///` row ships with `url` reduced to `file:///` and is not dropped
-- [ ] write a clone test that actually exercises the lock: hold an **exclusive** lock on the source (`BEGIN EXCLUSIVE`), assert a direct read fails, then assert the clone path succeeds - a test using an ordinary reader proves nothing, since SQLite readers do not block readers
-- [ ] write a test that a copy failing `quick_check` is discarded and the cursor does not move
-- [ ] run the per-task gate - must pass before Task 9
+- [x] declare `mod browser_history;` in `src/providers/mod.rs`
+- [x] resolve the configured display name to a directory through `Local State` on **every** poll, reading only `profile.info_cache` and tolerating unknown fields; a name absent at **startup** is a fatal error listing the names that exist, while a name that disappears **at poll time** logs a warn and skips that poll rather than killing a running daemon
+- [x] read by cloning `History` and `History-journal` with `clonefile` into a temporary directory, opening the copy read-only, running `PRAGMA quick_check`, and deleting the copy after the read; anything other than `ok` discards the copy and skips the poll without advancing the cursor
+- [x] the captured query from Context, paged by `visits.id`, 5000 rows at a time, reading `id > cursor - revisit_window` so a filled-in `visit_duration` is picked up
+- [x] **emit a re-read row only when its `title`, `transition` or `visit_duration` differs from the last shipped values for that `visits.id`**; persist those values per profile beside the cursor, pruned to the same window
+- [x] convert `visit_time` with `visit_time / 1000000 - 11644473600` and `visit_duration` with `visit_duration / 1000`; store `transition` raw
+- [x] first run starts from `max(id) - revisit_window` rather than backfilling the whole history
+- [x] `max(id) < cursor` means the database was replaced: log at warn, increment the per-profile `generation`, reset the cursor and clear the last-shipped map - the generation is part of the dedup key, so without incrementing it the reused ids would collide with stored visits and the server would silently merge two unrelated ones
+- [x] cursor and generation per profile, emitted together with the records they cover
+- [x] poll on `history_poll_interval` (default 5m)
+- [x] commit a small anonymised history database and a `Local State` fixture
+- [x] write tests for both conversions against the captured live values (`22874541` microseconds becomes `22874` ms), paging across the limit, cursor advance, first-run cursor selection, and `Local State` parsing including an entry with a missing `name` and an unknown top-level field
+- [x] write a test that an unchanged re-read row is **not** emitted while one whose duration changed **is**
+- [x] write a test that a reset increments the generation and that keys before and after the reset differ for the same `visits.id`
+- [x] write a test that a `file:///` row ships with `url` reduced to `file:///` and is not dropped
+- [x] write a clone test that actually exercises the lock: hold an **exclusive** lock on the source (`BEGIN EXCLUSIVE`), assert a direct read fails, then assert the clone path succeeds - a test using an ordinary reader proves nothing, since SQLite readers do not block readers
+- [x] write a test that a copy failing `quick_check` is discarded and the cursor does not move
+- [x] run the per-task gate - must pass before Task 9
 
 ### Task 9: Wire it together
 
