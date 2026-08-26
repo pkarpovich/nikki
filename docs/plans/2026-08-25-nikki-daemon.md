@@ -638,18 +638,18 @@ max_bytes = 536870912
 
 *Deliberately before the providers: providers persist cursors through the runtime, so building them first would force a stub that the buffer task then rewrites, leaving the provider's only tested behaviour unproven.*
 
-- [ ] add the SQLite crate to `Cargo.toml`; declare `mod runtime;` in `main.rs` and `mod buffer; mod dedup;` in `src/runtime/mod.rs`
-- [ ] `dedup.rs`: the two key formulas from the wire contract, over unit-separator-joined fields, `sha256` truncated to 16 hex characters - it lives here, not with shipping, because the window key hashes `seq` and only this task can produce one
-- [ ] SQLite buffer with the four tables from Technical Details, opened with `journal_mode = WAL` and `busy_timeout = 5000`, all writes serialised through one owner task
-- [ ] `enqueue(records, cursor)` allocates the monotonic `seq` from `meta`, derives each record's `dedup_key` from it, writes the pending envelopes and advances the cursor - **all in one transaction**, returning only after commit
-- [ ] `seq` survives restart and never repeats
-- [ ] `pending` enforces `max_rows` and `max_bytes`, evicting oldest-first until **both** totals are under their limits, then enqueues a `buffer_overflow` record whose payload is exactly the shape pinned in the wire contract - and which is keyed through the same path as any other record, so it carries a real `seq` and `dedup_key`
-- [ ] `dead_letter` has its own separate cap (5 000 rows, 50 MB) evicting its own oldest rows, so unshippable records can never consume the live buffer's budget
-- [ ] `take_batch`, `delete_batch`, `dead_letter` and a synchronous `flush_now` the sleep handler awaits
-- [ ] write tests for: enqueue atomicity (a cursor never advances when the envelope insert fails); seq monotonic across a simulated restart; overflow evicting until both limits are satisfied and emitting exactly one overflow record; the overflow record carrying a non-empty `dedup_key` and a non-zero `seq`; `dead_letter` filling its own cap without evicting a single `pending` row; take and delete round-trip
-- [ ] write a test that two records of the same kind in the same millisecond get different keys
-- [ ] write a concurrency test: both providers enqueueing while the shipper drains, with no `SQLITE_BUSY` surfacing
-- [ ] run the per-task gate - must pass before Task 5
+- [x] add the SQLite crate to `Cargo.toml`; declare `mod runtime;` in `main.rs` and `mod buffer; mod dedup;` in `src/runtime/mod.rs`
+- [x] `dedup.rs`: the two key formulas from the wire contract, over unit-separator-joined fields, `sha256` truncated to 16 hex characters - it lives here, not with shipping, because the window key hashes `seq` and only this task can produce one
+- [x] SQLite buffer with the four tables from Technical Details, opened with `journal_mode = WAL` and `busy_timeout = 5000`, all writes serialised through one owner task
+- [x] `enqueue(records, cursor)` allocates the monotonic `seq` from `meta`, derives each record's `dedup_key` from it, writes the pending envelopes and advances the cursor - **all in one transaction**, returning only after commit
+- [x] `seq` survives restart and never repeats
+- [x] `pending` enforces `max_rows` and `max_bytes`, evicting oldest-first until **both** totals are under their limits, then enqueues a `buffer_overflow` record whose payload is exactly the shape pinned in the wire contract - and which is keyed through the same path as any other record, so it carries a real `seq` and `dedup_key`
+- [x] `dead_letter` has its own separate cap (5 000 rows, 50 MB) evicting its own oldest rows, so unshippable records can never consume the live buffer's budget
+- [x] `take_batch`, `delete_batch`, `dead_letter` and a synchronous `flush_now` the sleep handler awaits
+- [x] write tests for: enqueue atomicity (a cursor never advances when the envelope insert fails); seq monotonic across a simulated restart; overflow evicting until both limits are satisfied and emitting exactly one overflow record; the overflow record carrying a non-empty `dedup_key` and a non-zero `seq`; `dead_letter` filling its own cap without evicting a single `pending` row; take and delete round-trip
+- [x] write a test that two records of the same kind in the same millisecond get different keys
+- [x] write a concurrency test: both providers enqueueing while the shipper drains, with no `SQLITE_BUSY` surfacing
+- [x] run the per-task gate - must pass before Task 5
 
 ### Task 5: Shipping and redaction
 
