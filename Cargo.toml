@@ -5,6 +5,14 @@ edition = "2024"
 
 [dependencies]
 argh = "0.1.19"
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["std", "libc", "HIServices", "AXUIElement", "AXError"] }
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFBase", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow", "CGDirectDisplay", "CGDisplayConfiguration", "CGEvent", "CGEventSource", "CGEventTypes", "CGError", "CGGeometry", "CGBase"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSString", "NSArray", "NSDictionary", "NSNotification", "NSDistributedNotificationCenter", "NSOperation", "NSObjCRuntime", "NSObject"] }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }

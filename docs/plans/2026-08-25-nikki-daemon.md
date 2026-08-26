@@ -602,21 +602,21 @@ max_bytes = 536870912
 - Create: `src/macos/mod.rs`, `src/macos/ax.rs`, `src/macos/window_list.rs`, `src/macos/activity.rs`, `src/macos/events.rs`
 - Modify: `src/main.rs`, `Cargo.toml`
 
-- [ ] add the FFI crates to `Cargo.toml`; declare `mod macos;` in `main.rs` and every file as `mod ax; mod window_list; mod activity; mod events;` in `src/macos/mod.rs`
-- [ ] `ax.rs`: application element, window list, focused window, attribute read with a type-id check before wrapping, `AXDocument`, and `AXUIElementSetMessagingTimeout` applied to every element (0.4s)
-- [ ] release every Copy/Create value on every path including error returns; the attribute reader must release before returning a type mismatch
-- [ ] `window_list.rs`: `CGWindowListCopyWindowInfo` and `CGGetActiveDisplayList` plus `CGDisplayBounds`, returning plain Rust structs with owner pid, owner name, window number, bounds, layer and front-to-back index - **no minimised flag**, since `.optionOnScreenOnly` already excludes minimised windows
-- [ ] `activity.rs`: idle seconds truncated to an integer, key and mouse counters, microphone running state, and the display containing the mouse cursor
-- [ ] `window_list.rs` also exposes `frontmost_application()` and `bundle_id_for_pid(pid) -> Option<String>` over `NSRunningApplication`, with the same release discipline as the rest of the module - `kCGWindowOwnerName` is the display name (`Zed`), not the bundle identifier (`dev.zed.Zed`), and `bundle_id` is a required field on three kinds and rides every `visible[]` entry, so without this the provider must either put `unsafe` outside this module or silently ship the display name, which the server accepts as opaque text while the bundle-id-keyed extractor registry then never matches anything
-- [ ] `events.rs`: the dedicated event thread from Context - own `CFRunLoopGetCurrent()`, add every source to it in `kCFRunLoopDefaultMode`, run `CFRunLoopRun()`, convert each callback into a plain Rust event value onto an mpsc channel, and stop via `CFRunLoopStop` on shutdown
-- [ ] register on that run loop: `NSWorkspace` activation, sleep and wake; distributed lock and unlock; `AXObserver` for focused-window, title, created and destroyed, re-registered when the frontmost application changes; display reconfiguration
-- [ ] the module's public API exposes only safe types; no raw pointer crosses its boundary
-- [ ] write tests for the pure parts: counter differencing including wraparound, event mapping, bounds arithmetic
-- [ ] the `willSleep` handler sends its event with a completion handle and blocks on the flush acknowledgement for at most 2s before returning - the one exception to post-and-return, and the only thing that can delay the sleep transition
-- [ ] callbacks carrying transient state capture it at callback time rather than leaving it to be resampled when the event is drained
-- [ ] write a test that the event thread starts, delivers a synthesised event onto the channel, and stops cleanly on shutdown
-- [ ] write a test that the `willSleep` handler does not return until the acknowledgement arrives, and does return once the 2s budget expires without one
-- [ ] run the per-task gate - must pass before Task 3
+- [x] add the FFI crates to `Cargo.toml`; declare `mod macos;` in `main.rs` and every file as `mod ax; mod window_list; mod activity; mod events;` in `src/macos/mod.rs`
+- [x] `ax.rs`: application element, window list, focused window, attribute read with a type-id check before wrapping, `AXDocument`, and `AXUIElementSetMessagingTimeout` applied to every element (0.4s)
+- [x] release every Copy/Create value on every path including error returns; the attribute reader must release before returning a type mismatch
+- [x] `window_list.rs`: `CGWindowListCopyWindowInfo` and `CGGetActiveDisplayList` plus `CGDisplayBounds`, returning plain Rust structs with owner pid, owner name, window number, bounds, layer and front-to-back index - **no minimised flag**, since `.optionOnScreenOnly` already excludes minimised windows
+- [x] `activity.rs`: idle seconds truncated to an integer, key and mouse counters, microphone running state, and the display containing the mouse cursor
+- [x] `window_list.rs` also exposes `frontmost_application()` and `bundle_id_for_pid(pid) -> Option<String>` over `NSRunningApplication`, with the same release discipline as the rest of the module - `kCGWindowOwnerName` is the display name (`Zed`), not the bundle identifier (`dev.zed.Zed`), and `bundle_id` is a required field on three kinds and rides every `visible[]` entry, so without this the provider must either put `unsafe` outside this module or silently ship the display name, which the server accepts as opaque text while the bundle-id-keyed extractor registry then never matches anything
+- [x] `events.rs`: the dedicated event thread from Context - own `CFRunLoopGetCurrent()`, add every source to it in `kCFRunLoopDefaultMode`, run `CFRunLoopRun()`, convert each callback into a plain Rust event value onto an mpsc channel, and stop via `CFRunLoopStop` on shutdown
+- [x] register on that run loop: `NSWorkspace` activation, sleep and wake; distributed lock and unlock; `AXObserver` for focused-window, title, created and destroyed, re-registered when the frontmost application changes; display reconfiguration
+- [x] the module's public API exposes only safe types; no raw pointer crosses its boundary
+- [x] write tests for the pure parts: counter differencing including wraparound, event mapping, bounds arithmetic
+- [x] the `willSleep` handler sends its event with a completion handle and blocks on the flush acknowledgement for at most 2s before returning - the one exception to post-and-return, and the only thing that can delay the sleep transition
+- [x] callbacks carrying transient state capture it at callback time rather than leaving it to be resampled when the event is drained
+- [x] write a test that the event thread starts, delivers a synthesised event onto the channel, and stops cleanly on shutdown
+- [x] write a test that the `willSleep` handler does not return until the acknowledgement arrives, and does return once the 2s budget expires without one
+- [x] run the per-task gate - must pass before Task 3
 
 ### Task 3: Visibility resolution (test-first)
 
