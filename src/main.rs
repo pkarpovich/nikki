@@ -1,5 +1,7 @@
 mod config;
 #[allow(dead_code)]
+mod extract;
+#[allow(dead_code)]
 mod macos;
 #[allow(dead_code)]
 mod runtime;

@@ -673,16 +673,16 @@ max_bytes = 536870912
 - Create: `fixtures/dia_active_tab.txt`, `fixtures/agterm_tree.json`
 - Modify: `src/main.rs`
 
-- [ ] declare `mod extract;` in `main.rs` and every file in `src/extract/mod.rs`
-- [ ] registry keyed by bundle id, invoked only for the focused application
-- [ ] `document.rs`: the universal `AXDocument` probe keeping only non-empty `file://` values
-- [ ] `dia.rs`: the captured AppleScript verbatim, splitting on `0x1F` into four fields; empty result means not running; parse the trailing `(-NNNN)` from stderr and branch on `-1743` (warn once per process), `-1728`, `-1712` and unknown - all returning empty
-- [ ] `agterm.rs`: resolve `agtermctl` on `PATH` then the bundle path; walk `result.tree.workspaces[].active` then `sessions[].active`; `foreground` is optional and may be `null`; store the file name of `foreground[0]`; no active workspace or session yields empty
-- [ ] every subprocess carries a 2s deadline and is killed when it expires
-- [ ] commit the captured Dia output and agterm JSON from Context as fixtures
-- [ ] write parser tests against both fixtures, including a title containing a comma, a `null` foreground, a tree with no active session, and each AppleScript error code
-- [ ] write a test asserting a hung subprocess yields empty within the deadline rather than blocking
-- [ ] run the per-task gate - must pass before Task 7
+- [x] declare `mod extract;` in `main.rs` and every file in `src/extract/mod.rs`
+- [x] registry keyed by bundle id, invoked only for the focused application
+- [x] `document.rs`: the universal `AXDocument` probe keeping only non-empty `file://` values
+- [x] `dia.rs`: the captured AppleScript verbatim, splitting on `0x1F` into four fields; empty result means not running; parse the trailing `(-NNNN)` from stderr and branch on `-1743` (warn once per process), `-1728`, `-1712` and unknown - all returning empty
+- [x] `agterm.rs`: resolve `agtermctl` on `PATH` then the bundle path; walk `result.tree.workspaces[].active` then `sessions[].active`; `foreground` is optional and may be `null`; store the file name of `foreground[0]`; no active workspace or session yields empty
+- [x] every subprocess carries a 2s deadline and is killed when it expires
+- [x] commit the captured Dia output and agterm JSON from Context as fixtures
+- [x] write parser tests against both fixtures, including a title containing a comma, a `null` foreground, a tree with no active session, and each AppleScript error code
+- [x] write a test asserting a hung subprocess yields empty within the deadline rather than blocking
+- [x] run the per-task gate - must pass before Task 7
 
 ### Task 7: Window provider
 

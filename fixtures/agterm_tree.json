@@ -1,0 +1,99 @@
+{
+  "ok": true,
+  "result": {
+    "tree": {
+      "sidebarVisible": true,
+      "quickVisible": false,
+      "idleMs": 44119,
+      "workspaceFilter": false,
+      "workspaces": [
+        {
+          "id": "839DBFAA-1C3E-4A7F-9E20-6B0C5A1D77F1",
+          "name": "tuclaw",
+          "active": false,
+          "sessions": [
+            {
+              "id": "7320056A-9A11-4F0C-B0D2-2E8B5F6A31C4",
+              "name": "new tuclaw desktop app",
+              "title": "tuclaw: done",
+              "cwd": "/Users/pavel.karpovich/Projects/tuclaw",
+              "active": false,
+              "flagged": true,
+              "split": false,
+              "scratch": false,
+              "overlay": false,
+              "realized": true,
+              "fontSize": 18,
+              "foreground": [
+                "/Users/pavel.karpovich/.local/bin/claude",
+                "--enable-auto-mode",
+                "--resume"
+              ],
+              "restoreCommand": "cd /Users/pavel.karpovich/Projects/tuclaw && claude --resume",
+              "surfaces": [{ "kind": "left", "active": true, "visible": true }]
+            }
+          ]
+        },
+        {
+          "id": "0B4E7C55-2D8A-49B1-8F63-A1D0E2C94B77",
+          "name": "nikki",
+          "active": true,
+          "sessions": [
+            {
+              "id": "C1A9F0D3-77B2-4E58-9C41-0F5D6B8A2E33",
+              "name": "notes",
+              "title": "notes",
+              "cwd": "/Users/pavel.karpovich/Obsidian",
+              "active": false,
+              "flagged": false,
+              "split": false,
+              "scratch": true,
+              "overlay": false,
+              "realized": false,
+              "fontSize": 18,
+              "foreground": null,
+              "restoreCommand": "",
+              "surfaces": []
+            },
+            {
+              "id": "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+              "name": "nikki daemon",
+              "title": "nikki: cargo test",
+              "cwd": "/Users/pavel.karpovich/Projects/nikki",
+              "active": true,
+              "flagged": false,
+              "split": false,
+              "scratch": false,
+              "overlay": false,
+              "realized": true,
+              "fontSize": 18,
+              "foreground": [
+                "/Users/pavel.karpovich/.local/bin/claude",
+                "--enable-auto-mode",
+                "--resume"
+              ],
+              "restoreCommand": "cd /Users/pavel.karpovich/Projects/nikki && claude --resume",
+              "surfaces": [{ "kind": "left", "active": true, "visible": true }]
+            },
+            {
+              "id": "9D3C8A17-4B62-4C05-91E7-8A4F2B6D50C9",
+              "name": "logs",
+              "title": "logs",
+              "cwd": "/var/log",
+              "active": false,
+              "flagged": false,
+              "split": true,
+              "scratch": false,
+              "overlay": false,
+              "realized": true,
+              "fontSize": 18,
+              "foreground": ["/usr/bin/tail", "-f", "system.log"],
+              "restoreCommand": "cd /var/log && tail -f system.log",
+              "surfaces": [{ "kind": "right", "active": false, "visible": true }]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
