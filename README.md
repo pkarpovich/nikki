@@ -192,8 +192,12 @@ deleted, which would destroy the stream on day one before the human has granted 
 the focused window's title and `AXDocument`, then titles for other visible windows, then the
 extractor for the focused bundle, then idle, input counters and microphone state.
 
-Event-driven assembly is **debounced at 300 ms** - an event schedules assembly, further events reset
-the timer, one sample is emitted when it expires. The heartbeat tick is not debounced. Without this a
+Event-driven assembly is **debounced at 300 ms, capped at 1 s** - an event schedules assembly,
+further events reset the timer, one sample is emitted when it expires. The cap is what makes a burst
+longer than the debounce still emit: an application that rewrites its title faster than every 300 ms
+would otherwise push the deadline out forever and the sample would never be assembled, so the reset
+never moves the deadline past 1 s from the first event of the burst. The heartbeat tick is not
+debounced. Without this a
 burst of AX notifications would spawn an `osascript` and an `agtermctl` per notification, and each
 `state_change` also breaks a coalesced run on the server.
 
@@ -214,8 +218,10 @@ the difference between roughly 3 000 records a day and 144 000.
 1. Write `src/providers/<name>.rs` and declare it in `src/providers/mod.rs`.
 2. Implement `Provider`. Return `Err(ProviderError)` rather than panicking, and never block the
    runtime - the supervisor can only act on a returned error, not on a hang.
-3. Emit `Emission::new(records)`, or `Emission::with_cursor(records, cursor)` when the provider has
-   durable progress to record. Never persist a cursor yourself.
+3. Emit `Emission::new(records)`, or `Emission::awaiting_commit(records, cursor)` when the provider
+   has durable progress to record - it hands back a receipt that resolves once the records and the
+   cursor are committed together, so a failed commit leaves the cursor where it was. Never persist a
+   cursor yourself.
 4. Add the `(provider, kind)` pair and its payload contract to the wire contract below **and to the
    service repository in the same pass**. The server validates per pair and *deletes* a record whose
    pair it does not know, so an unannounced kind is destroyed permanently the first time it is sent.

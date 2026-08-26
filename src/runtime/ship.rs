@@ -204,7 +204,7 @@ impl<T: Transport> Shipper<T> {
     }
 
     async fn shrink(&mut self, batch: Vec<PendingRecord>) -> Result<Progress, BufferError> {
-        if batch.len() <= MIN_BATCH {
+        if self.batch_size <= MIN_BATCH {
             let count = batch.len();
             let reason = format!("413 at the floor of {MIN_BATCH} records");
             tracing::error!(count, "a batch too large at the floor was dead lettered");
@@ -861,6 +861,40 @@ mod tests {
         );
         assert_eq!(state.count("dead_letter"), MIN_BATCH as u64);
         assert_eq!(state.count("pending"), (MAX_BATCH - MIN_BATCH) as u64);
+
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_payload_too_large_halves_before_dead_lettering_a_short_batch() {
+        let state = TempState::new("halve-short-batch");
+        let buffer = open(&state, host_only());
+        fill(&buffer, 4).await;
+
+        let mut answers = Vec::new();
+        for _ in 0..2 {
+            answers.push(Ok(HttpResponse {
+                status: 413,
+                body: String::new(),
+            }));
+        }
+        let mut shipper = Shipper::new(buffer.handle(), Scripted::new(answers));
+
+        assert_eq!(
+            shipper.ship_once().await.expect("the attempt failed"),
+            Progress::Shrunk {
+                batch_size: MIN_BATCH
+            },
+            "a buffer holding fewer records than the floor still shrinks before it gives up"
+        );
+        assert_eq!(state.count("pending"), 4);
+        assert_eq!(state.count("dead_letter"), 0);
+
+        assert_eq!(
+            shipper.ship_once().await.expect("the attempt failed"),
+            Progress::DeadLettered { count: 4 }
+        );
+        assert_eq!(state.count("dead_letter"), 4);
 
         buffer.close().await.expect("the buffer did not close");
     }

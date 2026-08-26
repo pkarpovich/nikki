@@ -112,9 +112,9 @@ pub struct HistoryState {
 }
 
 impl HistoryState {
-    fn fresh(highest: i64, revisit_window: i64) -> HistoryState {
+    fn fresh(highest: i64) -> HistoryState {
         HistoryState {
-            cursor: (highest - revisit_window).max(0),
+            cursor: highest.max(0),
             generation: 1,
             shipped: BTreeMap::new(),
         }
@@ -362,7 +362,7 @@ fn collect(
 ) -> Result<PollOutcome, rusqlite::Error> {
     let highest = highest_visit_id(connection)?;
     let mut state = match state {
-        None => HistoryState::fresh(highest, revisit_window),
+        None => HistoryState::fresh(highest),
         Some(state) if highest < state.cursor => {
             tracing::warn!(
                 profile,
@@ -725,9 +725,9 @@ mod tests {
         assert_eq!(state.cursor, NEWEST_VISIT);
         assert_eq!(visit_ids(&records), vec![901, 902, 903, 904, 905, 906]);
         assert_eq!(
-            HistoryState::fresh(929_885, WINDOW).cursor,
+            HistoryState::fresh(929_885).cursor - WINDOW,
             929_885 - WINDOW,
-            "a populated history starts a window below its newest visit"
+            "a populated history reads a single window below its newest visit"
         );
     }
 

@@ -23,6 +23,7 @@ use crate::runtime::{self, KeySource, Kind, RecordDraft, Timestamp};
 use crate::window::visibility::{VisibleWindow, visible_windows};
 
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
+pub const DEBOUNCE_CEILING: Duration = Duration::from_secs(1);
 pub const AMBIGUOUS: &str = "ambiguous";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,10 +181,10 @@ impl<S: Sources> Provider for WindowProvider<S> {
                 }
                 _ = ticker.tick() => {
                     let activity = sources.activity();
-                    let delta = counters.advance(activity.counters);
                     let Some(sample) = assemble(sources, None).await else {
                         continue;
                     };
+                    let delta = counters.advance(activity.counters);
                     let record = tick_record(sample, tick_interval, activity, delta);
                     if out.send(Emission::new(vec![record])).await.is_err() {
                         return Ok(());
@@ -209,6 +210,7 @@ struct Pending {
     kind: Kind,
     ts: Timestamp,
     application: Option<RunningApplication>,
+    first: Instant,
     deadline: Instant,
 }
 
@@ -262,19 +264,21 @@ fn schedule(
     kind: Kind,
     application: Option<RunningApplication>,
 ) -> Pending {
-    let deadline = Instant::now() + DEBOUNCE;
+    let now = Instant::now();
     let Some(pending) = pending else {
         return Pending {
             kind,
             ts: Timestamp::now(),
             application,
-            deadline,
+            first: now,
+            deadline: now + DEBOUNCE,
         };
     };
     let Pending {
         kind: scheduled,
         ts,
         application: earlier,
+        first,
         ..
     } = pending;
     let kind = if scheduled == Kind::Focus || kind == Kind::Focus {
@@ -286,7 +290,8 @@ fn schedule(
         kind,
         ts,
         application: application.or(earlier),
-        deadline,
+        first,
+        deadline: (now + DEBOUNCE).min(first + DEBOUNCE_CEILING),
     }
 }
 
@@ -558,7 +563,7 @@ mod tests {
     struct FakeSources {
         windows: Vec<WindowEntry>,
         displays: Vec<DisplayEntry>,
-        frontmost: Option<RunningApplication>,
+        frontmost: Arc<Mutex<Option<RunningApplication>>>,
         bundle_ids: HashMap<i32, String>,
         cursor_display: Option<usize>,
         focused: FocusedWindow,
@@ -579,7 +584,10 @@ mod tests {
         }
 
         fn frontmost(&self) -> Option<RunningApplication> {
-            self.frontmost.clone()
+            self.frontmost
+                .lock()
+                .expect("the frontmost application is poisoned")
+                .clone()
         }
 
         fn bundle_id(&self, pid: i32) -> Option<String> {
@@ -675,7 +683,7 @@ mod tests {
                     bounds: Rect::new(1920.0, 0.0, 1920.0, 1080.0),
                 },
             ],
-            frontmost: Some(application(ZED_PID, "Zed", "dev.zed.Zed")),
+            frontmost: Arc::new(Mutex::new(Some(application(ZED_PID, "Zed", "dev.zed.Zed")))),
             bundle_ids,
             cursor_display: Some(0),
             focused: FocusedWindow::Window {
@@ -773,6 +781,60 @@ mod tests {
         assert_eq!(payload["keys_delta"], 184);
         assert_eq!(payload["mouse_delta"], 22);
         assert_eq!(payload["mic_active"], true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tick_that_assembles_nothing_leaves_its_input_delta_to_the_next_one() {
+        let sources = sources();
+        let activity = Arc::clone(&sources.activity);
+        let frontmost = Arc::clone(&sources.frontmost);
+        let (_events, mut emissions) = start(sources, 1);
+
+        let RecordDraft { payload, .. } = one_record(&mut emissions).await;
+        assert_eq!(payload["keys_delta"], 0);
+
+        *frontmost
+            .lock()
+            .expect("the frontmost application is poisoned") = None;
+        *activity.lock().expect("the activity is poisoned") = Activity {
+            idle_sec: 0,
+            counters: InputCounters {
+                keys: 900_100,
+                mouse: 40_010,
+            },
+            mic_active: false,
+        };
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        *frontmost
+            .lock()
+            .expect("the frontmost application is poisoned") =
+            Some(application(ZED_PID, "Zed", "dev.zed.Zed"));
+        *activity.lock().expect("the activity is poisoned") = Activity {
+            idle_sec: 0,
+            counters: InputCounters {
+                keys: 900_150,
+                mouse: 40_015,
+            },
+            mic_active: false,
+        };
+
+        let RecordDraft { payload, .. } = one_record(&mut emissions).await;
+        assert_eq!(payload["keys_delta"], 150);
+        assert_eq!(payload["mouse_delta"], 15);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_never_pushes_the_deadline_past_the_ceiling() {
+        let mut pending = schedule(None, Kind::StateChange, None);
+        let ceiling = pending.first + DEBOUNCE_CEILING;
+
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_millis(200)).await;
+            pending = schedule(Some(pending), Kind::StateChange, None);
+            assert!(pending.deadline <= ceiling);
+        }
+        assert_eq!(pending.deadline, ceiling);
     }
 
     #[tokio::test(start_paused = true)]
@@ -998,8 +1060,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_machine_without_a_frontmost_application_emits_nothing() {
-        let mut sources = sources();
-        sources.frontmost = None;
+        let sources = sources();
+        *sources
+            .frontmost
+            .lock()
+            .expect("the frontmost application is poisoned") = None;
         let (events, mut emissions) = start(sources, LONG_TICK);
 
         events
