@@ -54,7 +54,10 @@ impl Provider for BrowserHistoryProvider {
 
         let directory = match directory_for(user_data, &profile) {
             Ok(directory) => directory,
-            Err(reason) => return Err(ProviderError(reason)),
+            Err(reason) => {
+                discard(&snapshot);
+                return Err(ProviderError(reason));
+            }
         };
         tracing::info!(%profile, %directory, "the browser profile resolved");
 
@@ -120,9 +123,9 @@ impl HistoryState {
         }
     }
 
-    fn regenerated(&self, highest: i64, revisit_window: i64) -> HistoryState {
+    fn regenerated(&self, highest: i64) -> HistoryState {
         HistoryState {
-            cursor: (highest - revisit_window).max(0),
+            cursor: highest.max(0),
             generation: self.generation + 1,
             shipped: BTreeMap::new(),
         }
@@ -235,6 +238,7 @@ async fn poll_once(
     state: Option<HistoryState>,
     page: usize,
 ) -> Option<PollOutcome> {
+    let _held = SnapshotGuard { path: snapshot };
     let directory = match directory_for(user_data, profile) {
         Ok(directory) => directory,
         Err(reason) => {
@@ -247,28 +251,34 @@ async fn poll_once(
     };
 
     let copy = clone_history(&user_data.join(directory), snapshot).await?;
-    let outcome = collect_from(&copy, profile, revisit_window, state, page);
-    discard(snapshot);
-    outcome
+    collect_from(&copy, profile, revisit_window, state, page)
+}
+
+struct SnapshotGuard<'a> {
+    path: &'a Path,
+}
+
+impl Drop for SnapshotGuard<'_> {
+    fn drop(&mut self) {
+        discard(self.path);
+    }
 }
 
 async fn clone_history(source: &Path, snapshot: &Path) -> Option<PathBuf> {
     discard(snapshot);
-    if let Err(error) = fs::create_dir_all(snapshot) {
+    if let Err(error) = runtime::private_dir(snapshot) {
         tracing::warn!(path = %snapshot.display(), %error, "the snapshot directory could not be created");
         return None;
     }
 
     let history = snapshot.join(HISTORY_FILE);
     if !clone_file(&source.join(HISTORY_FILE), &history).await {
-        discard(snapshot);
         return None;
     }
 
     let journal = source.join(HISTORY_JOURNAL_FILE);
     if journal.is_file() && !clone_file(&journal, &snapshot.join(HISTORY_JOURNAL_FILE)).await {
         tracing::warn!("the history journal could not be cloned, so this poll is skipped");
-        discard(snapshot);
         return None;
     }
     Some(history)
@@ -303,6 +313,18 @@ async fn clone_file(source: &Path, destination: &Path) -> bool {
 
 fn discard(snapshot: &Path) {
     let _ = fs::remove_dir_all(snapshot);
+}
+
+pub fn discard_stale_snapshot(state_dir: &Path) {
+    let snapshot = state_dir.join(SNAPSHOT_DIR);
+    if !snapshot.exists() {
+        return;
+    }
+    tracing::warn!(
+        path = %snapshot.display(),
+        "a history clone outlived the run that made it and is discarded"
+    );
+    discard(&snapshot);
 }
 
 fn collect_from(
@@ -371,7 +393,7 @@ fn collect(
                 generation = state.generation + 1,
                 "the history database was replaced, so the generation advances"
             );
-            state.regenerated(highest, revisit_window)
+            state.regenerated(highest)
         }
         Some(state) => state,
     };
@@ -514,6 +536,7 @@ struct LocalStateProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use tokio::sync::mpsc::{Receiver, channel};
 
     use crate::config::{Config, default_redact};
@@ -565,6 +588,13 @@ mod tests {
             fs::create_dir_all(&user_data).expect("the user data directory could not be made");
             fs::write(user_data.join(LOCAL_STATE_FILE), text)
                 .expect("the local state could not be written");
+        }
+
+        fn leave_stale_snapshot(&self) {
+            let snapshot = self.snapshot();
+            runtime::private_dir(&snapshot).expect("the stale snapshot could not be made");
+            fs::write(snapshot.join(HISTORY_FILE), HISTORY)
+                .expect("the stale clone could not be written");
         }
 
         fn write_history(&self, bytes: &[u8]) {
@@ -728,6 +758,24 @@ mod tests {
             HistoryState::fresh(929_885).cursor - WINDOW,
             929_885 - WINDOW,
             "a populated history reads a single window below its newest visit"
+        );
+    }
+
+    #[test]
+    fn a_reset_restarts_a_window_below_the_new_highest_just_as_a_first_run_does() {
+        let state = HistoryState {
+            cursor: 929_885,
+            generation: 1,
+            shipped: BTreeMap::new(),
+        };
+        let reset = state.regenerated(4_000);
+
+        assert_eq!(reset.generation, 2);
+        assert_eq!(reset.shipped, BTreeMap::new());
+        assert_eq!(
+            reset.cursor - WINDOW,
+            HistoryState::fresh(4_000).cursor - WINDOW,
+            "a reset reads one window below the new highest, not two"
         );
     }
 
@@ -910,6 +958,7 @@ mod tests {
     async fn a_profile_that_disappears_at_poll_time_skips_the_poll() {
         let home = TempHome::new("profile-gone");
         home.write_local_state(r#"{"profile":{"info_cache":{"Profile 1":{"name":"MBA_22"}}}}"#);
+        home.leave_stale_snapshot();
 
         let outcome = poll_once(
             &home.user_data(),
@@ -921,6 +970,26 @@ mod tests {
         )
         .await;
         assert!(outcome.is_none());
+        assert!(
+            !home.snapshot().exists(),
+            "a poll that resolves no profile must still clear the clone it finds"
+        );
+    }
+
+    #[test]
+    fn a_clone_that_outlived_its_run_is_discarded_at_startup() {
+        let home = TempHome::new("stale-snapshot");
+        home.leave_stale_snapshot();
+        assert!(home.snapshot().exists());
+
+        discard_stale_snapshot(&home.state_dir());
+        assert!(!home.snapshot().exists());
+
+        discard_stale_snapshot(&home.state_dir());
+        assert!(
+            home.state_dir().exists(),
+            "discarding nothing must not touch the state directory"
+        );
     }
 
     #[tokio::test]
@@ -973,6 +1042,34 @@ mod tests {
         assert!(
             !home.snapshot().exists(),
             "the discarded snapshot must not survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_is_private_while_it_exists_and_gone_once_the_poll_is_abandoned() {
+        let home = TempHome::new("abandoned-poll");
+        let user_data = home.user_data();
+        let snapshot = home.snapshot();
+        let mut poll = Box::pin(poll_once(
+            &user_data, &snapshot, PROFILE, WINDOW, None, PAGE_LIMIT,
+        ));
+        let elapsed = tokio::time::timeout(Duration::from_millis(0), &mut poll).await;
+
+        assert!(elapsed.is_err(), "the poll must still be cloning");
+        let mode = fs::metadata(home.snapshot())
+            .expect("the snapshot directory was never made")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "an unredacted history clone must not be readable by anyone else"
+        );
+
+        drop(poll);
+        assert!(
+            !home.snapshot().exists(),
+            "an abandoned poll must not leave the history clone on disk"
         );
     }
 
@@ -1068,6 +1165,7 @@ mod tests {
     async fn a_profile_absent_at_startup_stops_the_provider_and_lists_the_names_that_exist() {
         let home = TempHome::new("startup-absent");
         home.write_local_state(r#"{"profile":{"info_cache":{"Profile 1":{"name":"MBA_22"}}}}"#);
+        home.leave_stale_snapshot();
         let buffer = home.buffer();
         let mut provider = BrowserHistoryProvider::new(home.user_data(), buffer.handle());
         let (out, _emissions) = channel(4);
@@ -1079,6 +1177,10 @@ mod tests {
 
         assert!(reason.contains(PROFILE), "reason was {reason}");
         assert!(reason.contains("MBA_22"), "reason was {reason}");
+        assert!(
+            !home.snapshot().exists(),
+            "a provider that stops on an absent profile must not leave a clone behind"
+        );
         buffer.close().await.expect("the buffer did not close");
     }
 

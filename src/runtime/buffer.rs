@@ -1,4 +1,3 @@
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
@@ -9,7 +8,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
 use super::redact::Redactor;
-use super::{Cursor, Envelope, KeySource, Kind, Provider, RecordDraft, Timestamp};
+use super::{Cursor, Envelope, KeySource, Kind, Provider, RecordDraft, Timestamp, private_dir};
 use crate::config::RedactRule;
 
 pub const DATABASE_FILE: &str = "buffer.db";
@@ -97,7 +96,7 @@ impl Buffer {
             max_bytes,
             redact,
         } = config;
-        if let Err(source) = fs::create_dir_all(&state_dir) {
+        if let Err(source) = private_dir(&state_dir) {
             return Err(BufferError::StateDir {
                 path: state_dir,
                 source,
@@ -647,6 +646,7 @@ fn checkpoint(connection: &Connection) -> Result<(), BufferError> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::fs;
 
     struct TempState {
         path: PathBuf,

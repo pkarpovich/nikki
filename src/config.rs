@@ -133,11 +133,6 @@ pub enum RedactField {
     Title,
 }
 
-pub fn load() -> Result<Config, ConfigError> {
-    let paths = Paths::from_env()?;
-    load_from(&paths)
-}
-
 pub fn load_from(paths: &Paths) -> Result<Config, ConfigError> {
     let Paths { config, state_dir } = paths;
     let text = match fs::read_to_string(config) {
@@ -244,11 +239,16 @@ fn required(value: Option<String>, field: &'static str) -> Result<String, Config
 
 fn service_url_from(value: &str) -> Result<Url, ConfigError> {
     let field = "service_url";
-    let Ok(url) = Url::parse(value) else {
-        return Err(ConfigError::Invalid {
-            field,
-            reason: format!("`{value}` is not an absolute url"),
-        });
+    let url = match Url::parse(value) {
+        Ok(url) => url,
+        Err(error) => {
+            return Err(ConfigError::Invalid {
+                field,
+                reason: format!(
+                    "is not an absolute url: {error}; the value is not repeated here because it may carry credentials"
+                ),
+            });
+        }
     };
     let scheme = url.scheme();
     if scheme != "http" && scheme != "https" {
@@ -257,24 +257,32 @@ fn service_url_from(value: &str) -> Result<Url, ConfigError> {
             reason: format!("scheme `{scheme}` is not http or https"),
         });
     }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ConfigError::Invalid {
+            field,
+            reason:
+                "carries a username or password, and the whole url is logged at startup, so the credentials would be written to the log"
+                    .to_string(),
+        });
+    }
     let Some(host) = url.host_str() else {
         return Err(ConfigError::Invalid {
             field,
-            reason: format!("`{value}` has no host"),
+            reason: "has no host".to_string(),
         });
     };
     if host.is_empty() {
         return Err(ConfigError::Invalid {
             field,
-            reason: format!("`{value}` has an empty host"),
+            reason: "has an empty host".to_string(),
         });
     }
     if url.query().is_some() || url.fragment().is_some() {
         return Err(ConfigError::Invalid {
             field,
-            reason: format!(
-                "`{value}` carries a query or fragment, and the records path is appended to it, which would post to the wrong url"
-            ),
+            reason:
+                "carries a query or fragment, and the records path is appended to it, which would post to the wrong url; the value is not repeated here because a query may carry a token"
+                    .to_string(),
         });
     }
     Ok(url)
@@ -525,7 +533,33 @@ drop = ["title"]
             let text = format!("{case}\ndevice = \"mbp-21\"\n[browser]\nprofile = \"MBP_21\"\n");
             let error = parse_text(&text).expect_err("a query or fragment is rejected");
             match error {
-                ConfigError::Invalid { field, .. } => assert_eq!(field, "service_url"),
+                ConfigError::Invalid { field, reason } => {
+                    assert_eq!(field, "service_url");
+                    assert!(!reason.contains("secret"), "reason was {reason}");
+                }
+                other => panic!("expected `service_url` to be reported invalid, got {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_service_url_carrying_credentials_is_rejected_without_repeating_them() {
+        let cases = [
+            "service_url = \"https://shipper:hunter2@alpha:8443\"",
+            "service_url = \"https://shipper@alpha:8443\"",
+            "service_url = \"https://shipper:hunter2@alpha:99999\"",
+            "service_url = \"https://shipper:hunter2@\"",
+            "service_url = \"https://shipper:hunter2@[::1\"",
+        ];
+        for case in cases {
+            let text = format!("{case}\ndevice = \"mbp-21\"\n[browser]\nprofile = \"MBP_21\"\n");
+            let error = parse_text(&text).expect_err("credentials are rejected");
+            match error {
+                ConfigError::Invalid { field, reason } => {
+                    assert_eq!(field, "service_url");
+                    assert!(!reason.contains("hunter2"), "reason was {reason}");
+                    assert!(!reason.contains("shipper"), "reason was {reason}");
+                }
                 other => panic!("expected `service_url` to be reported invalid, got {other}"),
             }
         }

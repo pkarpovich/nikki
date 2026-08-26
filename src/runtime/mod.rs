@@ -3,6 +3,11 @@ pub mod dedup;
 pub mod redact;
 pub mod ship;
 
+use std::fs::{DirBuilder, Permissions, set_permissions};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::Path;
+
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
@@ -18,6 +23,8 @@ const RFC3339_MILLIS: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
 const UNREPRESENTABLE_INSTANT: &str = "1970-01-01T00:00:00.000Z";
 
 pub const EMISSION_QUEUE: usize = 64;
+
+const PRIVATE_DIR_MODE: u32 = 0o700;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -181,6 +188,14 @@ pub enum RuntimeError {
     Buffer(#[from] BufferError),
     #[error(transparent)]
     Ship(#[from] ShipError),
+}
+
+pub fn private_dir(path: &Path) -> io::Result<()> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(PRIVATE_DIR_MODE)
+        .create(path)?;
+    set_permissions(path, Permissions::from_mode(PRIVATE_DIR_MODE))
 }
 
 pub struct Pipeline {
@@ -415,6 +430,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn a_state_directory_is_readable_only_by_its_owner_however_it_already_stood() {
+        let state = TempState::new("private-dir");
+        let fresh = state.path.join("fresh");
+        private_dir(&fresh).expect("a fresh directory could not be made private");
+        assert_eq!(mode_of(&fresh), 0o700);
+
+        let loose = state.path.join("loose");
+        fs::create_dir_all(&loose).expect("the loose directory could not be made");
+        fs::set_permissions(&loose, Permissions::from_mode(0o755))
+            .expect("the loose directory could not be opened up");
+        private_dir(&loose).expect("an existing directory could not be tightened");
+        assert_eq!(mode_of(&loose), 0o700);
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path)
+            .expect("the directory is missing")
+            .permissions()
+            .mode()
+            & 0o777
     }
 
     fn open_buffer(state: &TempState) -> Buffer {

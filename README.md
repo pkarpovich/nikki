@@ -98,7 +98,7 @@ drop = ["title"]
 
 | Field | Default | Notes |
 |---|---|---|
-| `service_url` | none, required | must parse as an absolute http or https URL with a non-empty host, and carry no query or fragment, because `/api/v1/records` is appended to it |
+| `service_url` | none, required | must parse as an absolute http or https URL with a non-empty host, and carry no query or fragment, because `/api/v1/records` is appended to it, nor a username or password, because the whole URL is logged at startup |
 | `device` | none, required | a component of every `dedup_key` and an indexed server column, so an empty one produces records that store but can never be attributed to a machine |
 | `tick_interval` | 30 | validated at startup against the same `[1, 3600]` bound the server enforces per record |
 | `history_poll_interval` | 300 | at least 1 second: a poll timer of zero panics the browser history provider on every supervised restart |
@@ -206,7 +206,13 @@ browser holds the active profile's `History` locked against any external reader,
 cloned with `clonefile` along with its `History-journal` sidecar, the copy is opened read-only, and
 `PRAGMA quick_check` must return `ok` before anything is read - a torn snapshot frequently opens
 cleanly and reads as good data, which would ship wrong rows and advance the cursor past the right
-ones. The copy is deleted after the read.
+ones. The copy is deleted after the read, and also when a poll is abandoned part-way - the clone is
+an unredacted copy of the whole history, so it is held under a `0700` directory and removed by the
+same guard whether the poll finishes, fails or is cancelled at shutdown. A clone is only ever live
+inside a poll, so one found at startup belongs to a run that was killed outright and is swept before
+anything else happens - before the config file is even read, so a config that has become unusable
+cannot leave the clone on disk across restarts. `--check-config` is the one invocation that does not
+sweep, because a validation run must not delete the clone a running daemon is reading.
 
 Each poll reads `id > cursor - revisit_window` rather than `id > cursor`, because Chromium fills
 `visit_duration` in by updating the row it wrote when the visit began. A re-read row is emitted
@@ -417,7 +423,10 @@ has failed yet. Backoff runs from 1s to a 5-minute ceiling on the retry path onl
 ## The buffer
 
 SQLite at `{state_dir}/buffer.db`, `journal_mode = WAL`, `busy_timeout = 5000`, with every write
-serialised through one owner task.
+serialised through one owner task. The state directory is created `0700` and tightened to `0700` if
+it already existed, because everything the daemon keeps on disk lives under it. That happens before
+the config file is read, so an install upgrading from a looser mode is tightened even on a boot where
+the config is rejected.
 
 ```
 pending(id INTEGER PRIMARY KEY, envelope TEXT NOT NULL, bytes INTEGER NOT NULL, created_at TEXT NOT NULL)

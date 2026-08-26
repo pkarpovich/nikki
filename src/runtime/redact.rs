@@ -222,6 +222,20 @@ mod tests {
     }
 
     #[test]
+    fn an_ipv6_host_keeps_the_brackets_that_make_it_a_url_again() {
+        let reduced = reduced(&host_only(), "http://[::1]:3000/admin?token=secret");
+        assert_eq!(reduced, "http://[::1]:3000/");
+        assert_eq!(
+            Url::parse(&reduced)
+                .expect("the reduction parses back")
+                .host(),
+            Url::parse("http://[::1]/")
+                .expect("the literal parses")
+                .host()
+        );
+    }
+
+    #[test]
     fn a_default_port_is_not_invented() {
         assert_eq!(
             reduced(&host_only(), "https://example.com:443/path"),

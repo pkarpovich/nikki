@@ -14,14 +14,16 @@ use argh::FromArgs;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
-use crate::config::Config;
+use crate::config::{Config, Paths};
 use crate::macos::ax::accessibility_is_trusted;
 use crate::macos::events::EventThread;
-use crate::providers::browser_history::{BrowserHistoryProvider, directory_for, user_data_dir};
+use crate::providers::browser_history::{
+    BrowserHistoryProvider, directory_for, discard_stale_snapshot, user_data_dir,
+};
 use crate::providers::windows::{MacSources, WindowProvider};
 use crate::providers::{Backoff, Ctx, supervise};
 use crate::runtime::ship::endpoint;
-use crate::runtime::{EMISSION_QUEUE, Pipeline, absorb};
+use crate::runtime::{EMISSION_QUEUE, Pipeline, absorb, private_dir};
 
 const PROVIDERS: &str = "windows, browser_history";
 
@@ -39,7 +41,27 @@ async fn main() -> ExitCode {
 
     let Args { check_config } = argh::from_env();
 
-    let config = match config::load() {
+    let paths = match Paths::from_env() {
+        Ok(paths) => paths,
+        Err(error) => {
+            tracing::error!(%error, "configuration is not usable");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !check_config {
+        if let Err(source) = private_dir(&paths.state_dir) {
+            tracing::error!(
+                path = %paths.state_dir.display(),
+                %source,
+                "the state directory could not be made private"
+            );
+            return ExitCode::FAILURE;
+        }
+        discard_stale_snapshot(&paths.state_dir);
+    }
+
+    let config = match config::load_from(&paths) {
         Ok(config) => config,
         Err(error) => {
             tracing::error!(%error, "configuration is not usable");
@@ -83,6 +105,7 @@ async fn run(config: Config) -> Result<(), String> {
     let Some(home) = var_os("HOME").map(PathBuf::from) else {
         return Err("HOME is not set, so the browser profile cannot be resolved".to_string());
     };
+
     let user_data = user_data_dir(&home);
     let directory = directory_for(&user_data, &config.browser.profile)?;
 
