@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
+use std::env::var_os;
 use std::ffi::c_void;
+use std::fs;
+use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -29,6 +32,7 @@ use super::ax::MESSAGING_TIMEOUT_SECONDS;
 use super::window_list::{RunningApplication, frontmost_application, running_application};
 
 pub const SLEEP_FLUSH_BUDGET: Duration = Duration::from_secs(2);
+pub const TEST_EVENTS_VAR: &str = "NIKKI_TEST_EVENTS";
 
 const SCREEN_LOCKED_NOTIFICATION: &str = "com.apple.screenIsLocked";
 const SCREEN_UNLOCKED_NOTIFICATION: &str = "com.apple.screenIsUnlocked";
@@ -100,9 +104,14 @@ pub enum MacEvent {
     DidWake,
 }
 
+enum Injected {
+    Event(MacEvent),
+    Sleep,
+}
+
 struct Inbox {
     sender: UnboundedSender<MacEvent>,
-    injected: Mutex<VecDeque<MacEvent>>,
+    injected: Mutex<VecDeque<Injected>>,
     focus_target: Mutex<Option<i32>>,
 }
 
@@ -164,22 +173,33 @@ pub struct EventThread {
 
 impl EventThread {
     pub fn spawn(sender: UnboundedSender<MacEvent>) -> std::io::Result<Self> {
-        Self::start(sender, RegisterSystemSources::Yes)
+        let Some(script) = var_os(TEST_EVENTS_VAR) else {
+            return Self::start(sender, RegisterSystemSources::Yes, VecDeque::new());
+        };
+        let script = Path::new(&script);
+        let scripted = scripted_events(script);
+        tracing::warn!(
+            path = %script.display(),
+            events = scripted.len(),
+            "{TEST_EVENTS_VAR} replaces the system event sources with a scripted file"
+        );
+        Self::start(sender, RegisterSystemSources::No, scripted)
     }
 
     pub fn spawn_without_system_sources(
         sender: UnboundedSender<MacEvent>,
     ) -> std::io::Result<Self> {
-        Self::start(sender, RegisterSystemSources::No)
+        Self::start(sender, RegisterSystemSources::No, VecDeque::new())
     }
 
     fn start(
         sender: UnboundedSender<MacEvent>,
         register: RegisterSystemSources,
+        scripted: VecDeque<Injected>,
     ) -> std::io::Result<Self> {
         let inbox = Arc::new(Inbox {
             sender,
-            injected: Mutex::new(VecDeque::new()),
+            injected: Mutex::new(scripted),
             focus_target: Mutex::new(None),
         });
 
@@ -209,7 +229,7 @@ impl EventThread {
             tracing::error!("the injection queue is poisoned");
             return;
         };
-        injected.push_back(event);
+        injected.push_back(Injected::Event(event));
         drop(injected);
         self.source.0.signal();
         self.run_loop.0.wake_up();
@@ -266,6 +286,7 @@ fn run_event_loop(
         RegisterSystemSources::Yes => register_system_sources(&inbox, &source, &run_loop),
         RegisterSystemSources::No => SystemSources::default(),
     };
+    source.signal();
 
     let published = ready.send(Some((
         RunLoopRef(run_loop.clone()),
@@ -450,6 +471,67 @@ fn deliver_will_sleep(inbox: &Inbox, budget: Duration) -> SleepFlush {
     }
 }
 
+fn scripted_events(path: &Path) -> VecDeque<Injected> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::error!(path = %path.display(), %error, "the scripted event file could not be read");
+            return VecDeque::new();
+        }
+    };
+
+    let mut scripted = VecDeque::new();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some(event) = scripted_event(line) else {
+            tracing::warn!(
+                line,
+                "a scripted event line was not understood and is skipped"
+            );
+            continue;
+        };
+        scripted.push_back(event);
+    }
+    scripted
+}
+
+fn scripted_event(line: &str) -> Option<Injected> {
+    let mut fields = line.split('\t');
+    let name = fields.next()?;
+    let event = match name {
+        "application_activated" => {
+            let application = RunningApplication {
+                pid: fields.next()?.parse().ok()?,
+                name: fields.next().map(str::to_string),
+                bundle_id: fields.next().map(str::to_string),
+            };
+            MacEvent::ApplicationActivated { application }
+        }
+        "focused_window_changed" => MacEvent::FocusedWindowChanged {
+            pid: fields.next()?.parse().ok()?,
+        },
+        "title_changed" => MacEvent::TitleChanged {
+            pid: fields.next()?.parse().ok()?,
+        },
+        "window_created" => MacEvent::WindowCreated {
+            pid: fields.next()?.parse().ok()?,
+        },
+        "window_destroyed" => MacEvent::WindowDestroyed {
+            pid: fields.next()?.parse().ok()?,
+        },
+        "displays_reconfigured" => MacEvent::DisplaysReconfigured,
+        "screen_locked" => MacEvent::ScreenLocked,
+        "screen_unlocked" => MacEvent::ScreenUnlocked,
+        "did_wake" => MacEvent::DidWake,
+        "will_sleep" => return Some(Injected::Sleep),
+        _ => return None,
+    };
+    Some(Injected::Event(event))
+}
+
 fn screen_event_from_name(name: &str) -> Option<MacEvent> {
     if name == SCREEN_LOCKED_NOTIFICATION {
         return Some(MacEvent::ScreenLocked);
@@ -505,8 +587,14 @@ unsafe extern "C-unwind" fn perform_source(info: *mut c_void) {
     if let Ok(mut injected) = state.inbox.injected.lock() {
         std::mem::swap(&mut drained, &mut injected);
     }
-    for event in drained {
-        state.inbox.emit(event);
+    for item in drained {
+        match item {
+            Injected::Event(event) => state.inbox.emit(event),
+            Injected::Sleep => {
+                let outcome = deliver_will_sleep(&state.inbox, SLEEP_FLUSH_BUDGET);
+                tracing::info!(?outcome, "a scripted sleep was delivered");
+            }
+        }
     }
 
     let mut target = None;
@@ -688,6 +776,95 @@ mod tests {
             let event = ax_event(notification, 4242);
             assert_eq!(describe(&event), (expected, 4242));
         }
+    }
+
+    fn describe_scripted(item: &Injected) -> (&'static str, i32) {
+        match item {
+            Injected::Event(event) => describe(event),
+            Injected::Sleep => ("will_sleep", 0),
+        }
+    }
+
+    fn scripted(line: &str) -> (&'static str, i32) {
+        let item = scripted_event(line).expect("the line describes an event");
+        describe_scripted(&item)
+    }
+
+    #[test]
+    fn every_scripted_line_maps_to_the_event_it_names() {
+        assert_eq!(scripted("title_changed\t501"), ("title_changed", 501));
+        assert_eq!(
+            scripted("focused_window_changed\t501"),
+            ("focused_window_changed", 501)
+        );
+        assert_eq!(scripted("window_created\t7"), ("window_created", 7));
+        assert_eq!(scripted("window_destroyed\t7"), ("window_destroyed", 7));
+        assert_eq!(
+            scripted("displays_reconfigured"),
+            ("displays_reconfigured", 0)
+        );
+        assert_eq!(scripted("screen_locked"), ("screen_locked", 0));
+        assert_eq!(scripted("screen_unlocked"), ("screen_unlocked", 0));
+        assert_eq!(scripted("did_wake"), ("did_wake", 0));
+        assert_eq!(scripted("will_sleep"), ("will_sleep", 0));
+    }
+
+    #[test]
+    fn a_scripted_activation_carries_the_application_it_names() {
+        let item = scripted_event("application_activated\t502\tDia\tcompany.thebrowser.dia")
+            .expect("the line describes an event");
+        let Injected::Event(MacEvent::ApplicationActivated { application }) = item else {
+            panic!("expected an activation");
+        };
+        let RunningApplication {
+            pid,
+            name,
+            bundle_id,
+        } = application;
+        assert_eq!(pid, 502);
+        assert_eq!(name.as_deref(), Some("Dia"));
+        assert_eq!(bundle_id.as_deref(), Some("company.thebrowser.dia"));
+    }
+
+    #[test]
+    fn an_unusable_scripted_line_is_refused_rather_than_guessed() {
+        assert!(scripted_event("title_changed").is_none());
+        assert!(scripted_event("title_changed\tnot-a-pid").is_none());
+        assert!(scripted_event("nothing_like_an_event").is_none());
+        assert!(scripted_event("").is_none());
+    }
+
+    #[test]
+    fn a_scripted_file_is_read_in_order_and_skips_what_it_cannot_parse() {
+        let path = std::env::temp_dir().join("nikki-events-test-script.tsv");
+        std::fs::write(
+            &path,
+            "title_changed\t501\n\nnonsense\nscreen_locked\nwill_sleep\n",
+        )
+        .expect("the script could not be written");
+
+        let scripted = scripted_events(&path);
+        let mut described = Vec::new();
+        for item in &scripted {
+            described.push(describe_scripted(item));
+        }
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            described,
+            vec![
+                ("title_changed", 501),
+                ("screen_locked", 0),
+                ("will_sleep", 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_scripted_file_leaves_the_queue_empty_rather_than_failing() {
+        let path = std::env::temp_dir().join("nikki-events-test-absent.tsv");
+        let _ = std::fs::remove_file(&path);
+        assert!(scripted_events(&path).is_empty());
     }
 
     #[test]

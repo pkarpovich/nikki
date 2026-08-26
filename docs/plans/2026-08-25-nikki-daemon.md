@@ -748,22 +748,22 @@ max_bytes = 536870912
 - Create: `scripts/acceptance.sh`, `tests/stub_server.rs`
 - Modify: `src/macos/events.rs`
 
-- [ ] `tests/stub_server.rs` is a test-only HTTP server recording requests and returning a scripted sequence of responses; `scripts/acceptance.sh` runs the daemon against it and asserts the checks below
-- [ ] the harness sets `NIKKI_CONFIG` and `NIKKI_STATE_DIR` into a temporary directory, so it can never read or write the operator's real config or buffer
-- [ ] `events.rs` honours `NIKKI_TEST_EVENTS=<path>`: when set, the event thread reads newline-delimited event values from that file instead of registering OS sources. Without this seam the entire event half of the daemon - every `state_change`, `lock`, `sleep` and `wake` - can only be exercised by a human doing things on a Mac, so an unattended run has no way to assert the kinds the server was just changed to accept
-- [ ] run the per-task gate over the whole crate
-- [ ] `scripts/bundle.sh` produces `nikki.app`, and its `Info.plist` contains `LSUIElement` true and a non-empty `NSAppleEventsUsageDescription`
-- [ ] envelopes recorded by the stub match the wire contract exactly, including `tick_interval_sec` on every tick
-- [ ] with a synthesised title-change event injected through `NIKKI_TEST_EVENTS`, the stub records a `state_change` with `app`, `bundle_id` and `display` present
-- [ ] `seq` is monotonic across a daemon restart
-- [ ] `dedup_key` contains no path or query from a redacted URL
-- [ ] with the stub returning 500, records accumulate in the buffer and drain once it returns 200
-- [ ] with the stub returning 200 carrying a rejection for one record, the whole batch is deleted and the rejection logged
-- [ ] with the stub returning 200 and a malformed body, the batch is kept and retried
-- [ ] with the stub returning 400, the batch lands in `dead_letter` and shipping continues
-- [ ] with the stub returning 404, the batch is **kept** and retried rather than dead-lettered
-- [ ] filling the buffer past `max_rows` evicts oldest-first until both limits are satisfied and enqueues exactly one `buffer_overflow` record, itself carrying a real `seq` and `dedup_key`
-- [ ] running with Accessibility unavailable still ships samples with `degraded: true`, a non-null `display` and null titles
+- [x] `tests/stub_server.rs` is a test-only HTTP server recording requests and returning a scripted sequence of responses; `scripts/acceptance.sh` runs the daemon against it and asserts the checks below
+- [x] the harness sets `NIKKI_CONFIG` and `NIKKI_STATE_DIR` into a temporary directory, so it can never read or write the operator's real config or buffer - and `HOME` too, so the browser profile it resolves is the committed fixture rather than the operator's own
+- [x] `events.rs` honours `NIKKI_TEST_EVENTS=<path>`: when set, the event thread reads newline-delimited event values from that file instead of registering OS sources. Without this seam the entire event half of the daemon - every `state_change`, `lock`, `sleep` and `wake` - can only be exercised by a human doing things on a Mac, so an unattended run has no way to assert the kinds the server was just changed to accept
+- [x] run the per-task gate over the whole crate
+- [x] `scripts/bundle.sh` produces `nikki.app`, and its `Info.plist` contains `LSUIElement` true and a non-empty `NSAppleEventsUsageDescription`
+- [x] envelopes recorded by the stub match the wire contract exactly, including `tick_interval_sec` on every tick
+- [x] with a synthesised title-change event injected through `NIKKI_TEST_EVENTS`, the stub records a `state_change` with `app`, `bundle_id` and `display` present
+- [x] `seq` is monotonic across a daemon restart
+- [x] `dedup_key` contains no path or query from a redacted URL
+- [x] with the stub returning 500, records accumulate in the buffer and drain once it returns 200
+- [x] with the stub returning 200 carrying a rejection for one record, the whole batch is deleted and the rejection logged
+- [x] with the stub returning 200 and a malformed body, the batch is kept and retried
+- [x] with the stub returning 400, the batch lands in `dead_letter` and shipping continues
+- [x] with the stub returning 404, the batch is **kept** and retried rather than dead-lettered
+- [x] filling the buffer past `max_rows` evicts oldest-first until both limits are satisfied and enqueues exactly one `buffer_overflow` record, itself carrying a real `seq` and `dedup_key`
+- [x] running with Accessibility unavailable still ships samples with `degraded: true`, a non-null `display` and null titles - the harness asserts the non-null `display` and the null titles on every degraded sample, and asserts `degraded: true` on every sample whenever the daemon reports Accessibility unavailable. macOS attributes Accessibility to the *responsible* process, so a daemon spawned from an already-granted terminal is trusted and cannot be untrusted on demand; on such a run the harness prints that the branch was not exercised rather than passing silently, and the branch itself is covered by `a_display_is_still_resolved_when_accessibility_is_unavailable` in `src/providers/windows.rs`
 
 ### Task 11: Documentation
 
