@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::mpsc::{RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -64,6 +64,11 @@ pub struct SleepAcknowledgement {
 }
 
 impl SleepAcknowledgement {
+    pub fn channel() -> (SleepAcknowledgement, Receiver<()>) {
+        let (sender, receiver) = sync_channel::<()>(1);
+        (SleepAcknowledgement { sender }, receiver)
+    }
+
     pub fn acknowledge(self) {
         let _ = self.sender.try_send(());
     }
@@ -433,10 +438,8 @@ fn activated_application(notification: &NSNotification) -> Option<RunningApplica
 }
 
 fn deliver_will_sleep(inbox: &Inbox, budget: Duration) -> SleepFlush {
-    let (sender, receiver) = sync_channel::<()>(1);
-    let event = MacEvent::WillSleep {
-        acknowledgement: SleepAcknowledgement { sender },
-    };
+    let (acknowledgement, receiver) = SleepAcknowledgement::channel();
+    let event = MacEvent::WillSleep { acknowledgement };
     if inbox.sender.send(event).is_err() {
         return SleepFlush::Abandoned;
     }

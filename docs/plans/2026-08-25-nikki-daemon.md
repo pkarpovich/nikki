@@ -690,17 +690,17 @@ max_bytes = 536870912
 - Create: `src/providers/mod.rs`, `src/providers/windows.rs`
 - Modify: `src/main.rs`
 
-- [ ] declare `mod providers;` in `main.rs` and `mod windows;` in `src/providers/mod.rs`
-- [ ] the `Provider` trait, `Emission`, `Ctx`, and the supervision harness - restart with backoff, owned here and nowhere else
-- [ ] window provider driven by every event source in Technical Details plus the heartbeat tick, with each source emitting the kind stated there
-- [ ] sample assembly in the specified order, with `display` sourced from the window list rather than Accessibility, and the single-Accessibility-window join rule producing `title_reason` when ambiguous
-- [ ] stamp `tick_interval_sec` from config onto every `tick` payload
-- [ ] `visible[]` entries carry `app`, `bundle_id`, `title`, `title_reason`, `display` and `z`, with `bundle_id` from `bundle_id_for_pid` and `app` from the owner name
-- [ ] event-driven assembly is debounced at 300 ms - an event schedules assembly, further events reset the timer, one sample is emitted when it expires; the heartbeat tick is not debounced
-- [ ] set `degraded: true` when Accessibility is unavailable or its calls fail, keeping everything that still works
-- [ ] write tests for sample assembly from mocked sources: tick path, each event path and the kind it emits, the ambiguous-title rule, `display` resolved with Accessibility unavailable, and the degraded path
-- [ ] write a test that a burst of five events inside the debounce window produces one sample and spawns one extractor invocation, not five
-- [ ] run the per-task gate - must pass before Task 8
+- [x] declare `mod providers;` in `main.rs` and `mod windows;` in `src/providers/mod.rs`
+- [x] the `Provider` trait, `Emission`, `Ctx`, and the supervision harness - restart with backoff, owned here and nowhere else
+- [x] window provider driven by every event source in Technical Details plus the heartbeat tick, with each source emitting the kind stated there
+- [x] sample assembly in the specified order, with `display` sourced from the window list rather than Accessibility, and the single-Accessibility-window join rule producing `title_reason` when ambiguous
+- [x] stamp `tick_interval_sec` from config onto every `tick` payload
+- [x] `visible[]` entries carry `app`, `bundle_id`, `title`, `title_reason`, `display` and `z`, with `bundle_id` from `bundle_id_for_pid` and `app` from the owner name
+- [x] event-driven assembly is debounced at 300 ms - an event schedules assembly, further events reset the timer, one sample is emitted when it expires; the heartbeat tick is not debounced
+- [x] set `degraded: true` when Accessibility is unavailable or its calls fail, keeping everything that still works
+- [x] write tests for sample assembly from mocked sources: tick path, each event path and the kind it emits, the ambiguous-title rule, `display` resolved with Accessibility unavailable, and the degraded path
+- [x] write a test that a burst of five events inside the debounce window produces one sample and spawns one extractor invocation, not five
+- [x] run the per-task gate - must pass before Task 8
 
 ### Task 8: Browser history provider
 

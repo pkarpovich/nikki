@@ -4,6 +4,8 @@ mod extract;
 #[allow(dead_code)]
 mod macos;
 #[allow(dead_code)]
+mod providers;
+#[allow(dead_code)]
 mod runtime;
 #[allow(dead_code)]
 mod window;
