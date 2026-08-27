@@ -1,0 +1,220 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must never change: macOS ties the Accessibility grant and the Automation
+  # grant for Dia to the signing identity plus this identifier. A different
+  # value makes every upgrade look like a new program, both grants are lost,
+  # and capture silently degrades to no window titles and no browser tab.
+  BUNDLE_ID: dev.pkarpovich.nikki
+  # Apple Silicon only. The crate links Apple frameworks, the runner is arm64,
+  # so this is the native target and nothing is cross-compiled.
+  TARGET: aarch64-apple-darwin
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag that disagrees with Cargo.toml would ship a binary whose version
+      # nobody can trace back, and the formula would carry the wrong number.
+      - name: Tag matches the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(mise exec -- cargo metadata --no-deps --format-version 1 |
+            python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "$tag" != "$crate" ]; then
+            echo "tag $tag does not match Cargo.toml $crate" >&2
+            exit 1
+          fi
+
+      - run: mise run check
+
+      - run: mise exec -- cargo build --release --target "$TARGET"
+
+      # build.rs embeds Info.plist into __TEXT,__info_plist. Without a
+      # non-empty NSAppleEventsUsageDescription there macOS never shows the
+      # Automation prompt for Dia, the extractor is denied for the life of the
+      # binary, and the only symptom is a -1743 in the log - so the release
+      # refuses to ship a binary that lost it.
+      - name: Info.plist is embedded
+        run: |
+          binary="target/$TARGET/release/nikki"
+          plist=$(mktemp)
+          otool -P "$binary" | tail -n +3 > "$plist"
+          plutil -lint "$plist"
+          identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")
+          if [ "$identifier" != "$BUNDLE_ID" ]; then
+            echo "CFBundleIdentifier is $identifier, not $BUNDLE_ID" >&2
+            exit 1
+          fi
+          usage=$(/usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$plist")
+          if [ -z "$usage" ]; then
+            echo "NSAppleEventsUsageDescription is empty" >&2
+            exit 1
+          fi
+
+      - uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+
+      # Hardened runtime and a timestamp, matching scripts/build-signed.sh, so a
+      # binary from CI and one built locally carry the same identity.
+      - name: Sign
+        env:
+          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: |
+          identity=$(security find-identity -v -p codesigning |
+            grep "Developer ID Application" | grep "($TEAM_ID)" |
+            head -n 1 | awk '{print $2}')
+          if [ -z "$identity" ]; then
+            echo "no Developer ID Application identity for team $TEAM_ID" >&2
+            exit 1
+          fi
+          binary="target/$TARGET/release/nikki"
+          codesign --force --timestamp --options runtime \
+            --identifier "$BUNDLE_ID" --sign "$identity" "$binary"
+          codesign --verify --strict --verbose=2 "$binary"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czf "dist/nikki-$TARGET.tar.gz" -C "target/$TARGET/release" nikki
+          cd dist && shasum -a 256 *.tar.gz > checksums.txt && cat checksums.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true
+
+  formula:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Read the version and the checksum
+        id: facts
+        run: |
+          {
+            echo "version=${GITHUB_REF_NAME#v}"
+            echo "sha=$(shasum -a 256 "dist/nikki-$TARGET.tar.gz" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          repository: pkarpovich/homebrew-apps
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Write the formula
+        env:
+          VERSION: ${{ steps.facts.outputs.version }}
+          SHA: ${{ steps.facts.outputs.sha }}
+        run: |
+          cat > tap/Formula/nikki.rb <<EOF
+          class Nikki < Formula
+            desc "macOS activity capture daemon"
+            homepage "https://github.com/pkarpovich/nikki"
+            version "${VERSION}"
+            license "MIT"
+
+            depends_on arch: :arm64
+            depends_on :macos
+
+            url "https://github.com/pkarpovich/nikki/releases/download/v${VERSION}/nikki-${TARGET}.tar.gz"
+            sha256 "${SHA}"
+
+            def install
+              bin.install "nikki"
+            end
+
+            # Homebrew writes and loads the LaunchAgent itself, so launchd is the
+            # responsible process for TCC and both grants land on nikki rather
+            # than on whatever terminal started it.
+            service do
+              run [opt_bin/"nikki"]
+              keep_alive true
+              log_path var/"log/nikki.log"
+              error_log_path var/"log/nikki.err.log"
+            end
+
+            def caveats
+              <<~CAVEATS
+                Write ~/.config/nikki/config.toml BEFORE starting the service.
+                service_url and device are required and the daemon exits without
+                them, which under keep_alive is a restart loop. The full set of
+                keys is in the README; the minimum is:
+
+                  service_url = "https://nikki.example"
+                  device = "mbp-21"
+
+                  [browser]
+                  profile = "MBP_21"
+
+                Then:
+
+                  nikki --check-config
+                  brew services start nikki
+
+                Grant Accessibility to nikki in System Settings > Privacy &
+                Security. Without it capture continues, but every window title
+                and document path is null and records carry degraded: true.
+
+                The first time it reads a browser tab macOS asks for Automation
+                access to Dia. Declining is permanent for this binary and the
+                only symptom is a -1743 in the log.
+              CAVEATS
+            end
+
+            test do
+              assert_match "nikki captures what happens on this Mac", shell_output("#{bin}/nikki --help")
+            end
+          end
+          EOF
+
+      - name: Commit and push
+        working-directory: tap
+        env:
+          VERSION: ${{ steps.facts.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/nikki.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "nikki ${VERSION}"
+          git push

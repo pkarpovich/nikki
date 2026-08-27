@@ -584,17 +584,17 @@ max_bytes = 536870912
 - Create: `Cargo.toml`, `src/main.rs`, `src/config.rs`
 - Create: `.mise.toml`, `Info.plist.template`, `scripts/bundle.sh`, `CLAUDE.md`, `README.md`
 
-- [ ] `.mise.toml` pinning rust 1.98 with `rustfmt` and `clippy`, and tasks `build`, `test`, `lint` (`cargo clippy --all-targets -- -D warnings`), `fmt`, and `check` running fmt-check, clippy and tests in sequence
-- [ ] cargo project with tokio, tracing, serde, argh; crates at their latest releases, verified at add time
-- [ ] declare `mod config;` in `main.rs`
-- [ ] config from `~/.config/nikki/config.toml` with every field from Technical Details and its default; an unparseable file is a startup error naming the field
-- [ ] reject `tick_interval` outside `[1, 3600]` at startup with a named error - the server rejects such ticks per-record and the daemon then deletes them, so shipping them destroys the whole window stream while looking healthy
-- [ ] require `service_url` (absolute http/https), `device` (non-empty) and `browser.profile` (non-empty) at startup, each failure naming the field; honour `NIKKI_CONFIG` and `NIKKI_STATE_DIR` overrides
-- [ ] `Info.plist.template` with `LSUIElement` true, a stable `CFBundleIdentifier`, `CFBundleExecutable`, `CFBundleName`, `CFBundleVersion`, `CFBundleShortVersionString`, `CFBundlePackageType` `APPL`, `LSMinimumSystemVersion`, and **`NSAppleEventsUsageDescription`** - without that string macOS never shows the Automation prompt, the Dia extractor is denied for the life of the bundle, and the only symptom is a `-1743` in the log
-- [ ] `scripts/bundle.sh` assembling `nikki.app` from the built binary and the plist template; signing is out of scope here
-- [ ] `CLAUDE.md` recording the conventions, above all the unsafe-containment rule, the inline-test rule and the declare-every-module rule
-- [ ] write tests for config defaults, full parse, each error case, both ends of the `tick_interval` bound, each missing required field, and that `NIKKI_CONFIG`/`NIKKI_STATE_DIR` are honoured
-- [ ] run the per-task gate - must pass before Task 2
+- [x] `.mise.toml` pinning rust 1.98 with `rustfmt` and `clippy`, and tasks `build`, `test`, `lint` (`cargo clippy --all-targets -- -D warnings`), `fmt`, and `check` running fmt-check, clippy and tests in sequence
+- [x] cargo project with tokio, tracing, serde, argh; crates at their latest releases, verified at add time
+- [x] declare `mod config;` in `main.rs`
+- [x] config from `~/.config/nikki/config.toml` with every field from Technical Details and its default; an unparseable file is a startup error naming the field
+- [x] reject `tick_interval` outside `[1, 3600]` at startup with a named error - the server rejects such ticks per-record and the daemon then deletes them, so shipping them destroys the whole window stream while looking healthy
+- [x] require `service_url` (absolute http/https), `device` (non-empty) and `browser.profile` (non-empty) at startup, each failure naming the field; honour `NIKKI_CONFIG` and `NIKKI_STATE_DIR` overrides
+- [x] `Info.plist.template` with `LSUIElement` true, a stable `CFBundleIdentifier`, `CFBundleExecutable`, `CFBundleName`, `CFBundleVersion`, `CFBundleShortVersionString`, `CFBundlePackageType` `APPL`, `LSMinimumSystemVersion`, and **`NSAppleEventsUsageDescription`** - without that string macOS never shows the Automation prompt, the Dia extractor is denied for the life of the bundle, and the only symptom is a `-1743` in the log
+- [x] `scripts/bundle.sh` assembling `nikki.app` from the built binary and the plist template; signing is out of scope here
+- [x] `CLAUDE.md` recording the conventions, above all the unsafe-containment rule, the inline-test rule and the declare-every-module rule
+- [x] write tests for config defaults, full parse, each error case, both ends of the `tick_interval` bound, each missing required field, and that `NIKKI_CONFIG`/`NIKKI_STATE_DIR` are honoured
+- [x] run the per-task gate - must pass before Task 2
 
 ### Task 2: The macos module - all unsafe lives here
 
@@ -602,21 +602,21 @@ max_bytes = 536870912
 - Create: `src/macos/mod.rs`, `src/macos/ax.rs`, `src/macos/window_list.rs`, `src/macos/activity.rs`, `src/macos/events.rs`
 - Modify: `src/main.rs`, `Cargo.toml`
 
-- [ ] add the FFI crates to `Cargo.toml`; declare `mod macos;` in `main.rs` and every file as `mod ax; mod window_list; mod activity; mod events;` in `src/macos/mod.rs`
-- [ ] `ax.rs`: application element, window list, focused window, attribute read with a type-id check before wrapping, `AXDocument`, and `AXUIElementSetMessagingTimeout` applied to every element (0.4s)
-- [ ] release every Copy/Create value on every path including error returns; the attribute reader must release before returning a type mismatch
-- [ ] `window_list.rs`: `CGWindowListCopyWindowInfo` and `CGGetActiveDisplayList` plus `CGDisplayBounds`, returning plain Rust structs with owner pid, owner name, window number, bounds, layer and front-to-back index - **no minimised flag**, since `.optionOnScreenOnly` already excludes minimised windows
-- [ ] `activity.rs`: idle seconds truncated to an integer, key and mouse counters, microphone running state, and the display containing the mouse cursor
-- [ ] `window_list.rs` also exposes `frontmost_application()` and `bundle_id_for_pid(pid) -> Option<String>` over `NSRunningApplication`, with the same release discipline as the rest of the module - `kCGWindowOwnerName` is the display name (`Zed`), not the bundle identifier (`dev.zed.Zed`), and `bundle_id` is a required field on three kinds and rides every `visible[]` entry, so without this the provider must either put `unsafe` outside this module or silently ship the display name, which the server accepts as opaque text while the bundle-id-keyed extractor registry then never matches anything
-- [ ] `events.rs`: the dedicated event thread from Context - own `CFRunLoopGetCurrent()`, add every source to it in `kCFRunLoopDefaultMode`, run `CFRunLoopRun()`, convert each callback into a plain Rust event value onto an mpsc channel, and stop via `CFRunLoopStop` on shutdown
-- [ ] register on that run loop: `NSWorkspace` activation, sleep and wake; distributed lock and unlock; `AXObserver` for focused-window, title, created and destroyed, re-registered when the frontmost application changes; display reconfiguration
-- [ ] the module's public API exposes only safe types; no raw pointer crosses its boundary
-- [ ] write tests for the pure parts: counter differencing including wraparound, event mapping, bounds arithmetic
-- [ ] the `willSleep` handler sends its event with a completion handle and blocks on the flush acknowledgement for at most 2s before returning - the one exception to post-and-return, and the only thing that can delay the sleep transition
-- [ ] callbacks carrying transient state capture it at callback time rather than leaving it to be resampled when the event is drained
-- [ ] write a test that the event thread starts, delivers a synthesised event onto the channel, and stops cleanly on shutdown
-- [ ] write a test that the `willSleep` handler does not return until the acknowledgement arrives, and does return once the 2s budget expires without one
-- [ ] run the per-task gate - must pass before Task 3
+- [x] add the FFI crates to `Cargo.toml`; declare `mod macos;` in `main.rs` and every file as `mod ax; mod window_list; mod activity; mod events;` in `src/macos/mod.rs`
+- [x] `ax.rs`: application element, window list, focused window, attribute read with a type-id check before wrapping, `AXDocument`, and `AXUIElementSetMessagingTimeout` applied to every element (0.4s)
+- [x] release every Copy/Create value on every path including error returns; the attribute reader must release before returning a type mismatch
+- [x] `window_list.rs`: `CGWindowListCopyWindowInfo` and `CGGetActiveDisplayList` plus `CGDisplayBounds`, returning plain Rust structs with owner pid, owner name, window number, bounds, layer and front-to-back index - **no minimised flag**, since `.optionOnScreenOnly` already excludes minimised windows
+- [x] `activity.rs`: idle seconds truncated to an integer, key and mouse counters, microphone running state, and the display containing the mouse cursor
+- [x] `window_list.rs` also exposes `frontmost_application()` and `bundle_id_for_pid(pid) -> Option<String>` over `NSRunningApplication`, with the same release discipline as the rest of the module - `kCGWindowOwnerName` is the display name (`Zed`), not the bundle identifier (`dev.zed.Zed`), and `bundle_id` is a required field on three kinds and rides every `visible[]` entry, so without this the provider must either put `unsafe` outside this module or silently ship the display name, which the server accepts as opaque text while the bundle-id-keyed extractor registry then never matches anything
+- [x] `events.rs`: the dedicated event thread from Context - own `CFRunLoopGetCurrent()`, add every source to it in `kCFRunLoopDefaultMode`, run `CFRunLoopRun()`, convert each callback into a plain Rust event value onto an mpsc channel, and stop via `CFRunLoopStop` on shutdown
+- [x] register on that run loop: `NSWorkspace` activation, sleep and wake; distributed lock and unlock; `AXObserver` for focused-window, title, created and destroyed, re-registered when the frontmost application changes; display reconfiguration
+- [x] the module's public API exposes only safe types; no raw pointer crosses its boundary
+- [x] write tests for the pure parts: counter differencing including wraparound, event mapping, bounds arithmetic
+- [x] the `willSleep` handler sends its event with a completion handle and blocks on the flush acknowledgement for at most 2s before returning - the one exception to post-and-return, and the only thing that can delay the sleep transition
+- [x] callbacks carrying transient state capture it at callback time rather than leaving it to be resampled when the event is drained
+- [x] write a test that the event thread starts, delivers a synthesised event onto the channel, and stops cleanly on shutdown
+- [x] write a test that the `willSleep` handler does not return until the acknowledgement arrives, and does return once the 2s budget expires without one
+- [x] run the per-task gate - must pass before Task 3
 
 ### Task 3: Visibility resolution (test-first)
 
@@ -624,11 +624,11 @@ max_bytes = 536870912
 - Create: `src/window/mod.rs`, `src/window/visibility.rs`
 - Modify: `src/main.rs`
 
-- [ ] declare `mod window;` in `main.rs` and `mod visibility;` in `src/window/mod.rs`
-- [ ] write the tests first from fixture rectangles: window wholly inside one display; wholly outside every display; straddling two displays with unequal overlap, asserting the larger one wins; straddling with an exact tie, asserting the lower index wins; intersecting exactly one pixel; intersecting exactly at the 20% threshold from both sides; layer non-zero; a window whose display is absent from the display list
-- [ ] implement the pure resolver over window and display rectangles, returning the visible set with each window's display and front-to-back index `z`
-- [ ] a window intersecting no listed display is not visible, and the case is logged rather than silently dropped
-- [ ] run the per-task gate - must pass before Task 4
+- [x] declare `mod window;` in `main.rs` and `mod visibility;` in `src/window/mod.rs`
+- [x] write the tests first from fixture rectangles: window wholly inside one display; wholly outside every display; straddling two displays with unequal overlap, asserting the larger one wins; straddling with an exact tie, asserting the lower index wins; intersecting exactly one pixel; intersecting exactly at the 20% threshold from both sides; layer non-zero; a window whose display is absent from the display list
+- [x] implement the pure resolver over window and display rectangles, returning the visible set with each window's display and front-to-back index `z`
+- [x] a window intersecting no listed display is not visible, and the case is logged rather than silently dropped
+- [x] run the per-task gate - must pass before Task 4
 
 ### Task 4: Buffer, sequence and cursors
 
@@ -638,18 +638,18 @@ max_bytes = 536870912
 
 *Deliberately before the providers: providers persist cursors through the runtime, so building them first would force a stub that the buffer task then rewrites, leaving the provider's only tested behaviour unproven.*
 
-- [ ] add the SQLite crate to `Cargo.toml`; declare `mod runtime;` in `main.rs` and `mod buffer; mod dedup;` in `src/runtime/mod.rs`
-- [ ] `dedup.rs`: the two key formulas from the wire contract, over unit-separator-joined fields, `sha256` truncated to 16 hex characters - it lives here, not with shipping, because the window key hashes `seq` and only this task can produce one
-- [ ] SQLite buffer with the four tables from Technical Details, opened with `journal_mode = WAL` and `busy_timeout = 5000`, all writes serialised through one owner task
-- [ ] `enqueue(records, cursor)` allocates the monotonic `seq` from `meta`, derives each record's `dedup_key` from it, writes the pending envelopes and advances the cursor - **all in one transaction**, returning only after commit
-- [ ] `seq` survives restart and never repeats
-- [ ] `pending` enforces `max_rows` and `max_bytes`, evicting oldest-first until **both** totals are under their limits, then enqueues a `buffer_overflow` record whose payload is exactly the shape pinned in the wire contract - and which is keyed through the same path as any other record, so it carries a real `seq` and `dedup_key`
-- [ ] `dead_letter` has its own separate cap (5 000 rows, 50 MB) evicting its own oldest rows, so unshippable records can never consume the live buffer's budget
-- [ ] `take_batch`, `delete_batch`, `dead_letter` and a synchronous `flush_now` the sleep handler awaits
-- [ ] write tests for: enqueue atomicity (a cursor never advances when the envelope insert fails); seq monotonic across a simulated restart; overflow evicting until both limits are satisfied and emitting exactly one overflow record; the overflow record carrying a non-empty `dedup_key` and a non-zero `seq`; `dead_letter` filling its own cap without evicting a single `pending` row; take and delete round-trip
-- [ ] write a test that two records of the same kind in the same millisecond get different keys
-- [ ] write a concurrency test: both providers enqueueing while the shipper drains, with no `SQLITE_BUSY` surfacing
-- [ ] run the per-task gate - must pass before Task 5
+- [x] add the SQLite crate to `Cargo.toml`; declare `mod runtime;` in `main.rs` and `mod buffer; mod dedup;` in `src/runtime/mod.rs`
+- [x] `dedup.rs`: the two key formulas from the wire contract, over unit-separator-joined fields, `sha256` truncated to 16 hex characters - it lives here, not with shipping, because the window key hashes `seq` and only this task can produce one
+- [x] SQLite buffer with the four tables from Technical Details, opened with `journal_mode = WAL` and `busy_timeout = 5000`, all writes serialised through one owner task
+- [x] `enqueue(records, cursor)` allocates the monotonic `seq` from `meta`, derives each record's `dedup_key` from it, writes the pending envelopes and advances the cursor - **all in one transaction**, returning only after commit
+- [x] `seq` survives restart and never repeats
+- [x] `pending` enforces `max_rows` and `max_bytes`, evicting oldest-first until **both** totals are under their limits, then enqueues a `buffer_overflow` record whose payload is exactly the shape pinned in the wire contract - and which is keyed through the same path as any other record, so it carries a real `seq` and `dedup_key`
+- [x] `dead_letter` has its own separate cap (5 000 rows, 50 MB) evicting its own oldest rows, so unshippable records can never consume the live buffer's budget
+- [x] `take_batch`, `delete_batch`, `dead_letter` and a synchronous `flush_now` the sleep handler awaits
+- [x] write tests for: enqueue atomicity (a cursor never advances when the envelope insert fails); seq monotonic across a simulated restart; overflow evicting until both limits are satisfied and emitting exactly one overflow record; the overflow record carrying a non-empty `dedup_key` and a non-zero `seq`; `dead_letter` filling its own cap without evicting a single `pending` row; take and delete round-trip
+- [x] write a test that two records of the same kind in the same millisecond get different keys
+- [x] write a concurrency test: both providers enqueueing while the shipper drains, with no `SQLITE_BUSY` surfacing
+- [x] run the per-task gate - must pass before Task 5
 
 ### Task 5: Shipping and redaction
 
@@ -657,14 +657,14 @@ max_bytes = 536870912
 - Create: `src/runtime/ship.rs`, `src/runtime/redact.rs`
 - Modify: `src/runtime/mod.rs`, `src/runtime/buffer.rs`, `Cargo.toml`
 
-- [ ] add the HTTP client crate to `Cargo.toml`; declare `mod ship; mod redact;` in `src/runtime/mod.rs`
-- [ ] `redact.rs`: rules applied to the envelope **before it is buffered**; URL default host-only **keeping the port**, per-host opt-in, genuinely host-less URLs (`file://`, `data:`) reduced to their scheme while `chrome-extension://` goes through the ordinary host rule, `payload.path` never treated as a URL, and `drop = ["title"]` applied to `visible[]` entries as well as the top-level title
-- [ ] `ship.rs`: batches of up to 500, a 10s connect and 30s total deadline on every request, and the outcome split from the wire contract - 200 with a well-formed body deletes the whole batch and logs each rejection; a 200 whose body does not parse or whose counts do not add up is treated as 5xx; 401/403/404/405 keep the batch and back off, logging at error, because those are configuration rather than bad data; other 4xx dead-letter; 413 halves down to a floor of 10 then dead-letters; 5xx and transport errors back off from 1s to 5m
-- [ ] wire the pipeline as redact -> enqueue (which keys) -> ship, so redaction is on the live path and nothing unredacted is written to disk
-- [ ] write tests for each redaction rule, including a `file:///` reduced to scheme, a `chrome-extension://` keeping its extension id, a `localhost:3000` keeping its port, and `payload.path` surviving whole
-- [ ] write a test asserting no redacted path or query appears in the buffered envelope - constructed so it can fail, by redacting a URL whose path is a distinctive token and grepping the whole serialised envelope for that token
-- [ ] write tests for every branch of the outcome split, including a 200 carrying rejections, a 200 with a malformed body, a 404 that keeps the batch, a 400 that dead-letters, and a 413 halving to the floor
-- [ ] run the per-task gate - must pass before Task 6
+- [x] add the HTTP client crate to `Cargo.toml`; declare `mod ship; mod redact;` in `src/runtime/mod.rs`
+- [x] `redact.rs`: rules applied to the envelope **before it is buffered**; URL default host-only **keeping the port**, per-host opt-in, genuinely host-less URLs (`file://`, `data:`) reduced to their scheme while `chrome-extension://` goes through the ordinary host rule, `payload.path` never treated as a URL, and `drop = ["title"]` applied to `visible[]` entries as well as the top-level title
+- [x] `ship.rs`: batches of up to 500, a 10s connect and 30s total deadline on every request, and the outcome split from the wire contract - 200 with a well-formed body deletes the whole batch and logs each rejection; a 200 whose body does not parse or whose counts do not add up is treated as 5xx; 401/403/404/405 keep the batch and back off, logging at error, because those are configuration rather than bad data; other 4xx dead-letter; 413 halves down to a floor of 10 then dead-letters; 5xx and transport errors back off from 1s to 5m
+- [x] wire the pipeline as redact -> enqueue (which keys) -> ship, so redaction is on the live path and nothing unredacted is written to disk
+- [x] write tests for each redaction rule, including a `file:///` reduced to scheme, a `chrome-extension://` keeping its extension id, a `localhost:3000` keeping its port, and `payload.path` surviving whole
+- [x] write a test asserting no redacted path or query appears in the buffered envelope - constructed so it can fail, by redacting a URL whose path is a distinctive token and grepping the whole serialised envelope for that token
+- [x] write tests for every branch of the outcome split, including a 200 carrying rejections, a 200 with a malformed body, a 404 that keeps the batch, a 400 that dead-letters, and a 413 halving to the floor
+- [x] run the per-task gate - must pass before Task 6
 
 ### Task 6: Extractors
 
@@ -673,16 +673,16 @@ max_bytes = 536870912
 - Create: `fixtures/dia_active_tab.txt`, `fixtures/agterm_tree.json`
 - Modify: `src/main.rs`
 
-- [ ] declare `mod extract;` in `main.rs` and every file in `src/extract/mod.rs`
-- [ ] registry keyed by bundle id, invoked only for the focused application
-- [ ] `document.rs`: the universal `AXDocument` probe keeping only non-empty `file://` values
-- [ ] `dia.rs`: the captured AppleScript verbatim, splitting on `0x1F` into four fields; empty result means not running; parse the trailing `(-NNNN)` from stderr and branch on `-1743` (warn once per process), `-1728`, `-1712` and unknown - all returning empty
-- [ ] `agterm.rs`: resolve `agtermctl` on `PATH` then the bundle path; walk `result.tree.workspaces[].active` then `sessions[].active`; `foreground` is optional and may be `null`; store the file name of `foreground[0]`; no active workspace or session yields empty
-- [ ] every subprocess carries a 2s deadline and is killed when it expires
-- [ ] commit the captured Dia output and agterm JSON from Context as fixtures
-- [ ] write parser tests against both fixtures, including a title containing a comma, a `null` foreground, a tree with no active session, and each AppleScript error code
-- [ ] write a test asserting a hung subprocess yields empty within the deadline rather than blocking
-- [ ] run the per-task gate - must pass before Task 7
+- [x] declare `mod extract;` in `main.rs` and every file in `src/extract/mod.rs`
+- [x] registry keyed by bundle id, invoked only for the focused application
+- [x] `document.rs`: the universal `AXDocument` probe keeping only non-empty `file://` values
+- [x] `dia.rs`: the captured AppleScript verbatim, splitting on `0x1F` into four fields; empty result means not running; parse the trailing `(-NNNN)` from stderr and branch on `-1743` (warn once per process), `-1728`, `-1712` and unknown - all returning empty
+- [x] `agterm.rs`: resolve `agtermctl` on `PATH` then the bundle path; walk `result.tree.workspaces[].active` then `sessions[].active`; `foreground` is optional and may be `null`; store the file name of `foreground[0]`; no active workspace or session yields empty
+- [x] every subprocess carries a 2s deadline and is killed when it expires
+- [x] commit the captured Dia output and agterm JSON from Context as fixtures
+- [x] write parser tests against both fixtures, including a title containing a comma, a `null` foreground, a tree with no active session, and each AppleScript error code
+- [x] write a test asserting a hung subprocess yields empty within the deadline rather than blocking
+- [x] run the per-task gate - must pass before Task 7
 
 ### Task 7: Window provider
 
@@ -690,17 +690,17 @@ max_bytes = 536870912
 - Create: `src/providers/mod.rs`, `src/providers/windows.rs`
 - Modify: `src/main.rs`
 
-- [ ] declare `mod providers;` in `main.rs` and `mod windows;` in `src/providers/mod.rs`
-- [ ] the `Provider` trait, `Emission`, `Ctx`, and the supervision harness - restart with backoff, owned here and nowhere else
-- [ ] window provider driven by every event source in Technical Details plus the heartbeat tick, with each source emitting the kind stated there
-- [ ] sample assembly in the specified order, with `display` sourced from the window list rather than Accessibility, and the single-Accessibility-window join rule producing `title_reason` when ambiguous
-- [ ] stamp `tick_interval_sec` from config onto every `tick` payload
-- [ ] `visible[]` entries carry `app`, `bundle_id`, `title`, `title_reason`, `display` and `z`, with `bundle_id` from `bundle_id_for_pid` and `app` from the owner name
-- [ ] event-driven assembly is debounced at 300 ms - an event schedules assembly, further events reset the timer, one sample is emitted when it expires; the heartbeat tick is not debounced
-- [ ] set `degraded: true` when Accessibility is unavailable or its calls fail, keeping everything that still works
-- [ ] write tests for sample assembly from mocked sources: tick path, each event path and the kind it emits, the ambiguous-title rule, `display` resolved with Accessibility unavailable, and the degraded path
-- [ ] write a test that a burst of five events inside the debounce window produces one sample and spawns one extractor invocation, not five
-- [ ] run the per-task gate - must pass before Task 8
+- [x] declare `mod providers;` in `main.rs` and `mod windows;` in `src/providers/mod.rs`
+- [x] the `Provider` trait, `Emission`, `Ctx`, and the supervision harness - restart with backoff, owned here and nowhere else
+- [x] window provider driven by every event source in Technical Details plus the heartbeat tick, with each source emitting the kind stated there
+- [x] sample assembly in the specified order, with `display` sourced from the window list rather than Accessibility, and the single-Accessibility-window join rule producing `title_reason` when ambiguous
+- [x] stamp `tick_interval_sec` from config onto every `tick` payload
+- [x] `visible[]` entries carry `app`, `bundle_id`, `title`, `title_reason`, `display` and `z`, with `bundle_id` from `bundle_id_for_pid` and `app` from the owner name
+- [x] event-driven assembly is debounced at 300 ms - an event schedules assembly, further events reset the timer, one sample is emitted when it expires; the heartbeat tick is not debounced
+- [x] set `degraded: true` when Accessibility is unavailable or its calls fail, keeping everything that still works
+- [x] write tests for sample assembly from mocked sources: tick path, each event path and the kind it emits, the ambiguous-title rule, `display` resolved with Accessibility unavailable, and the degraded path
+- [x] write a test that a burst of five events inside the debounce window produces one sample and spawns one extractor invocation, not five
+- [x] run the per-task gate - must pass before Task 8
 
 ### Task 8: Browser history provider
 
@@ -709,36 +709,36 @@ max_bytes = 536870912
 - Create: `fixtures/history_sample.db`
 - Modify: `src/providers/mod.rs`
 
-- [ ] declare `mod browser_history;` in `src/providers/mod.rs`
-- [ ] resolve the configured display name to a directory through `Local State` on **every** poll, reading only `profile.info_cache` and tolerating unknown fields; a name absent at **startup** is a fatal error listing the names that exist, while a name that disappears **at poll time** logs a warn and skips that poll rather than killing a running daemon
-- [ ] read by cloning `History` and `History-journal` with `clonefile` into a temporary directory, opening the copy read-only, running `PRAGMA quick_check`, and deleting the copy after the read; anything other than `ok` discards the copy and skips the poll without advancing the cursor
-- [ ] the captured query from Context, paged by `visits.id`, 5000 rows at a time, reading `id > cursor - revisit_window` so a filled-in `visit_duration` is picked up
-- [ ] **emit a re-read row only when its `title`, `transition` or `visit_duration` differs from the last shipped values for that `visits.id`**; persist those values per profile beside the cursor, pruned to the same window
-- [ ] convert `visit_time` with `visit_time / 1000000 - 11644473600` and `visit_duration` with `visit_duration / 1000`; store `transition` raw
-- [ ] first run starts from `max(id) - revisit_window` rather than backfilling the whole history
-- [ ] `max(id) < cursor` means the database was replaced: log at warn, increment the per-profile `generation`, reset the cursor and clear the last-shipped map - the generation is part of the dedup key, so without incrementing it the reused ids would collide with stored visits and the server would silently merge two unrelated ones
-- [ ] cursor and generation per profile, emitted together with the records they cover
-- [ ] poll on `history_poll_interval` (default 5m)
-- [ ] commit a small anonymised history database and a `Local State` fixture
-- [ ] write tests for both conversions against the captured live values (`22874541` microseconds becomes `22874` ms), paging across the limit, cursor advance, first-run cursor selection, and `Local State` parsing including an entry with a missing `name` and an unknown top-level field
-- [ ] write a test that an unchanged re-read row is **not** emitted while one whose duration changed **is**
-- [ ] write a test that a reset increments the generation and that keys before and after the reset differ for the same `visits.id`
-- [ ] write a test that a `file:///` row ships with `url` reduced to `file:///` and is not dropped
-- [ ] write a clone test that actually exercises the lock: hold an **exclusive** lock on the source (`BEGIN EXCLUSIVE`), assert a direct read fails, then assert the clone path succeeds - a test using an ordinary reader proves nothing, since SQLite readers do not block readers
-- [ ] write a test that a copy failing `quick_check` is discarded and the cursor does not move
-- [ ] run the per-task gate - must pass before Task 9
+- [x] declare `mod browser_history;` in `src/providers/mod.rs`
+- [x] resolve the configured display name to a directory through `Local State` on **every** poll, reading only `profile.info_cache` and tolerating unknown fields; a name absent at **startup** is a fatal error listing the names that exist, while a name that disappears **at poll time** logs a warn and skips that poll rather than killing a running daemon
+- [x] read by cloning `History` and `History-journal` with `clonefile` into a temporary directory, opening the copy read-only, running `PRAGMA quick_check`, and deleting the copy after the read; anything other than `ok` discards the copy and skips the poll without advancing the cursor
+- [x] the captured query from Context, paged by `visits.id`, 5000 rows at a time, reading `id > cursor - revisit_window` so a filled-in `visit_duration` is picked up
+- [x] **emit a re-read row only when its `title`, `transition` or `visit_duration` differs from the last shipped values for that `visits.id`**; persist those values per profile beside the cursor, pruned to the same window
+- [x] convert `visit_time` with `visit_time / 1000000 - 11644473600` and `visit_duration` with `visit_duration / 1000`; store `transition` raw
+- [x] first run starts from `max(id) - revisit_window` rather than backfilling the whole history
+- [x] `max(id) < cursor` means the database was replaced: log at warn, increment the per-profile `generation`, reset the cursor and clear the last-shipped map - the generation is part of the dedup key, so without incrementing it the reused ids would collide with stored visits and the server would silently merge two unrelated ones
+- [x] cursor and generation per profile, emitted together with the records they cover
+- [x] poll on `history_poll_interval` (default 5m)
+- [x] commit a small anonymised history database and a `Local State` fixture
+- [x] write tests for both conversions against the captured live values (`22874541` microseconds becomes `22874` ms), paging across the limit, cursor advance, first-run cursor selection, and `Local State` parsing including an entry with a missing `name` and an unknown top-level field
+- [x] write a test that an unchanged re-read row is **not** emitted while one whose duration changed **is**
+- [x] write a test that a reset increments the generation and that keys before and after the reset differ for the same `visits.id`
+- [x] write a test that a `file:///` row ships with `url` reduced to `file:///` and is not dropped
+- [x] write a clone test that actually exercises the lock: hold an **exclusive** lock on the source (`BEGIN EXCLUSIVE`), assert a direct read fails, then assert the clone path succeeds - a test using an ordinary reader proves nothing, since SQLite readers do not block readers
+- [x] write a test that a copy failing `quick_check` is discarded and the cursor does not move
+- [x] run the per-task gate - must pass before Task 9
 
 ### Task 9: Wire it together
 
 **Files:**
 - Modify: `src/main.rs`, `src/runtime/mod.rs`
 
-- [ ] main starts the event thread and the runtime, registers both providers, and runs until SIGTERM
-- [ ] graceful shutdown: stop providers, `CFRunLoopStop` the event thread and join it, flush one final batch, close the buffer
-- [ ] structured logging with a one-line startup summary naming the device, service URL, granted permissions, resolved browser profile and enabled providers
-- [ ] a provider that panics is caught, logged and restarted without taking down the process
-- [ ] write a test asserting a panicking provider restarts while the other keeps emitting
-- [ ] run the per-task gate - must pass before Task 10
+- [x] main starts the event thread and the runtime, registers both providers, and runs until SIGTERM
+- [x] graceful shutdown: stop providers, `CFRunLoopStop` the event thread and join it, flush one final batch, close the buffer
+- [x] structured logging with a one-line startup summary naming the device, service URL, granted permissions, resolved browser profile and enabled providers
+- [x] a provider that panics is caught, logged and restarted without taking down the process
+- [x] write a test asserting a panicking provider restarts while the other keeps emitting
+- [x] run the per-task gate - must pass before Task 10
 
 ### Task 10: Verify acceptance criteria
 
@@ -748,22 +748,22 @@ max_bytes = 536870912
 - Create: `scripts/acceptance.sh`, `tests/stub_server.rs`
 - Modify: `src/macos/events.rs`
 
-- [ ] `tests/stub_server.rs` is a test-only HTTP server recording requests and returning a scripted sequence of responses; `scripts/acceptance.sh` runs the daemon against it and asserts the checks below
-- [ ] the harness sets `NIKKI_CONFIG` and `NIKKI_STATE_DIR` into a temporary directory, so it can never read or write the operator's real config or buffer
-- [ ] `events.rs` honours `NIKKI_TEST_EVENTS=<path>`: when set, the event thread reads newline-delimited event values from that file instead of registering OS sources. Without this seam the entire event half of the daemon - every `state_change`, `lock`, `sleep` and `wake` - can only be exercised by a human doing things on a Mac, so an unattended run has no way to assert the kinds the server was just changed to accept
-- [ ] run the per-task gate over the whole crate
-- [ ] `scripts/bundle.sh` produces `nikki.app`, and its `Info.plist` contains `LSUIElement` true and a non-empty `NSAppleEventsUsageDescription`
-- [ ] envelopes recorded by the stub match the wire contract exactly, including `tick_interval_sec` on every tick
-- [ ] with a synthesised title-change event injected through `NIKKI_TEST_EVENTS`, the stub records a `state_change` with `app`, `bundle_id` and `display` present
-- [ ] `seq` is monotonic across a daemon restart
-- [ ] `dedup_key` contains no path or query from a redacted URL
-- [ ] with the stub returning 500, records accumulate in the buffer and drain once it returns 200
-- [ ] with the stub returning 200 carrying a rejection for one record, the whole batch is deleted and the rejection logged
-- [ ] with the stub returning 200 and a malformed body, the batch is kept and retried
-- [ ] with the stub returning 400, the batch lands in `dead_letter` and shipping continues
-- [ ] with the stub returning 404, the batch is **kept** and retried rather than dead-lettered
-- [ ] filling the buffer past `max_rows` evicts oldest-first until both limits are satisfied and enqueues exactly one `buffer_overflow` record, itself carrying a real `seq` and `dedup_key`
-- [ ] running with Accessibility unavailable still ships samples with `degraded: true`, a non-null `display` and null titles
+- [x] `tests/stub_server.rs` is a test-only HTTP server recording requests and returning a scripted sequence of responses; `scripts/acceptance.sh` runs the daemon against it and asserts the checks below
+- [x] the harness sets `NIKKI_CONFIG` and `NIKKI_STATE_DIR` into a temporary directory, so it can never read or write the operator's real config or buffer - and `HOME` too, so the browser profile it resolves is the committed fixture rather than the operator's own
+- [x] `events.rs` honours `NIKKI_TEST_EVENTS=<path>`: when set, the event thread reads newline-delimited event values from that file instead of registering OS sources. Without this seam the entire event half of the daemon - every `state_change`, `lock`, `sleep` and `wake` - can only be exercised by a human doing things on a Mac, so an unattended run has no way to assert the kinds the server was just changed to accept
+- [x] run the per-task gate over the whole crate
+- [x] `scripts/bundle.sh` produces `nikki.app`, and its `Info.plist` contains `LSUIElement` true and a non-empty `NSAppleEventsUsageDescription`
+- [x] envelopes recorded by the stub match the wire contract exactly, including `tick_interval_sec` on every tick
+- [x] with a synthesised title-change event injected through `NIKKI_TEST_EVENTS`, the stub records a `state_change` with `app`, `bundle_id` and `display` present
+- [x] `seq` is monotonic across a daemon restart
+- [x] `dedup_key` contains no path or query from a redacted URL
+- [x] with the stub returning 500, records accumulate in the buffer and drain once it returns 200
+- [x] with the stub returning 200 carrying a rejection for one record, the whole batch is deleted and the rejection logged
+- [x] with the stub returning 200 and a malformed body, the batch is kept and retried
+- [x] with the stub returning 400, the batch lands in `dead_letter` and shipping continues
+- [x] with the stub returning 404, the batch is **kept** and retried rather than dead-lettered
+- [x] filling the buffer past `max_rows` evicts oldest-first until both limits are satisfied and enqueues exactly one `buffer_overflow` record, itself carrying a real `seq` and `dedup_key`
+- [x] running with Accessibility unavailable still ships samples with `degraded: true`, a non-null `display` and null titles - the harness asserts the non-null `display` and the null titles on every degraded sample, and asserts `degraded: true` on every sample whenever the daemon reports Accessibility unavailable. macOS attributes Accessibility to the *responsible* process, so a daemon spawned from an already-granted terminal is trusted and cannot be untrusted on demand; on such a run the harness prints that the branch was not exercised rather than passing silently, and the branch itself is covered by `a_display_is_still_resolved_when_accessibility_is_unavailable` in `src/providers/windows.rs`
 
 ### Task 11: Documentation
 
@@ -772,9 +772,9 @@ max_bytes = 536870912
 **Files:**
 - Modify: `README.md`, `CLAUDE.md`
 
-- [ ] README: the permissions and why each is needed, the config file with every field, the provider model and how to add one, and the wire contract
-- [ ] CLAUDE.md: the unsafe-containment rule, the inline-test rule, the declare-every-module rule, the per-task gate
-- [ ] move this plan to `docs/plans/completed/`
+- [x] README: the permissions and why each is needed, the config file with every field, the provider model and how to add one, and the wire contract
+- [x] CLAUDE.md: the unsafe-containment rule, the inline-test rule, the declare-every-module rule, the per-task gate
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

@@ -1,0 +1,31 @@
+[package]
+name = "nikki"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argh = "0.1.19"
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["std", "libc", "HIServices", "AXUIElement", "AXError"] }
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFBase", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow", "CGDirectDisplay", "CGDisplayConfiguration", "CGEvent", "CGEventSource", "CGEventTypes", "CGError", "CGGeometry", "CGBase"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSString", "NSArray", "NSDictionary", "NSNotification", "NSDistributedNotificationCenter", "NSOperation", "NSObjCRuntime", "NSObject"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "http2", "charset", "system-proxy"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "signal", "sync", "time"] }
+toml = "1.1.4"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+url = "2.5.8"
+
+[dev-dependencies]
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "signal", "sync", "time", "test-util"] }
