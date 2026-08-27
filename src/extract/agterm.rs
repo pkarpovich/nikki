@@ -11,6 +11,8 @@ use crate::macos::processes::{Pane, agterm_panes};
 const PROGRAM: &str = "agtermctl";
 const BUNDLED_PROGRAM: &str = "/Applications/agterm.app/Contents/MacOS/agtermctl";
 const LEFT_SURFACE: &str = "left";
+const QUICK_SURFACE: &str = "quick";
+const SURFACE_ADDRESS: &str = "surface:";
 const COMMAND_LIMIT: usize = 512;
 
 static MISSING_PROGRAM_WARNING: Once = Once::new();
@@ -67,7 +69,7 @@ fn parse_tree(stdout: &str, panes: &[Pane]) -> Details {
     };
     let Response {
         result: TreeResult {
-            tree: Tree { workspaces },
+            tree: Tree { workspaces, screen },
         },
     } = response;
 
@@ -98,10 +100,10 @@ fn parse_tree(stdout: &str, panes: &[Pane]) -> Details {
         return Details::new();
     };
 
-    compose(&workspace, &session, panes)
+    compose(&workspace, &session, panes, &screen)
 }
 
-fn compose(workspace: &str, session: &Session, panes: &[Pane]) -> Details {
+fn compose(workspace: &str, session: &Session, panes: &[Pane], screen: &Screen) -> Details {
     let Session {
         id,
         name,
@@ -118,7 +120,7 @@ fn compose(workspace: &str, session: &Session, panes: &[Pane]) -> Details {
     );
     details.insert("session".to_string(), Value::String(session_identity(name)));
 
-    let surface = active_surface(surfaces);
+    let surface = surface_on_screen(screen, id, surfaces);
     let mut on_screen = None;
     if let Some(surface) = &surface {
         details.insert("surface".to_string(), Value::String(surface.clone()));
@@ -184,6 +186,28 @@ fn command_line(argv: &[String]) -> Option<String> {
     Some(cut)
 }
 
+fn surface_on_screen(screen: &Screen, session: &str, surfaces: &[Surface]) -> Option<String> {
+    if screen.quick_visible {
+        return Some(QUICK_SURFACE.to_string());
+    }
+    let Some(zoomed) = &screen.zoomed_surface else {
+        return active_surface(surfaces);
+    };
+    zoomed_surface(zoomed, session)
+}
+
+fn zoomed_surface(zoomed: &str, session: &str) -> Option<String> {
+    if zoomed == QUICK_SURFACE {
+        return Some(QUICK_SURFACE.to_string());
+    }
+    let address = zoomed.strip_prefix(SURFACE_ADDRESS)?;
+    let (zoomed_session, kind) = address.rsplit_once(':')?;
+    if kind.is_empty() || !zoomed_session.eq_ignore_ascii_case(session) {
+        return None;
+    }
+    Some(kind.to_string())
+}
+
 fn active_surface(surfaces: &[Surface]) -> Option<String> {
     for Surface {
         kind,
@@ -235,6 +259,16 @@ struct TreeResult {
 struct Tree {
     #[serde(default)]
     workspaces: Vec<Workspace>,
+    #[serde(flatten)]
+    screen: Screen,
+}
+
+#[derive(Deserialize, Default)]
+struct Screen {
+    #[serde(default, rename = "quickVisible")]
+    quick_visible: bool,
+    #[serde(default, rename = "zoomedSurface")]
+    zoomed_surface: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -446,6 +480,94 @@ mod tests {
     }
 
     #[test]
+    fn a_visible_quick_terminal_is_the_surface_on_screen_and_names_no_pane() {
+        let mut tree = captured();
+        tree["result"]["tree"]["quickVisible"] = Value::Bool(true);
+        let panes = [pane(
+            "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+            "left",
+            &["claude", "--resume"],
+            Some("/Users/pavel.karpovich/Projects/nikki/src"),
+        )];
+
+        let details = parse_tree(&tree.to_string(), &panes);
+
+        assert_eq!(details["session"], "nikki daemon");
+        assert_eq!(details["surface"], "quick");
+        assert!(!details.contains_key("command"));
+        assert!(!details.contains_key("cwd"));
+        assert!(!details.contains_key("foreground"));
+    }
+
+    #[test]
+    fn a_zoomed_pane_outranks_the_one_the_session_calls_active() {
+        let mut tree = captured();
+        tree["result"]["tree"]["zoomedSurface"] =
+            Value::String("surface:5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46:scratch".to_string());
+        let panes = [
+            pane(
+                "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+                "left",
+                &["claude", "--resume"],
+                Some("/Users/pavel.karpovich/Projects/nikki/src"),
+            ),
+            pane(
+                "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+                "scratch",
+                &["rx", "plan.md"],
+                Some("/Users/pavel.karpovich/Projects/nikki/docs"),
+            ),
+        ];
+
+        let details = parse_tree(&tree.to_string(), &panes);
+
+        assert_eq!(details["surface"], "scratch");
+        assert_eq!(details["command"], "rx plan.md");
+        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki/docs");
+        assert!(!details.contains_key("foreground"));
+    }
+
+    #[test]
+    fn a_zoom_that_names_another_session_leaves_the_surface_unknown() {
+        let mut tree = captured();
+        tree["result"]["tree"]["zoomedSurface"] =
+            Value::String("surface:A-DIFFERENT-SESSION:left".to_string());
+        let panes = [pane(
+            "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+            "left",
+            &["claude", "--resume"],
+            Some("/Users/pavel.karpovich/Projects/nikki/src"),
+        )];
+
+        let details = parse_tree(&tree.to_string(), &panes);
+
+        assert_eq!(details["session"], "nikki daemon");
+        assert!(!details.contains_key("surface"));
+        assert!(!details.contains_key("command"));
+        assert!(!details.contains_key("foreground"));
+    }
+
+    #[test]
+    fn a_zoomed_surface_is_read_from_its_control_address() {
+        let session = "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46";
+        assert_eq!(
+            zoomed_surface(&format!("surface:{session}:right"), session),
+            Some("right".to_string())
+        );
+        assert_eq!(
+            zoomed_surface(&format!("surface:{}:left", session.to_lowercase()), session),
+            Some("left".to_string())
+        );
+        assert_eq!(zoomed_surface("quick", session), Some("quick".to_string()));
+        assert_eq!(zoomed_surface("", session), None);
+        assert_eq!(
+            zoomed_surface(&format!("surface:{session}:"), session),
+            None
+        );
+        assert_eq!(zoomed_surface("surface:left", session), None);
+    }
+
+    #[test]
     fn a_session_omitting_surfaces_still_parses() {
         let mut tree = captured();
         for workspace in workspaces_of(&mut tree) {
@@ -600,6 +722,17 @@ mod tests {
         assert!(
             details.contains_key("surface"),
             "a live session must name the surface the user is looking at"
+        );
+
+        let panes = agterm_panes();
+        println!("the process table yields {} agterm panes", panes.len());
+        assert!(
+            !panes.is_empty(),
+            "a live session runs a shell, so the process table must yield at least one pane"
+        );
+        assert!(
+            panes.iter().any(|pane| !pane.argv.is_empty()),
+            "a pane read out of the process table carries the argv of the job in front of it"
         );
     }
 

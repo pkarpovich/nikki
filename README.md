@@ -441,18 +441,23 @@ repository in the same pass.
 - `session` is the session name with its animated status glyph stripped, so an auto-named session is
   one identity over its lifetime rather than a new one per spinner frame.
 - `surface` is the kind of the pane on screen - `left`, `right` or `scratch`, or one of `overlay`,
-  `overlay-left` and `overlay-right` while an overlay covers the session. It is absent when the
-  tree reports no surface that is both active and visible, including an older agterm that omits
-  `surfaces` entirely.
+  `overlay-left` and `overlay-right` while an overlay covers the session, or `quick` while the
+  window's quick terminal is up. A session's `surfaces[]` flags describe the session's own split and
+  scratch state and say nothing about zoom or the quick terminal, so the tree's top-level
+  `quickVisible` and `zoomedSurface` are read first and outrank them: a zoomed pane is what fills the
+  window even when the session calls a different one active. `surface` is absent when the tree
+  reports no surface that is both active and visible - including an older agterm that omits
+  `surfaces` entirely, and including a zoom that names a surface of some other session, where the
+  pane on screen is not the active session's to name.
 - `command` is the whole argv of the on-screen pane's foreground process, joined by spaces, **capped
   at 512 characters** with a trailing `…` when cut. The arguments are the content and are not
   trimmed away: `rx <plan file>` says what was run, `rx` says nothing. The cap exists only so a
   pathological command line cannot dominate a record. `command` is absent when no process claims the
   active surface, rather than falling back to a guess - including when the pane runs a setuid or
   hardened binary whose arguments the kernel declines to describe, and including every overlay
-  surface: the pane role agterm stamps into a process is only `left`, `right` or `scratch`, so no
-  process claims an `overlay*` surface and the record names the overlay without saying what runs in
-  it.
+  surface and the quick terminal: the pane role agterm stamps into a process is only `left`, `right`
+  or `scratch`, so no process claims an `overlay*` or `quick` surface and the record names what is on
+  screen without saying what runs in it.
 - `cwd` is that same process's own working directory. It falls back to the session-level `cwd` from
   the tree **only while `surface` is `left`**: that field describes the left pane alone, so lending
   it to a visible scratch pane would name a directory nobody is looking at. With any other surface on

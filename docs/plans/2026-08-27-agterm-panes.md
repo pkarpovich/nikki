@@ -283,6 +283,17 @@ neither `surface` nor `foreground`. That is the plan's rule read literally: with
 the extractor cannot say the left pane is the one on screen, and the whole point of the change is to
 stop asserting that blind.
 
+➕ Review finding: `surfaces[]` alone does not answer "what is on screen". agterm's reference states
+that `active`/`visible` derive from the session's own split and scratch flags and **not** from zoom,
+and the quick terminal - a scratch terminal covering 90% of the window - is not in the tree at all.
+So a zoomed right pane, or an open quick terminal, left the record naming the pane the session calls
+active along with its `command`, `cwd` and `foreground`: the same false record for a different
+reason. `Tree` now carries the top-level `quickVisible` and `zoomedSurface`, and `surface_on_screen`
+reads them before `active_surface`. A visible quick terminal is `surface: quick`, a zoom on the
+active session is its `kind`, and a zoom naming another session leaves `surface` absent rather than
+naming a pane that is not on screen. No process claims `quick`, so - exactly as with `overlay*` - the
+record says what is in front of the user without saying what runs in it.
+
 ### Task 6: Document the shape
 
 **Files:**
@@ -342,6 +353,13 @@ exits 0 on `running 0 tests`, so renaming or deleting `the_live_tree_names_the_s
 would leave the script printing "every check passed" while the only assertion over the process-table
 join had silently stopped running. The script now captures the run and requires `result: ok. 1
 passed`, which fails on both a vanished test and a failing one.
+
+➕ Review finding: the live case still asserted nothing that the process table produces. `workspace`,
+`session` and `surface` all come out of the tree, so `agterm_panes()` could return an empty vector on
+every call - a renamed `AGTERM_*` variable, a regression in `parse_procargs` - and the gate
+`CLAUDE.md` mandates for every change to `src/macos/processes.rs` would still pass. The test now also
+calls `agterm_panes()` and requires at least one pane carrying an argv, so the join is what fails
+when the process-table read breaks.
 
 ➕ The unreachable-`agtermctl` check used a failing stub first on `PATH` rather than a missing one:
 `resolve_program` falls back to the hardcoded bundled path, which cannot be hidden without touching
