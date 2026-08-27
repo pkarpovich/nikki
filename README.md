@@ -57,6 +57,13 @@ TCC grant to the *responsible* process, and a binary launched from an already-tr
 inherits that terminal's trust instead of asking for its own - so the grant lands on the terminal,
 and the daemon loses it the moment launchd starts it for real.
 
+**Restart the service after granting Accessibility.** No prompt is raised - the daemon asks
+`AXIsProcessTrusted` without the prompting option, because a background agent that pops a dialog on
+every start is worse than one that logs what it is missing - so the checkbox is ticked by hand, and
+macOS caches the denial for the life of the process. Until `brew services restart nikki` the daemon
+keeps running as if nothing was granted, and the only place that says so is the `accessibility=false`
+field on the startup line.
+
 **Screen Recording is deliberately never requested.** Holding it triggers a macOS re-consent dialog
 roughly monthly which cannot be disabled, in exchange for `kCGWindowName` - a field this design gets
 from Accessibility instead. `kCGWindowName` is therefore never read.

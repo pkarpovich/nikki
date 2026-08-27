@@ -192,8 +192,11 @@ jobs:
                   brew services start nikki
 
                 Grant Accessibility to nikki in System Settings > Privacy &
-                Security. Without it capture continues, but every window title
-                and document path is null and records carry degraded: true.
+                Security, then restart the service - macOS caches the denial for
+                the life of the process, so the grant does not take until
+                `brew services restart nikki`. Without it capture continues, but
+                every window title and document path is null and the records
+                carry degraded: true.
 
                 The first time it reads a browser tab macOS asks for Automation
                 access to Dia. Declining is permanent for this binary and the
