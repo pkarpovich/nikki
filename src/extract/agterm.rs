@@ -96,6 +96,7 @@ fn parse_tree(stdout: &str) -> Details {
         active: _,
         cwd,
         foreground,
+        surfaces: _,
     }) = active
     else {
         return Details::new();
@@ -121,6 +122,36 @@ fn parse_tree(stdout: &str) -> Details {
     };
     details.insert("foreground".to_string(), Value::String(command));
     details
+}
+
+#[cfg_attr(not(test), expect(dead_code))]
+fn active_surface(surfaces: &[Surface]) -> Option<String> {
+    for Surface {
+        kind,
+        active,
+        visible,
+    } in surfaces
+    {
+        if *active && *visible {
+            return Some(kind.clone());
+        }
+    }
+    None
+}
+
+const STATUS_GLYPHS: [char; 11] = ['✳', '✢', '✶', '✻', '✽', '◐', '◓', '◑', '◒', '●', '○'];
+
+#[cfg_attr(not(test), expect(dead_code))]
+fn session_identity(name: &str) -> String {
+    let name = name.trim();
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return String::new();
+    };
+    if !STATUS_GLYPHS.contains(&first) {
+        return name.to_string();
+    }
+    characters.as_str().trim_start().to_string()
 }
 
 fn file_name(command: &str) -> Option<String> {
@@ -166,6 +197,20 @@ struct Session {
     cwd: Option<String>,
     #[serde(default)]
     foreground: Option<Vec<String>>,
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[serde(default)]
+    surfaces: Vec<Surface>,
+}
+
+#[cfg_attr(not(test), expect(dead_code))]
+#[derive(Deserialize)]
+struct Surface {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    active: bool,
+    #[serde(default)]
+    visible: bool,
 }
 
 #[cfg(test)]
@@ -173,9 +218,43 @@ mod tests {
     use super::*;
 
     const CAPTURED: &str = include_str!("../../fixtures/agterm_tree.json");
+    const SCRATCH: &str = include_str!("../../fixtures/agterm_tree_scratch.json");
 
     fn captured() -> Value {
         serde_json::from_str(CAPTURED).expect("the fixture parses")
+    }
+
+    fn surface(kind: &str, active: bool, visible: bool) -> Surface {
+        Surface {
+            kind: kind.to_string(),
+            active,
+            visible,
+        }
+    }
+
+    fn active_session_of(stdout: &str) -> Session {
+        let response: Response = serde_json::from_str(stdout).expect("the fixture parses");
+        let Response {
+            result: TreeResult {
+                tree: Tree { workspaces },
+            },
+        } = response;
+        for Workspace {
+            name: _,
+            active,
+            sessions,
+        } in workspaces
+        {
+            if !active {
+                continue;
+            }
+            for session in sessions {
+                if session.active {
+                    return session;
+                }
+            }
+        }
+        panic!("the fixture has an active session");
     }
 
     fn sessions_of(workspace: &mut Value) -> &mut Vec<Value> {
@@ -279,5 +358,84 @@ mod tests {
         assert_eq!(file_name("tail"), Some("tail".to_string()));
         assert_eq!(file_name(""), None);
         assert_eq!(file_name("/"), None);
+    }
+
+    #[test]
+    fn the_active_surface_is_the_first_one_both_active_and_visible() {
+        assert_eq!(
+            active_surface(&[surface("left", true, true)]),
+            Some("left".to_string())
+        );
+        assert_eq!(
+            active_surface(&[
+                surface("left", false, false),
+                surface("scratch", true, true),
+            ]),
+            Some("scratch".to_string())
+        );
+    }
+
+    #[test]
+    fn a_surface_that_is_active_but_hidden_is_not_the_active_surface() {
+        assert_eq!(active_surface(&[surface("left", true, false)]), None);
+    }
+
+    #[test]
+    fn no_active_surface_and_no_surfaces_at_all_both_yield_nothing() {
+        assert_eq!(
+            active_surface(&[surface("left", false, true), surface("right", false, true)]),
+            None
+        );
+        assert_eq!(active_surface(&[]), None);
+    }
+
+    #[test]
+    fn the_captured_tree_reports_its_left_pane_as_the_active_surface() {
+        let session = active_session_of(CAPTURED);
+        assert_eq!(active_surface(&session.surfaces), Some("left".to_string()));
+    }
+
+    #[test]
+    fn the_scratch_tree_reports_its_scratch_pane_as_the_active_surface() {
+        let session = active_session_of(SCRATCH);
+        assert_eq!(
+            active_surface(&session.surfaces),
+            Some("scratch".to_string())
+        );
+        assert_eq!(session_identity(&session.name), "nikki daemon");
+    }
+
+    #[test]
+    fn a_session_omitting_surfaces_still_parses() {
+        let mut tree = captured();
+        for workspace in workspaces_of(&mut tree) {
+            for session in sessions_of(workspace) {
+                let session = session.as_object_mut().expect("a session is an object");
+                session.remove("surfaces");
+            }
+        }
+        let stdout = tree.to_string();
+        let details = parse_tree(&stdout);
+        assert_eq!(details["session"], "nikki daemon");
+        assert!(active_session_of(&stdout).surfaces.is_empty());
+    }
+
+    #[test]
+    fn an_animated_status_glyph_is_not_part_of_the_session_identity() {
+        assert_eq!(session_identity("✳ План создания"), "План создания");
+        assert_eq!(session_identity("◑ План создания"), "План создания");
+        assert_eq!(session_identity("◐ План создания"), "План создания");
+        assert_eq!(
+            session_identity("●ask-dealcloud: done"),
+            "ask-dealcloud: done"
+        );
+    }
+
+    #[test]
+    fn a_hand_named_session_survives_identity_stripping_unchanged() {
+        assert_eq!(session_identity("nikki"), "nikki");
+        assert_eq!(session_identity("nhop"), "nhop");
+        assert_eq!(session_identity("nikki daemon"), "nikki daemon");
+        assert_eq!(session_identity(""), "");
     }
 }

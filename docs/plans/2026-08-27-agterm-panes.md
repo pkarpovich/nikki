@@ -195,19 +195,27 @@ until task 5 wires it into the extractor.
 - Modify: `fixtures/agterm_tree.json`
 - Create: `fixtures/agterm_tree_scratch.json`
 
-- [ ] extend the tree structs with `surfaces: Vec<Surface>` where `Surface { kind: String, active: bool, visible: bool }`, all `#[serde(default)]` so an older agterm that omits them still parses
-- [ ] implement the pure `active_surface(surfaces: &[Surface]) -> Option<String>` returning the
+- [x] extend the tree structs with `surfaces: Vec<Surface>` where `Surface { kind: String, active: bool, visible: bool }`, all `#[serde(default)]` so an older agterm that omits them still parses
+- [x] implement the pure `active_surface(surfaces: &[Surface]) -> Option<String>` returning the
       `kind` of the first surface that is both `active` and `visible`
-- [ ] implement the pure `session_identity(name: &str) -> String` stripping the leading status glyph
+- [x] implement the pure `session_identity(name: &str) -> String` stripping the leading status glyph
       and whitespace from an auto-named session, leaving a hand-named one untouched
-- [ ] extend `fixtures/agterm_tree.json` so its active session carries a `surfaces` array with an
+- [x] extend `fixtures/agterm_tree.json` so its active session carries a `surfaces` array with an
       active, visible `left`
-- [ ] create `fixtures/agterm_tree_scratch.json`: an active session whose `left` is inactive and
+- [x] create `fixtures/agterm_tree_scratch.json`: an active session whose `left` is inactive and
       hidden and whose `scratch` is active and visible, plus a second session with a split
-- [ ] write tests for `active_surface`: left active, scratch active, no surface active, an empty array
-- [ ] write tests for `session_identity` over each glyph seen in the wild (`✳`, `◑`, `◐`, `●`) and
+- [x] write tests for `active_surface`: left active, scratch active, no surface active, an empty array
+- [x] write tests for `session_identity` over each glyph seen in the wild (`✳`, `◑`, `◐`, `●`) and
       over a hand-named session that must survive unchanged
-- [ ] run `mise run check` - must pass before task 5
+- [x] run `mise run check` - must pass before task 5
+
+➕ `session_identity` matches a fixed glyph set rather than "any leading non-alphanumeric", so a
+hand-named session starting with a symbol survives. The set carries both full spinner cycles the
+observed glyphs belong to (`✳ ✢ ✶ ✻ ✽`, `◐ ◓ ◑ ◒`) plus `● ○`.
+
+➕ `Surface`, the `surfaces` field, `active_surface` and `session_identity` all carry
+`#[cfg_attr(not(test), expect(dead_code))]` until task 5 composes them: their tests read them, so an
+unconditional `#[expect]` would be unfulfilled in the test build and `-D warnings` would reject it.
 
 ### Task 5: Report the pane that is on screen
 
