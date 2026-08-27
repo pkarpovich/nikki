@@ -276,16 +276,32 @@ only documented ones while Dia's stay implicit.
 **Files:**
 - Modify: `scripts/acceptance.sh`
 
-- [ ] add an acceptance case asserting the binary reports a `surface` for the live tree when agterm
+- [x] add an acceptance case asserting the binary reports a `surface` for the live tree when agterm
       is running, and skips cleanly when `agtermctl` is absent - modelled on the existing
       `PlistBuddy` checks, which return early rather than failing when a tool is missing
-- [ ] verify the inherited-environment daemon is excluded: assert `pane_of` rejects a process
+- [x] verify the inherited-environment daemon is excluded: assert `pane_of` rejects a process
       carrying the variables with no tty
-- [ ] run the full suite: `mise run check`
-- [ ] run `./scripts/acceptance.sh`
-- [ ] verify the `unsafe` containment gate: `! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'`
-- [ ] verify a machine without agterm still ticks: run with `agtermctl` unreachable and confirm the
+- [x] run the full suite: `mise run check`
+- [x] run `./scripts/acceptance.sh`
+- [x] verify the `unsafe` containment gate: `! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'`
+- [x] verify a machine without agterm still ticks: run with `agtermctl` unreachable and confirm the
       extractor returns empty rather than failing
+
+➕ The live assertion is an `#[ignore]`d `#[tokio::test]` in `src/extract/agterm.rs` rather than shell
+against the release binary: the binary has only `--check-config` and no way to print a tick, and the
+test exercises the same `active_session()` the daemon calls. `scripts/acceptance.sh` runs it with
+`--ignored`, so `cargo test` never touches the live machine. The run on 2026-08-27 reported
+`surface=scratch`, `command=ralphex docs/plans/2026-08-27-agterm-panes.md` and no `foreground` - the
+exact record the old extractor got wrong.
+
+➕ The unreachable-`agtermctl` check used a failing stub first on `PATH` rather than a missing one:
+`resolve_program` falls back to the hardcoded bundled path, which cannot be hidden without touching
+`/Applications`. The extractor returned empty and the test passed, which is the behaviour the
+checkbox asks for; the truly-absent branch is what the script's own guard skips on.
+
+➕ `pane_of` rejecting the tty-less daemon was already asserted by
+`a_daemon_inheriting_the_environment_is_not_a_pane` from task 3, so this task re-ran it rather than
+writing a second one.
 
 ### Task 8: [Final] Update documentation
 

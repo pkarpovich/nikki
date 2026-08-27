@@ -644,6 +644,24 @@ mod tests {
         assert_eq!(command_line(&[String::new()]), None);
     }
 
+    #[tokio::test]
+    #[ignore = "reads the live agterm tree, so scripts/acceptance.sh runs it and cargo test does not"]
+    async fn the_live_tree_names_the_surface_on_screen() {
+        let details = active_session().await;
+        if details.is_empty() {
+            println!("agterm reports no active session, so there is nothing on screen to name");
+            return;
+        }
+
+        println!("{}", Value::Object(details.clone()));
+        assert!(details.contains_key("workspace"));
+        assert!(details.contains_key("session"));
+        assert!(
+            details.contains_key("surface"),
+            "a live session must name the surface the user is looking at"
+        );
+    }
+
     #[test]
     fn a_hand_named_session_survives_identity_stripping_unchanged() {
         assert_eq!(session_identity("nikki"), "nikki");

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 IDENTIFIER="dev.pkarpovich.nikki"
+AGTERMCTL="/Applications/agterm.app/Contents/MacOS/agtermctl"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -54,6 +55,13 @@ printf 'device = "mbp-21"\n' >"$scratch/broken.toml"
 if NIKKI_CONFIG="$scratch/broken.toml" NIKKI_STATE_DIR="$scratch/state" "$binary" --check-config >/dev/null 2>&1; then
 	echo "acceptance: --check-config accepted a configuration with no service_url" >&2
 	exit 1
+fi
+
+echo "acceptance: the live agterm tree"
+if command -v agtermctl >/dev/null 2>&1 || [ -x "$AGTERMCTL" ]; then
+	cargo test --bin nikki -- --ignored --nocapture the_live_tree_names_the_surface_on_screen
+else
+	echo "acceptance: agtermctl is on neither PATH nor $AGTERMCTL, so there is no live tree to read"
 fi
 
 echo "acceptance: every check passed, and $binary is the binary they ran against"
