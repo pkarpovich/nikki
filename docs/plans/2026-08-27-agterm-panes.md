@@ -296,6 +296,19 @@ stop asserting that blind.
 - [x] state that `command` is capped and why it is otherwise whole
 - [x] run `mise run check` - must pass before task 7
 
+➕ Review finding: the wire contract listed `surface` as `left`, `right` or `scratch`, but the tree's
+`surfaces[].kind` is also `overlay`, `overlay-left` and `overlay-right`, so the extractor can emit a
+value the contract does not admit - and the service repository mirrors this section. The value set is
+corrected, and the `command` bullet now states the overlay consequence: `AGTERM_PANE` is only
+`left|right|scratch`, so no process ever claims an `overlay*` surface and such a record names the
+overlay without saying what runs in it. Normalising `overlay-left` to `left` would be the wrong fix -
+it would report the covered pane's command as if it were on screen.
+
+➕ Review finding: the permission section claimed "no other environment variable is read or recorded".
+`parse_procargs` parses the whole `KERN_PROCARGS2` buffer, so every variable is read into memory even
+though only the four `AGTERM_*` ones are looked at and none is ever recorded. The sentence now says
+that, rather than a guarantee the parser does not make.
+
 ➕ The wire contract had no section describing `details` at all - the Dia shape lived only in the
 extractor registry and in an example body. The new `### details on a window record` section documents
 both extractors' shapes in the place the service repository mirrors, so the agterm keys are not the
@@ -323,6 +336,12 @@ test exercises the same `active_session()` the daemon calls. `scripts/acceptance
 `--ignored`, so `cargo test` never touches the live machine. The run on 2026-08-27 reported
 `surface=scratch`, `command=ralphex docs/plans/2026-08-27-agterm-panes.md` and no `foreground` - the
 exact record the old extractor got wrong.
+
+➕ Review finding: the acceptance case asserted nothing when its filter matched no test. `cargo test`
+exits 0 on `running 0 tests`, so renaming or deleting `the_live_tree_names_the_surface_on_screen`
+would leave the script printing "every check passed" while the only assertion over the process-table
+join had silently stopped running. The script now captures the run and requires `result: ok. 1
+passed`, which fails on both a vanished test and a failing one.
 
 ➕ The unreachable-`agtermctl` check used a failing stub first on `PATH` rather than a missing one:
 `resolve_program` falls back to the hardcoded bundled path, which cannot be hidden without touching

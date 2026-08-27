@@ -59,7 +59,12 @@ fi
 
 echo "acceptance: the live agterm tree"
 if command -v agtermctl >/dev/null 2>&1 || [ -x "$AGTERMCTL" ]; then
-	cargo test --bin nikki -- --ignored --nocapture the_live_tree_names_the_surface_on_screen
+	live="$(cargo test --bin nikki -- --ignored --nocapture the_live_tree_names_the_surface_on_screen 2>&1 || true)"
+	echo "$live"
+	if ! echo "$live" | grep -q 'result: ok\. 1 passed'; then
+		echo "acceptance: the_live_tree_names_the_surface_on_screen neither ran nor passed, so nothing asserted the process-table join" >&2
+		exit 1
+	fi
 else
 	echo "acceptance: agtermctl is on neither PATH nor $AGTERMCTL, so there is no live tree to read"
 fi

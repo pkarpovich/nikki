@@ -52,12 +52,13 @@ identifier that `codesign --identifier` pins - so they survive every upgrade tha
 the same pair. Changing the identifier loses both grants silently: capture keeps running, titles go
 null and no tab is ever read again.
 
-**The process table needs no permission, and only agterm's own variables are read.**
+**The process table needs no permission, and only agterm's own variables are consulted.**
 `KERN_PROCARGS2` returns the argv and the environment of a process owned by the same user with no
 prompt and no entitlement, which is how the agterm extractor knows what is running in the pane on
-screen. Only `AGTERM_ENABLED`, `AGTERM_SESSION_ID`, `AGTERM_PANE` and `AGTERM_PANE_ID` are consulted;
-no other environment variable is read or recorded, and an argv reaches a record only for the pane the
-tree calls active and visible. The call fails for setuid and hardened binaries (`sudo`, `top`), which
+screen. The buffer it returns carries the whole environment and is parsed whole, but only
+`AGTERM_ENABLED`, `AGTERM_SESSION_ID`, `AGTERM_PANE` and `AGTERM_PANE_ID` are ever looked at: no
+environment variable is recorded, logged or shipped, and an argv reaches a record only for the pane
+the tree calls active and visible. The call fails for setuid and hardened binaries (`sudo`, `top`), which
 is a normal outcome and never logged per tick.
 
 Run the daemon under launchd (`brew services start nikki`), not from a terminal. macOS attributes a
@@ -439,7 +440,8 @@ repository in the same pass.
 
 - `session` is the session name with its animated status glyph stripped, so an auto-named session is
   one identity over its lifetime rather than a new one per spinner frame.
-- `surface` is the kind of the pane on screen - `left`, `right` or `scratch`. It is absent when the
+- `surface` is the kind of the pane on screen - `left`, `right` or `scratch`, or one of `overlay`,
+  `overlay-left` and `overlay-right` while an overlay covers the session. It is absent when the
   tree reports no surface that is both active and visible, including an older agterm that omits
   `surfaces` entirely.
 - `command` is the whole argv of the on-screen pane's foreground process, joined by spaces, **capped
@@ -447,7 +449,10 @@ repository in the same pass.
   trimmed away: `rx <plan file>` says what was run, `rx` says nothing. The cap exists only so a
   pathological command line cannot dominate a record. `command` is absent when no process claims the
   active surface, rather than falling back to a guess - including when the pane runs a setuid or
-  hardened binary whose arguments the kernel declines to describe.
+  hardened binary whose arguments the kernel declines to describe, and including every overlay
+  surface: the pane role agterm stamps into a process is only `left`, `right` or `scratch`, so no
+  process claims an `overlay*` surface and the record names the overlay without saying what runs in
+  it.
 - `cwd` is that same process's own working directory. It falls back to the session-level `cwd` from
   the tree **only while `surface` is `left`**: that field describes the left pane alone, so lending
   it to a visible scratch pane would name a directory nobody is looking at. With any other surface on
