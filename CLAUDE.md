@@ -20,6 +20,19 @@ is owned and must be released on **every** path including error returns; a value
 function is not. An Accessibility attribute is not guaranteed to hold the type its name suggests -
 check the type id before wrapping, and release before returning the mismatch.
 
+## An extractor reports the surface on screen
+
+A terminal window shows one pane at a time, so a field read from the wrong pane is not an incomplete
+record but a false one. When a source describes several panes, resolve which one is visible first and
+report that one; a field that can only describe a hidden pane is omitted rather than reported. This
+is why `agterm.rs` emits `foreground` only while the left pane is the active surface.
+
+Joining a process against the pane it belongs to goes through the process table, and two filters make
+that join truthful. A pane's environment is inherited by everything it ever spawned, so a process
+must hold a controlling terminal to claim the pane - otherwise a daemon started months ago becomes
+what the user is doing. It must also own that terminal's foreground process group, or every pane
+reports the parent shell instead of the program running inside it.
+
 ## Tests live inline
 
 Tests go in a `#[cfg(test)] mod tests` block in the file they cover. A sibling `foo_test.rs` is not

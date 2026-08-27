@@ -305,7 +305,12 @@ writing a second one.
 
 ### Task 8: [Final] Update documentation
 
-- [ ] update `CLAUDE.md` if the pane-resolution rule is a pattern worth stating for future work
+- [x] update `CLAUDE.md` if the pane-resolution rule is a pattern worth stating for future work
+
+➕ The rule was worth stating: `CLAUDE.md` gains "An extractor reports the surface on screen", carrying
+both halves - resolve the visible surface before reporting any field, and omit a field that could only
+describe a hidden pane; and the two process-table filters (controlling tty, foreground process group)
+with the lie each one answers.
 
 ## Technical Details
 
