@@ -6,22 +6,10 @@
 	<string>space.pkarpovich.nikki</string>
 	<key>CFBundleName</key>
 	<string>nikki</string>
-	<key>CFBundleDisplayName</key>
-	<string>nikki</string>
-	<key>CFBundleExecutable</key>
-	<string>nikki</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>CFBundleVersion</key>
-	<string>__VERSION__</string>
 	<key>CFBundleShortVersionString</key>
 	<string>__VERSION__</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
-	<key>LSUIElement</key>
-	<true/>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>nikki asks the browser which tab is in front so your activity timeline records the site you were on rather than only the application.</string>
 </dict>

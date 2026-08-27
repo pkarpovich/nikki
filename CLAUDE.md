@@ -44,9 +44,11 @@ mise run check
 `mise run check` is `cargo fmt --all -- --check`, then `cargo clippy --all-targets -- -D warnings`,
 then `cargo test`. Both commands must pass before the next task starts.
 
-A change to `Info.plist.template` or `scripts/bundle.sh` additionally requires
-`./scripts/acceptance.sh`, which is the only thing that asserts `LSUIElement` and a non-empty
-`NSAppleEventsUsageDescription` on the assembled bundle.
+A change to `Info.plist.template`, `build.rs` or the signing scripts additionally requires
+`./scripts/acceptance.sh`, which is the only thing that asserts the binary still carries a readable
+`__TEXT,__info_plist` with `CFBundleIdentifier = space.pkarpovich.nikki` and a non-empty
+`NSAppleEventsUsageDescription`. That identifier is what both TCC grants are keyed to; changing it
+loses them silently, so it must never change.
 
 ## Style
 

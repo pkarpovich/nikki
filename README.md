@@ -1,7 +1,7 @@
 # nikki
 
 A macOS daemon that records what was on screen and what was being done, and ships it to the nikki
-service. One binary per Mac, delivered as an `LSUIElement` app bundle.
+service. One signed binary per Mac, installed from a Homebrew tap and run by launchd.
 
 Toggl's Activity view reports only which application was frontmost and never what was being done in
 it. This daemon captures the missing layer: window titles, the open document path, the browser tab
@@ -11,16 +11,33 @@ volume, idle, lock, sleep and microphone.
 The daemon never interprets. It captures faithfully and ships; a summary of the day is produced
 elsewhere, from the service API.
 
+## Install
+
+```
+brew install pkarpovich/apps/nikki
+```
+
+Write `~/.config/nikki/config.toml` **before** starting the service - `service_url` and `device` are
+required and the daemon exits without them, which under Homebrew's `keep_alive` is a restart loop.
+Then `nikki --check-config`, `brew services start nikki`, and grant Accessibility when macOS asks.
+
+Releases are cut by tagging; see `docs/releasing.md`.
+
 ## Build
 
 ```
-mise run build      # debug binary
-mise run check      # fmt check, clippy with warnings denied, tests
-./scripts/bundle.sh # target/nikki.app
-./scripts/acceptance.sh  # daemon against the stub server in tests/stub_server.rs
+mise run build            # debug binary
+mise run check            # fmt check, clippy with warnings denied, tests
+./scripts/build-signed.sh <team-id>   # signed release binary, same identity CI ships
+./scripts/acceptance.sh   # daemon against the stub server in tests/stub_server.rs
 ```
 
 The crate links Apple frameworks and builds only on macOS. Cross-compiling needs the Apple SDK.
+
+`build.rs` renders `Info.plist.template` with the crate version and embeds it into the binary's
+`__TEXT,__info_plist` section. That section is not decoration: it is where macOS reads
+`NSAppleEventsUsageDescription` from for a program that is not an app bundle, and the release
+workflow refuses to ship a binary without it.
 
 ## Permissions
 
@@ -30,9 +47,15 @@ The crate links Apple frameworks and builds only on macOS. Cross-compiling needs
 | Automation -> Dia | the active tab's URL, title and profile | one-time prompt on first use |
 | (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state | none |
 
-Grant Accessibility to `nikki.app` rather than to a terminal: the bundle keeps the grant across
-upgrades, and macOS attributes Accessibility to the *responsible* process, so a daemon launched from
-an already-granted terminal inherits that terminal's trust.
+Both grants are keyed by the code signature - the Developer ID team plus the `space.pkarpovich.nikki`
+identifier that `codesign --identifier` pins - so they survive every upgrade that keeps signing with
+the same pair. Changing the identifier loses both grants silently: capture keeps running, titles go
+null and no tab is ever read again.
+
+Run the daemon under launchd (`brew services start nikki`), not from a terminal. macOS attributes a
+TCC grant to the *responsible* process, and a binary launched from an already-trusted terminal
+inherits that terminal's trust instead of asking for its own - so the grant lands on the terminal,
+and the daemon loses it the moment launchd starts it for real.
 
 **Screen Recording is deliberately never requested.** Holding it triggers a macOS re-consent dialog
 roughly monthly which cannot be disabled, in exchange for `kCGWindowName` - a field this design gets
@@ -43,9 +66,9 @@ the default input device is running without opening it, so no Microphone permiss
 no orange indicator lights. It means "the device is running", not "someone is listening" - some
 applications hold it open idle - so `mic_active` is a hint and nothing more.
 
-**Automation is what the Dia extractor needs.** `Info.plist` must carry a non-empty
+**Automation is what the Dia extractor needs.** The embedded `Info.plist` must carry a non-empty
 `NSAppleEventsUsageDescription`; without that string macOS never shows the prompt, the extractor is
-denied for the life of the bundle, and the only symptom is a `-1743` in the log. A declined prompt is
+denied for the life of the binary, and the only symptom is a `-1743` in the log. A declined prompt is
 logged once at warn level, because no tab will ever be captured until a human fixes it in System
 Settings.
 
