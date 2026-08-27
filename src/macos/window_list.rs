@@ -117,9 +117,33 @@ pub fn display_list() -> Vec<DisplayEntry> {
 }
 
 pub fn frontmost_application() -> Option<RunningApplication> {
-    let workspace = NSWorkspace::sharedWorkspace();
-    let application = workspace.frontmostApplication()?;
+    let front = focused_owner(&window_list());
+    let Some(pid) = front else {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let application = workspace.frontmostApplication()?;
+        return Some(running_application(&application));
+    };
+    let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+    else {
+        return Some(RunningApplication {
+            pid,
+            name: None,
+            bundle_id: None,
+        });
+    };
     Some(running_application(&application))
+}
+
+fn focused_owner(windows: &[WindowEntry]) -> Option<i32> {
+    for window in windows {
+        let WindowEntry {
+            layer, owner_pid, ..
+        } = window;
+        if *layer == 0 {
+            return Some(*owner_pid);
+        }
+    }
+    None
 }
 
 pub fn bundle_id_for_pid(pid: i32) -> Option<String> {
@@ -258,5 +282,39 @@ mod tests {
         assert!(!display.contains(100.0, 50.0));
         assert!(!display.contains(50.0, 100.0));
         assert!(!display.contains(-0.1, 50.0));
+    }
+
+    fn entry(owner_pid: i32, layer: i32, z: usize) -> WindowEntry {
+        WindowEntry {
+            owner_pid,
+            owner_name: String::new(),
+            window_number: z as u32,
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            layer,
+            z,
+        }
+    }
+
+    #[test]
+    fn the_topmost_ordinary_window_names_the_focused_application() {
+        let windows = vec![entry(10, 0, 0), entry(20, 0, 1)];
+        assert_eq!(focused_owner(&windows), Some(10));
+    }
+
+    #[test]
+    fn windows_above_the_ordinary_layer_are_skipped() {
+        let windows = vec![entry(99, 25, 0), entry(10, 0, 1)];
+        assert_eq!(focused_owner(&windows), Some(10));
+    }
+
+    #[test]
+    fn a_list_without_an_ordinary_window_names_nobody() {
+        let windows = vec![entry(99, 25, 0), entry(98, -1, 1)];
+        assert_eq!(focused_owner(&windows), None);
+    }
+
+    #[test]
+    fn an_empty_list_names_nobody() {
+        assert_eq!(focused_owner(&[]), None);
     }
 }
