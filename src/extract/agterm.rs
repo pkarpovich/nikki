@@ -6,9 +6,12 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::extract::{CommandOutput, Details, SUBPROCESS_DEADLINE, run_with_deadline};
+use crate::macos::processes::{Pane, agterm_panes};
 
 const PROGRAM: &str = "agtermctl";
 const BUNDLED_PROGRAM: &str = "/Applications/agterm.app/Contents/MacOS/agtermctl";
+const LEFT_SURFACE: &str = "left";
+const COMMAND_LIMIT: usize = 512;
 
 static MISSING_PROGRAM_WARNING: Once = Once::new();
 
@@ -35,7 +38,7 @@ pub async fn active_session() -> Details {
         tracing::debug!(stderr = stderr.trim(), "the terminal tree command failed");
         return Details::new();
     }
-    parse_tree(&stdout)
+    parse_tree(&stdout, &agterm_panes())
 }
 
 fn resolve_program() -> Option<PathBuf> {
@@ -54,7 +57,7 @@ fn resolve_program() -> Option<PathBuf> {
     None
 }
 
-fn parse_tree(stdout: &str) -> Details {
+fn parse_tree(stdout: &str, panes: &[Pane]) -> Details {
     let response: Response = match serde_json::from_str(stdout) {
         Ok(response) => response,
         Err(error) => {
@@ -91,26 +94,67 @@ fn parse_tree(stdout: &str) -> Details {
             break;
         }
     }
-    let Some(Session {
-        name: session,
-        active: _,
-        cwd,
-        foreground,
-        surfaces: _,
-    }) = active
-    else {
+    let Some(session) = active else {
         return Details::new();
     };
 
+    compose(&workspace, &session, panes)
+}
+
+fn compose(workspace: &str, session: &Session, panes: &[Pane]) -> Details {
+    let Session {
+        id,
+        name,
+        active: _,
+        cwd,
+        foreground,
+        surfaces,
+    } = session;
+
     let mut details = Details::new();
-    details.insert("workspace".to_string(), Value::String(workspace));
-    details.insert("session".to_string(), Value::String(session));
+    details.insert(
+        "workspace".to_string(),
+        Value::String(workspace.to_string()),
+    );
+    details.insert("session".to_string(), Value::String(session_identity(name)));
+
+    let surface = active_surface(surfaces);
+    let mut on_screen = None;
+    if let Some(surface) = &surface {
+        details.insert("surface".to_string(), Value::String(surface.clone()));
+        on_screen = pane_on(panes, id, surface);
+    }
+
+    let mut command = None;
+    let mut pane_cwd = None;
+    if let Some(Pane {
+        session: _,
+        pane: _,
+        pane_id: _,
+        argv,
+        cwd,
+    }) = on_screen
+    {
+        command = command_line(argv);
+        pane_cwd = cwd.clone();
+    }
+    if let Some(command) = command {
+        details.insert("command".to_string(), Value::String(command));
+    }
+
+    let cwd = match pane_cwd {
+        Some(cwd) => Some(cwd),
+        None => cwd.clone(),
+    };
     if let Some(cwd) = cwd
         && !cwd.is_empty()
     {
         details.insert("cwd".to_string(), Value::String(cwd));
     }
 
+    if surface.as_deref() != Some(LEFT_SURFACE) {
+        return details;
+    }
     let Some(foreground) = foreground else {
         return details;
     };
@@ -124,7 +168,38 @@ fn parse_tree(stdout: &str) -> Details {
     details
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
+fn pane_on<'a>(panes: &'a [Pane], session: &str, surface: &str) -> Option<&'a Pane> {
+    let session = session.to_uppercase();
+    let mut found = None;
+    for pane in panes {
+        if pane.session == session && pane.pane == surface {
+            found = Some(pane);
+            break;
+        }
+    }
+    found
+}
+
+fn command_line(argv: &[String]) -> Option<String> {
+    let command = argv.join(" ");
+    if command.is_empty() {
+        return None;
+    }
+    if command.chars().count() <= COMMAND_LIMIT {
+        return Some(command);
+    }
+
+    let mut cut = String::new();
+    for (taken, character) in command.chars().enumerate() {
+        if taken == COMMAND_LIMIT {
+            break;
+        }
+        cut.push(character);
+    }
+    cut.push('…');
+    Some(cut)
+}
+
 fn active_surface(surfaces: &[Surface]) -> Option<String> {
     for Surface {
         kind,
@@ -141,7 +216,6 @@ fn active_surface(surfaces: &[Surface]) -> Option<String> {
 
 const STATUS_GLYPHS: [char; 11] = ['✳', '✢', '✶', '✻', '✽', '◐', '◓', '◑', '◒', '●', '○'];
 
-#[cfg_attr(not(test), expect(dead_code))]
 fn session_identity(name: &str) -> String {
     let name = name.trim();
     let mut characters = name.chars();
@@ -190,6 +264,8 @@ struct Workspace {
 
 #[derive(Deserialize)]
 struct Session {
+    #[serde(default)]
+    id: String,
     name: String,
     #[serde(default)]
     active: bool,
@@ -197,12 +273,10 @@ struct Session {
     cwd: Option<String>,
     #[serde(default)]
     foreground: Option<Vec<String>>,
-    #[cfg_attr(not(test), expect(dead_code))]
     #[serde(default)]
     surfaces: Vec<Surface>,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Deserialize)]
 struct Surface {
     #[serde(default)]
@@ -230,6 +304,40 @@ mod tests {
             active,
             visible,
         }
+    }
+
+    fn pane(session: &str, kind: &str, argv: &[&str], cwd: Option<&str>) -> Pane {
+        let mut arguments = Vec::new();
+        for argument in argv {
+            arguments.push((*argument).to_string());
+        }
+        Pane {
+            session: session.to_string(),
+            pane: kind.to_string(),
+            pane_id: "p7".to_string(),
+            argv: arguments,
+            cwd: cwd.map(str::to_string),
+        }
+    }
+
+    fn workspace_of(stdout: &str) -> String {
+        let response: Response = serde_json::from_str(stdout).expect("the fixture parses");
+        let Response {
+            result: TreeResult {
+                tree: Tree { workspaces },
+            },
+        } = response;
+        for Workspace {
+            name,
+            active,
+            sessions: _,
+        } in workspaces
+        {
+            if active {
+                return name;
+            }
+        }
+        panic!("the fixture has an active workspace");
     }
 
     fn active_session_of(stdout: &str) -> Session {
@@ -271,12 +379,13 @@ mod tests {
 
     #[test]
     fn the_captured_tree_yields_only_the_active_session() {
-        let details = parse_tree(CAPTURED);
+        let details = parse_tree(CAPTURED, &[]);
         assert_eq!(details["workspace"], "nikki");
         assert_eq!(details["session"], "nikki daemon");
         assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki");
+        assert_eq!(details["surface"], "left");
         assert_eq!(details["foreground"], "claude");
-        assert_eq!(details.len(), 4);
+        assert_eq!(details.len(), 5);
     }
 
     #[test]
@@ -288,7 +397,7 @@ mod tests {
                 session["active"] = Value::Bool(running_nothing);
             }
         }
-        let details = parse_tree(&tree.to_string());
+        let details = parse_tree(&tree.to_string(), &[]);
         assert_eq!(details["session"], "notes");
         assert_eq!(details["cwd"], "/Users/pavel.karpovich/Obsidian");
         assert!(!details.contains_key("foreground"));
@@ -302,7 +411,7 @@ mod tests {
                 session["foreground"] = Value::Array(Vec::new());
             }
         }
-        let details = parse_tree(&tree.to_string());
+        let details = parse_tree(&tree.to_string(), &[]);
         assert_eq!(details["session"], "nikki daemon");
         assert!(!details.contains_key("foreground"));
     }
@@ -315,7 +424,7 @@ mod tests {
                 session["active"] = Value::Bool(false);
             }
         }
-        assert!(parse_tree(&tree.to_string()).is_empty());
+        assert!(parse_tree(&tree.to_string(), &[]).is_empty());
     }
 
     #[test]
@@ -324,7 +433,7 @@ mod tests {
         for workspace in workspaces_of(&mut tree) {
             workspace["active"] = Value::Bool(false);
         }
-        assert!(parse_tree(&tree.to_string()).is_empty());
+        assert!(parse_tree(&tree.to_string(), &[]).is_empty());
     }
 
     #[test]
@@ -338,15 +447,15 @@ mod tests {
         for session in sessions_of(&mut workspaces[0]) {
             session["active"] = Value::Bool(true);
         }
-        assert!(parse_tree(&tree.to_string()).is_empty());
+        assert!(parse_tree(&tree.to_string(), &[]).is_empty());
     }
 
     #[test]
     fn an_unparseable_or_incomplete_response_yields_nothing() {
-        assert!(parse_tree("").is_empty());
-        assert!(parse_tree("not json at all").is_empty());
-        assert!(parse_tree(r#"{"ok":false,"error":"no server"}"#).is_empty());
-        assert!(parse_tree(r#"{"ok":true,"result":{"tree":{"workspaces":[]}}}"#).is_empty());
+        assert!(parse_tree("", &[]).is_empty());
+        assert!(parse_tree("not json at all", &[]).is_empty());
+        assert!(parse_tree(r#"{"ok":false,"error":"no server"}"#, &[]).is_empty());
+        assert!(parse_tree(r#"{"ok":true,"result":{"tree":{"workspaces":[]}}}"#, &[]).is_empty());
     }
 
     #[test]
@@ -415,8 +524,9 @@ mod tests {
             }
         }
         let stdout = tree.to_string();
-        let details = parse_tree(&stdout);
+        let details = parse_tree(&stdout, &[]);
         assert_eq!(details["session"], "nikki daemon");
+        assert!(!details.contains_key("surface"));
         assert!(active_session_of(&stdout).surfaces.is_empty());
     }
 
@@ -429,6 +539,109 @@ mod tests {
             session_identity("●ask-dealcloud: done"),
             "ask-dealcloud: done"
         );
+    }
+
+    #[test]
+    fn a_visible_scratch_pane_is_reported_instead_of_the_hidden_left_one() {
+        let session = active_session_of(SCRATCH);
+        let panes = [
+            pane(
+                "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+                "left",
+                &["claude", "--resume"],
+                Some("/Users/pavel.karpovich/Projects/nikki"),
+            ),
+            pane(
+                "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+                "scratch",
+                &["rx", "docs/plans/2026-08-27-agterm-panes.md"],
+                Some("/Users/pavel.karpovich/Projects/nikki/docs"),
+            ),
+        ];
+
+        let details = compose(&workspace_of(SCRATCH), &session, &panes);
+
+        assert_eq!(details["workspace"], "nikki");
+        assert_eq!(details["session"], "nikki daemon");
+        assert_eq!(details["surface"], "scratch");
+        assert_eq!(
+            details["command"],
+            "rx docs/plans/2026-08-27-agterm-panes.md"
+        );
+        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki/docs");
+        assert!(!details.contains_key("foreground"));
+    }
+
+    #[test]
+    fn a_visible_left_pane_carries_the_session_foreground_alongside_its_command() {
+        let session = active_session_of(CAPTURED);
+        let panes = [pane(
+            "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+            "left",
+            &["claude", "--resume"],
+            Some("/Users/pavel.karpovich/Projects/nikki/src"),
+        )];
+
+        let details = compose(&workspace_of(CAPTURED), &session, &panes);
+
+        assert_eq!(details["surface"], "left");
+        assert_eq!(details["foreground"], "claude");
+        assert_eq!(details["command"], "claude --resume");
+        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki/src");
+    }
+
+    #[test]
+    fn a_surface_no_process_claims_reports_no_command_and_the_session_directory() {
+        let session = active_session_of(SCRATCH);
+        let panes = [pane(
+            "A-DIFFERENT-SESSION",
+            "scratch",
+            &["rx"],
+            Some("/tmp"),
+        )];
+
+        let details = compose(&workspace_of(SCRATCH), &session, &panes);
+
+        assert_eq!(details["surface"], "scratch");
+        assert!(!details.contains_key("command"));
+        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki");
+        assert!(!details.contains_key("foreground"));
+    }
+
+    #[test]
+    fn a_pane_reporting_no_directory_falls_back_to_the_session_directory() {
+        let session = active_session_of(SCRATCH);
+        let panes = [pane(
+            "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+            "scratch",
+            &["rx"],
+            None,
+        )];
+
+        let details = compose(&workspace_of(SCRATCH), &session, &panes);
+
+        assert_eq!(details["command"], "rx");
+        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki");
+    }
+
+    #[test]
+    fn a_command_longer_than_the_cap_is_cut_and_marked() {
+        let argument = "a".repeat(600);
+        let command = command_line(std::slice::from_ref(&argument)).expect("a command is reported");
+
+        assert_eq!(command.chars().count(), COMMAND_LIMIT + 1);
+        assert!(command.ends_with('…'));
+        assert!(command.starts_with(&argument[..COMMAND_LIMIT]));
+    }
+
+    #[test]
+    fn a_command_within_the_cap_keeps_all_of_its_arguments() {
+        assert_eq!(
+            command_line(&["rx".to_string(), "plan.md".to_string()]),
+            Some("rx plan.md".to_string())
+        );
+        assert_eq!(command_line(&[]), None);
+        assert_eq!(command_line(&[String::new()]), None);
     }
 
     #[test]

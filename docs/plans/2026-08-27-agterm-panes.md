@@ -222,23 +222,36 @@ unconditional `#[expect]` would be unfulfilled in the test build and `-D warning
 **Files:**
 - Modify: `src/extract/agterm.rs`
 
-- [ ] implement the pure `compose(tree: &TreeSession, panes: &[Pane]) -> Details` producing
+- [x] implement the pure `compose(tree: &TreeSession, panes: &[Pane]) -> Details` producing
       `workspace`, `session` (the stripped identity), `surface` (the active surface's kind), and,
       from the pane whose `AGTERM_PANE` equals that surface, `command` and `cwd`
-- [ ] emit `foreground` **only** when the active surface is `left`, so the field keeps meaning
+- [x] emit `foreground` **only** when the active surface is `left`, so the field keeps meaning
       exactly what it means today and never describes a hidden pane
-- [ ] fall back to the session-level `cwd` when the matching pane reports none, and omit `command`
+- [x] fall back to the session-level `cwd` when the matching pane reports none, and omit `command`
       entirely when no pane matches rather than guessing
-- [ ] cap `command` at 512 characters, appending `…` when it is cut, and ship argv otherwise whole -
+- [x] cap `command` at 512 characters, appending `…` when it is cut, and ship argv otherwise whole -
       the arguments are the content (`rx <plan file>` says what was run, `rx` says nothing)
-- [ ] wire `compose` into `active_session()` so the extractor calls `agterm_panes()` once per
+- [x] wire `compose` into `active_session()` so the extractor calls `agterm_panes()` once per
       invocation
-- [ ] write tests for `compose` over the scratch fixture: `surface` is `scratch`, `command` and `cwd`
+- [x] write tests for `compose` over the scratch fixture: `surface` is `scratch`, `command` and `cwd`
       come from the scratch pane, `foreground` is absent
-- [ ] write tests for `compose` over the left fixture: `surface` is `left`, `foreground` present
-- [ ] write tests for `compose` with no matching pane: `surface` still reported, `command` absent
-- [ ] write a test that a 600-character argv is cut to 512 with the marker
-- [ ] run `mise run check` - must pass before task 6
+- [x] write tests for `compose` over the left fixture: `surface` is `left`, `foreground` present
+- [x] write tests for `compose` with no matching pane: `surface` still reported, `command` absent
+- [x] write a test that a 600-character argv is cut to 512 with the marker
+- [x] run `mise run check` - must pass before task 6
+
+➕ `compose` takes the workspace name beside the session rather than a `TreeSession` wrapper -
+`workspace` lives on the tree's workspace node, not on its session, and a struct existing only to
+carry the pair across one call is an abstraction the plan does not need.
+
+➕ The join needs the session's `id`, which the extractor did not deserialise before; `Session` gains
+`#[serde(default)] id: String`. `pane_on` uppercases it at the point of comparison, matching what
+`agterm_panes` already does to `AGTERM_SESSION_ID`.
+
+➕ A session whose `surfaces` array is absent or carries nothing active-and-visible now reports
+neither `surface` nor `foreground`. That is the plan's rule read literally: without a known surface
+the extractor cannot say the left pane is the one on screen, and the whole point of the change is to
+stop asserting that blind.
 
 ### Task 6: Document the shape
 

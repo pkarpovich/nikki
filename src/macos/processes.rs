@@ -36,7 +36,6 @@ impl Process {
     }
 }
 
-#[expect(dead_code)]
 pub fn agterm_panes() -> Vec<Pane> {
     let mut panes = Vec::new();
     for process in list() {
