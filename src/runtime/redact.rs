@@ -7,6 +7,8 @@ use crate::config::{Keep, RedactField, RedactRule};
 
 pub const WILDCARD_HOST: &str = "*";
 
+const DROPPED_WITH_TITLE: [&str; 2] = ["tab", "command"];
+
 pub struct Redactor {
     fallback: Keep,
     hosts: HashMap<String, Keep>,
@@ -65,8 +67,12 @@ impl Redactor {
             && let Some(details) = details.as_object_mut()
         {
             self.redact_url(details.get_mut("url"));
-            if drops_title && let Some(tab) = details.get_mut("tab") {
-                *tab = Value::Null;
+            if drops_title {
+                for key in DROPPED_WITH_TITLE {
+                    if let Some(slot) = details.get_mut(key) {
+                        *slot = Value::Null;
+                    }
+                }
             }
         }
 
@@ -348,6 +354,44 @@ mod tests {
         assert_eq!(payload["title"], Value::Null);
         assert_eq!(payload["details"]["tab"], Value::Null);
         assert_eq!(payload["details"]["profile"], "MBP_21");
+    }
+
+    #[test]
+    fn dropping_a_title_covers_the_terminal_command_line_in_details() {
+        let agterm = "com.umputun.agterm";
+        let redactor = Redactor::new(&[RedactRule {
+            url_host: None,
+            keep: None,
+            bundle_id: Some(agterm.to_string()),
+            drop: vec![RedactField::Title],
+        }]);
+        let mut payload = json!({
+            "app": "agterm",
+            "bundle_id": agterm,
+            "title": "nikki: revdiff",
+            "details": {
+                "workspace": "nikki",
+                "session": "nikki daemon",
+                "surface": "scratch",
+                "command": "psql postgres://user:hunter2@example.com/db",
+                "cwd": "/Users/pavel.karpovich/Projects/nikki",
+            },
+        });
+        redactor.apply(&mut payload);
+        assert_eq!(payload["title"], Value::Null);
+        assert_eq!(payload["details"]["command"], Value::Null);
+        assert_eq!(payload["details"]["surface"], "scratch");
+    }
+
+    #[test]
+    fn a_bundle_without_a_drop_rule_keeps_its_command_line() {
+        let mut payload = json!({
+            "app": "agterm",
+            "bundle_id": "com.umputun.agterm",
+            "details": {"command": "rx plan.md"},
+        });
+        full_configured().apply(&mut payload);
+        assert_eq!(payload["details"]["command"], "rx plan.md");
     }
 
     #[test]

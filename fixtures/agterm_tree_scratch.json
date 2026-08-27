@@ -1,0 +1,63 @@
+{
+  "ok": true,
+  "result": {
+    "tree": {
+      "sidebarVisible": true,
+      "quickVisible": false,
+      "idleMs": 12044,
+      "workspaceFilter": false,
+      "workspaces": [
+        {
+          "id": "0B4E7C55-2D8A-49B1-8F63-A1D0E2C94B77",
+          "name": "nikki",
+          "active": true,
+          "sessions": [
+            {
+              "id": "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+              "name": "✳ nikki daemon",
+              "title": "nikki: revdiff",
+              "cwd": "/Users/pavel.karpovich/Projects/nikki",
+              "active": true,
+              "flagged": false,
+              "split": false,
+              "scratch": true,
+              "overlay": false,
+              "realized": true,
+              "fontSize": 18,
+              "foreground": [
+                "/Users/pavel.karpovich/.local/bin/claude",
+                "--enable-auto-mode",
+                "--resume"
+              ],
+              "restoreCommand": "cd /Users/pavel.karpovich/Projects/nikki && claude --resume",
+              "surfaces": [
+                { "kind": "left", "active": false, "visible": false },
+                { "kind": "scratch", "active": true, "visible": true }
+              ]
+            },
+            {
+              "id": "9D3C8A17-4B62-4C05-91E7-8A4F2B6D50C9",
+              "name": "logs",
+              "title": "logs",
+              "cwd": "/var/log",
+              "active": false,
+              "flagged": false,
+              "split": true,
+              "scratch": false,
+              "overlay": false,
+              "realized": true,
+              "fontSize": 18,
+              "foreground": ["/usr/bin/tail", "-f", "system.log"],
+              "splitForeground": ["/usr/bin/less", "install.log"],
+              "restoreCommand": "cd /var/log && tail -f system.log",
+              "surfaces": [
+                { "kind": "left", "active": false, "visible": true },
+                { "kind": "right", "active": true, "visible": true }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

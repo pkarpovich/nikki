@@ -45,12 +45,21 @@ workflow refuses to ship a binary without it.
 |---|---|---|
 | Accessibility | window titles, the focused window, `AXDocument` paths, title-change events | none |
 | Automation -> Dia | the active tab's URL, title and profile | one-time prompt on first use |
-| (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state | none |
+| (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state, the process table | none |
 
 Both grants are keyed by the code signature - the Developer ID team plus the `dev.pkarpovich.nikki`
 identifier that `codesign --identifier` pins - so they survive every upgrade that keeps signing with
 the same pair. Changing the identifier loses both grants silently: capture keeps running, titles go
 null and no tab is ever read again.
+
+**The process table needs no permission, and only agterm's own variables are consulted.**
+`KERN_PROCARGS2` returns the argv and the environment of a process owned by the same user with no
+prompt and no entitlement, which is how the agterm extractor knows what is running in the pane on
+screen. The buffer it returns carries the whole environment and is parsed whole, but only
+`AGTERM_ENABLED`, `AGTERM_SESSION_ID`, `AGTERM_PANE` and `AGTERM_PANE_ID` are ever looked at: no
+environment variable is recorded, logged or shipped, and an argv reaches a record only for the pane
+the tree calls active and visible. The call fails for setuid and hardened binaries (`sudo`, `top`), which
+is a normal outcome and never logged per tick.
 
 Run the daemon under launchd (`brew services start nikki`), not from a terminal. macOS attributes a
 TCC grant to the *responsible* process, and a binary launched from an already-trusted terminal
@@ -86,7 +95,8 @@ geometry, `display` and every activity signal still work, because none of them t
 The window title and the `AXDocument` path go null, `visible[]` entries lose their titles, and the
 record carries `degraded: true`, which reaches the service and the API - a degraded day must not be
 indistinguishable from a quiet one to whoever reads the timeline later. Extractor `details` survive,
-because the Dia and agterm extractors need Automation rather than Accessibility.
+because neither extractor touches Accessibility: Dia needs Automation, and agterm needs nothing at
+all - it reads `agtermctl` and the process table.
 
 ## Configuration
 
@@ -160,7 +170,10 @@ nothing unredacted is ever written to disk. Three rules that are silent when wro
   host-less and goes through the ordinary host rule, shipping as `chrome-extension://<id>/`.
 - **`drop = ["title"]` applies to `visible[]` entries too**, not only the top-level title, and to the
   browser tab title in `details.tab`, which for a browser window is the same string the rule just
-  nulled.
+  nulled. It applies to `details.command` for the same reason: a terminal's command line is what its
+  title summarises, it is the field most likely to carry a credential passed as an argument, and a
+  rule that nulled the title while shipping the whole argv would be an escape hatch that does not
+  close.
 - **Host-only is the floor, not a rule that can be deleted.** Replacing the `[[redact]]` list replaces
   the rules, not the default posture: a host with no matching rule is still reduced to its host.
   Shipping whole URLs takes an explicit `url_host = "*"`, `keep = "full"`.
@@ -277,8 +290,11 @@ bundle id in `src/extract/mod.rs` and is invoked **only for the focused applicat
 - `document.rs` - the universal `AXDocument` probe, applied to every focused window, keeping the
   value only when it is non-empty and its scheme is `file`.
 - `dia.rs` - AppleScript against `company.thebrowser.dia`, producing `{url, tab, profile, pinned}`.
-- `agterm.rs` - `agtermctl tree --json` against `com.umputun.agterm`, producing
-  `{workspace, session, cwd, foreground}`.
+- `agterm.rs` - `agtermctl tree --json` against `com.umputun.agterm`, joined against the process
+  table, producing `{workspace, session, surface, command, cwd}` plus a conditional `foreground`.
+  The tree names the active workspace and session; the surface the session calls active and visible
+  names the pane that is on screen; and the process carrying that session's `AGTERM_SESSION_ID` and
+  a matching `AGTERM_PANE`, holding its tty's foreground process group, names what runs in it.
 
 Every extractor is fallible and returns empty rather than failing the tick, and every extractor that
 spawns a subprocess carries a hard 2s deadline after which the child is killed. "Fallible" covers a
@@ -404,6 +420,58 @@ Bodies for the kinds not shown above:
  "kind":"buffer_overflow","dedup_key":"5e2b71c8804fda93","degraded":false,
  "payload":{"details":{"dropped":20000,"dropped_from":"2026-06-14T08:00:00.000Z","dropped_to":"2026-06-21T19:30:00.000Z"}}}
 ```
+
+### `details` on a window record
+
+A free-form object whose keys depend on the focused application's extractor. The server stores it as
+opaque JSON and validates nothing inside it, so a new key needs no service change - but the shapes
+this daemon actually sends are documented here, and any change to them is mirrored into the service
+repository in the same pass.
+
+`company.thebrowser.dia` carries `url`, `tab`, `profile` and `pinned`. `url` is post-redaction.
+
+`com.umputun.agterm` carries `workspace`, `session`, `surface`, `command`, `cwd` and, conditionally,
+`foreground`:
+
+```json
+{"workspace":"nikki","session":"nikki daemon","surface":"scratch",
+ "command":"rx docs/plans/2026-08-27-agterm-panes.md","cwd":"/Users/pavel.karpovich/Projects/nikki/docs"}
+```
+
+- `session` is the session name with its animated status glyph stripped, so an auto-named session is
+  one identity over its lifetime rather than a new one per spinner frame.
+- `surface` is the kind of the pane on screen - `left`, `right` or `scratch`, or one of `overlay`,
+  `overlay-left` and `overlay-right` while an overlay covers the session, or `quick` while the
+  window's quick terminal is up, or `dashboard` while the window shows the view-only grid of several
+  sessions' panes. A session's `surfaces[]` flags describe the session's own split and scratch state
+  and say nothing about zoom, the quick terminal or the dashboard, so the tree's top-level
+  `quickVisible`, `dashboardMembers` and `zoomedSurface` are read first and outrank them: a zoomed
+  pane is what fills the window even when the session calls a different one active, and an open
+  dashboard fills it with panes from several sessions at once. `surface` is absent when the tree
+  reports no surface that is both active and visible - including an older agterm that omits
+  `surfaces` entirely, and including a zoom that names a surface of some other session, where the
+  pane on screen is not the active session's to name.
+- `command` is the whole argv of the on-screen pane's foreground process, joined by spaces, **capped
+  at 512 characters** with a trailing `…` when cut. The arguments are the content and are not
+  trimmed away: `rx <plan file>` says what was run, `rx` says nothing. The cap exists only so a
+  pathological command line cannot dominate a record. `command` is absent when no process claims the
+  active surface, rather than falling back to a guess - including when the pane runs a setuid or
+  hardened binary whose arguments the kernel declines to describe, and including every overlay
+  surface, the quick terminal and the dashboard: the pane role agterm stamps into a process is only
+  `left`, `right` or `scratch`, so no process claims an `overlay*`, `quick` or `dashboard` surface
+  and the record names what is on screen without saying what runs in it. `command` is also absent
+  when more than one process claims the surface, which is what a nested multiplexer produces - a
+  tmux server captures the pane's `AGTERM_*` and every job in every one of its windows leads its own
+  pty's foreground group, so each of them claims the pane. Naming one of them would name a job the
+  user cannot see.
+- `cwd` is that same process's own working directory. It falls back to the session-level `cwd` from
+  the tree **only while `surface` is `left`**: that field describes the left pane alone, so lending
+  it to a visible scratch pane would name a directory nobody is looking at. With any other surface on
+  screen and no directory from the process, `cwd` is absent.
+- `foreground` is the file name of the session's foreground program **and is emitted only when
+  `surface` is `left`**. It is a session-level field from the tree describing the left pane alone, so
+  reporting it while scratch is on screen names a program nobody is looking at - which is exactly the
+  defect this shape fixes.
 
 ### Identity
 
@@ -535,6 +603,7 @@ src/macos/             every unsafe block in the crate
   ax.rs                Accessibility: elements, titles, AXDocument, messaging timeout
   window_list.rs       CGWindowList, CGDisplayBounds, frontmost application, bundle id for pid
   activity.rs          idle seconds, input counters, microphone, cursor display
+  processes.rs         the process table: argv, environment, controlling tty, cwd, agterm panes
   events.rs            the CFRunLoop thread and every notification source
 src/window/visibility.rs  the pure visible-set resolver
 src/extract/           the bundle-id-keyed extractor registry
@@ -558,6 +627,12 @@ fixtures/              captured Dia output, agterm JSON, Local State, a small hi
 - The browser tab is captured only when the browser is the focused application, and only one
   profile's history is read. A rarely-used profile still leaves tab entries in window samples.
 - `mic_active` means the input device is running, not that anyone is listening.
+- A terminal pane running a setuid or hardened binary (`sudo`, `top`) reports no `command`:
+  `KERN_PROCARGS2` declines to describe it, which is the same blind spot the agterm tree has. The
+  pane the user is looking at is still named by `surface`.
+- `command` names the leader of the pane's foreground process group, not every process in it. A
+  helper the leader spawned without its own group - an MCP server under `claude`, a dev server under
+  `mise dev` - is deliberately not reported, and neither is the second half of a pipeline.
 - Windows applications running under a virtualiser in coherence mode appear as ordinary host windows
   with their own titles.
 - No third-party window manager is used, so there is no tag or workspace grouping in the window layer.
