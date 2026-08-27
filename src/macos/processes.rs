@@ -17,19 +17,73 @@ pub struct Process {
     pub tpgid: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pane {
+    pub session: String,
+    pub pane: String,
+    pub pane_id: String,
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+}
+
 impl Process {
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn has_tty(&self) -> bool {
         self.tdev != -1
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn is_foreground(&self) -> bool {
         self.has_tty() && self.pgid == self.tpgid
     }
 }
 
 #[expect(dead_code)]
+pub fn agterm_panes() -> Vec<Pane> {
+    let mut panes = Vec::new();
+    for process in list() {
+        let Some(args) = read_args(process.pid) else {
+            continue;
+        };
+        let Some(mut pane) = pane_of(&process, &args) else {
+            continue;
+        };
+        pane.session = pane.session.to_uppercase();
+        pane.cwd = cwd(process.pid);
+        panes.push(pane);
+    }
+    panes
+}
+
+fn pane_of(process: &Process, args: &ProcessArgs) -> Option<Pane> {
+    if args.env.get("AGTERM_ENABLED").map(String::as_str) != Some("1") {
+        return None;
+    }
+
+    let session = args.env.get("AGTERM_SESSION_ID")?;
+    if session.is_empty() {
+        return None;
+    }
+    if !process.is_foreground() {
+        return None;
+    }
+
+    let pane = match args.env.get("AGTERM_PANE") {
+        Some(pane) => pane.clone(),
+        None => "left".to_string(),
+    };
+    let pane_id = match args.env.get("AGTERM_PANE_ID") {
+        Some(pane_id) => pane_id.clone(),
+        None => String::new(),
+    };
+
+    Some(Pane {
+        session: session.clone(),
+        pane,
+        pane_id,
+        argv: args.argv.clone(),
+        cwd: None,
+    })
+}
+
 pub fn list() -> Vec<Process> {
     let mut processes = Vec::new();
     for pid in pids() {
@@ -82,7 +136,6 @@ fn describe(pid: i32) -> Option<Process> {
     })
 }
 
-#[expect(dead_code)]
 pub fn cwd(pid: i32) -> Option<String> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
     let size = size_of::<libc::proc_vnodepathinfo>() as i32;
@@ -115,7 +168,6 @@ pub fn cwd(pid: i32) -> Option<String> {
     Some(String::from_utf8_lossy(&path).into_owned())
 }
 
-#[expect(dead_code)]
 pub fn read_args(pid: i32) -> Option<ProcessArgs> {
     let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     let mut size: libc::size_t = 0;
@@ -255,6 +307,102 @@ mod tests {
 
         assert!(editor.has_tty());
         assert!(editor.is_foreground());
+    }
+
+    fn args(argv: &[&str], env: &[(&str, &str)]) -> ProcessArgs {
+        let mut args = ProcessArgs::default();
+        for argument in argv {
+            args.argv.push((*argument).to_string());
+        }
+        for (key, value) in env {
+            args.env.insert((*key).to_string(), (*value).to_string());
+        }
+        args
+    }
+
+    #[test]
+    fn a_foreground_agterm_process_becomes_its_pane() {
+        let editor = process(1200, 16777222, 1200);
+        let args = args(
+            &["rx", "plan.md"],
+            &[
+                ("AGTERM_ENABLED", "1"),
+                ("AGTERM_SESSION_ID", "a1b2"),
+                ("AGTERM_PANE", "scratch"),
+                ("AGTERM_PANE_ID", "p7"),
+            ],
+        );
+
+        let pane = pane_of(&editor, &args).expect("a foreground agterm process is a pane");
+
+        assert_eq!(pane.session, "a1b2");
+        assert_eq!(pane.pane, "scratch");
+        assert_eq!(pane.pane_id, "p7");
+        assert_eq!(pane.argv, vec!["rx".to_string(), "plan.md".to_string()]);
+        assert_eq!(pane.cwd, None);
+    }
+
+    #[test]
+    fn a_process_outside_agterm_is_not_a_pane() {
+        let editor = process(1200, 16777222, 1200);
+        let args = args(&["vim"], &[("SHELL", "/bin/fish")]);
+
+        assert_eq!(pane_of(&editor, &args), None);
+    }
+
+    #[test]
+    fn a_daemon_inheriting_the_environment_is_not_a_pane() {
+        let daemon = process(900, -1, -1);
+        let args = args(
+            &["op", "daemon"],
+            &[
+                ("AGTERM_ENABLED", "1"),
+                ("AGTERM_SESSION_ID", "a1b2"),
+                ("AGTERM_PANE", "left"),
+            ],
+        );
+
+        assert_eq!(pane_of(&daemon, &args), None);
+    }
+
+    #[test]
+    fn the_shell_behind_the_foreground_group_is_not_a_pane() {
+        let shell = process(900, 16777222, 1200);
+        let args = args(
+            &["fish"],
+            &[
+                ("AGTERM_ENABLED", "1"),
+                ("AGTERM_SESSION_ID", "a1b2"),
+                ("AGTERM_PANE", "left"),
+            ],
+        );
+
+        assert_eq!(pane_of(&shell, &args), None);
+    }
+
+    #[test]
+    fn a_session_id_that_is_empty_is_not_a_pane() {
+        let editor = process(1200, 16777222, 1200);
+        let args = args(
+            &["rx"],
+            &[("AGTERM_ENABLED", "1"), ("AGTERM_SESSION_ID", "")],
+        );
+
+        assert_eq!(pane_of(&editor, &args), None);
+    }
+
+    #[test]
+    fn a_missing_pane_variable_reads_as_the_left_pane() {
+        let editor = process(1200, 16777222, 1200);
+        let args = args(
+            &["claude"],
+            &[("AGTERM_ENABLED", "1"), ("AGTERM_SESSION_ID", "a1b2")],
+        );
+
+        let pane = pane_of(&editor, &args).expect("a foreground agterm process is a pane");
+
+        assert_eq!(pane.pane, "left");
+        assert_eq!(pane.pane_id, "");
     }
 
     #[test]

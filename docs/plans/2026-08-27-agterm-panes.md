@@ -170,18 +170,23 @@ every field.
 **Files:**
 - Modify: `src/macos/processes.rs`
 
-- [ ] add `pub struct Pane { pub session: String, pub pane: String, pub pane_id: String, pub argv: Vec<String>, pub cwd: Option<String> }`
-- [ ] implement the pure `pane_of(process: &Process, args: &ProcessArgs) -> Option<Pane>`: require
+- [x] add `pub struct Pane { pub session: String, pub pane: String, pub pane_id: String, pub argv: Vec<String>, pub cwd: Option<String> }`
+- [x] implement the pure `pane_of(process: &Process, args: &ProcessArgs) -> Option<Pane>`: require
       `AGTERM_ENABLED == "1"` and a non-empty `AGTERM_SESSION_ID`, require
       `process.is_foreground()`, and default a missing `AGTERM_PANE` to `left`
-- [ ] implement `pub fn agterm_panes() -> Vec<Pane>` composing `list`, `read_args`, `pane_of` and
+- [x] implement `pub fn agterm_panes() -> Vec<Pane>` composing `list`, `read_args`, `pane_of` and
       `cwd`, uppercasing the session id so it joins against the tree case-insensitively
-- [ ] write tests for `pane_of` accepting a foreground agterm process and reading its pane
-- [ ] write tests for `pane_of` rejecting, one case each: a process with no `AGTERM_ENABLED`, one
+- [x] write tests for `pane_of` accepting a foreground agterm process and reading its pane
+- [x] write tests for `pane_of` rejecting, one case each: a process with no `AGTERM_ENABLED`, one
       with the variables but no controlling tty (the inherited-environment daemon), and one with a
       tty that is not its foreground group (the parent shell)
-- [ ] write a test that a missing `AGTERM_PANE` is read as `left`
-- [ ] run `mise run check` - must pass before task 4
+- [x] write a test that a missing `AGTERM_PANE` is read as `left`
+- [x] run `mise run check` - must pass before task 4
+
+➕ `agterm_panes` becomes the only live root in the module, so the `#[expect(dead_code)]` on `list`,
+`read_args`, `cwd`, `has_tty` and `is_foreground` had to go the moment it called them - a fulfilled
+expectation is itself an error under `-D warnings`. `agterm_panes` now carries the attribute alone,
+until task 5 wires it into the extractor.
 
 ### Task 4: Read surfaces out of the tree
 
