@@ -442,10 +442,12 @@ repository in the same pass.
   one identity over its lifetime rather than a new one per spinner frame.
 - `surface` is the kind of the pane on screen - `left`, `right` or `scratch`, or one of `overlay`,
   `overlay-left` and `overlay-right` while an overlay covers the session, or `quick` while the
-  window's quick terminal is up. A session's `surfaces[]` flags describe the session's own split and
-  scratch state and say nothing about zoom or the quick terminal, so the tree's top-level
-  `quickVisible` and `zoomedSurface` are read first and outrank them: a zoomed pane is what fills the
-  window even when the session calls a different one active. `surface` is absent when the tree
+  window's quick terminal is up, or `dashboard` while the window shows the view-only grid of several
+  sessions' panes. A session's `surfaces[]` flags describe the session's own split and scratch state
+  and say nothing about zoom, the quick terminal or the dashboard, so the tree's top-level
+  `quickVisible`, `dashboardMembers` and `zoomedSurface` are read first and outrank them: a zoomed
+  pane is what fills the window even when the session calls a different one active, and an open
+  dashboard fills it with panes from several sessions at once. `surface` is absent when the tree
   reports no surface that is both active and visible - including an older agterm that omits
   `surfaces` entirely, and including a zoom that names a surface of some other session, where the
   pane on screen is not the active session's to name.
@@ -455,9 +457,13 @@ repository in the same pass.
   pathological command line cannot dominate a record. `command` is absent when no process claims the
   active surface, rather than falling back to a guess - including when the pane runs a setuid or
   hardened binary whose arguments the kernel declines to describe, and including every overlay
-  surface and the quick terminal: the pane role agterm stamps into a process is only `left`, `right`
-  or `scratch`, so no process claims an `overlay*` or `quick` surface and the record names what is on
-  screen without saying what runs in it.
+  surface, the quick terminal and the dashboard: the pane role agterm stamps into a process is only
+  `left`, `right` or `scratch`, so no process claims an `overlay*`, `quick` or `dashboard` surface
+  and the record names what is on screen without saying what runs in it. `command` is also absent
+  when more than one process claims the surface, which is what a nested multiplexer produces - a
+  tmux server captures the pane's `AGTERM_*` and every job in every one of its windows leads its own
+  pty's foreground group, so each of them claims the pane. Naming one of them would name a job the
+  user cannot see.
 - `cwd` is that same process's own working directory. It falls back to the session-level `cwd` from
   the tree **only while `surface` is `left`**: that field describes the left pane alone, so lending
   it to a visible scratch pane would name a directory nobody is looking at. With any other surface on

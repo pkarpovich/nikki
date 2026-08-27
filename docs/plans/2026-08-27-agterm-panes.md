@@ -294,6 +294,24 @@ active session is its `kind`, and a zoom naming another session leaves `surface`
 naming a pane that is not on screen. No process claims `quick`, so - exactly as with `overlay*` - the
 record says what is in front of the user without saying what runs in it.
 
+➕ Review finding: the dashboard is a third way the window stops showing the active session's pane.
+agterm's `dashboard` command fills the window with a view-only grid of several sessions' panes, and it
+is mutually exclusive with zoom - so `zoomedSurface` is absent exactly when a dashboard is up, and
+`surfaces[]` still reports the session's own flags. The record therefore named the active session's
+pane, its `command`, its `cwd` and its `foreground` while the user was looking at a grid. `Screen` now
+carries the top-level `dashboardMembers`, read after `quickVisible` and before the zoom, and an open
+dashboard is `surface: dashboard` - no process claims it, so it names what fills the window without
+saying what runs in it, exactly as `quick` does.
+
+➕ Review finding: `pane_on` returned the first pane matching `(session, surface)`, and that key is not
+unique. A tmux (or screen, or zellij) server captures the pane's `AGTERM_*` into its global environment,
+so every job in every one of its windows carries the same session id and pane role while leading its own
+pty's foreground process group - agterm's own troubleshooting documents this inheritance and ships a
+`tmux set-environment -r` remedy for it. The winner was then whichever `proc_listpids` happened to list
+first, so `command` and `cwd` could name a background tmux window's job and flip between ticks. `pane_on`
+now reports nothing when more than one process claims the surface: two foreground leaders on one pane
+means two different ttys, and picking one of them is the falsehood this plan exists to remove.
+
 ### Task 6: Document the shape
 
 **Files:**
@@ -338,6 +356,13 @@ only documented ones while Dia's stay implicit.
 - [x] run the full suite: `mise run check`
 - [x] run `./scripts/acceptance.sh`
 - [x] verify the `unsafe` containment gate: `! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'`
+
+➕ Review finding: the live case could report success while asserting nothing. It skipped on
+`details.is_empty()`, which is what `active_session` returns for *every* failure - a spawn failure, a
+non-zero exit, a tree that no longer deserialises - so a serde rename would have printed the skip line
+and passed. The skip now hangs on the process table instead: no agterm pane running means agterm is not
+up and there is nothing to assert, while a live pane makes an empty tree read a failure. The script's
+`agtermctl` guard stays, because a machine without agterm has no live tree at all.
 - [x] verify a machine without agterm still ticks: run with `agtermctl` unreachable and confirm the
       extractor returns empty rather than failing
 

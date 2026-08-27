@@ -12,6 +12,7 @@ const PROGRAM: &str = "agtermctl";
 const BUNDLED_PROGRAM: &str = "/Applications/agterm.app/Contents/MacOS/agtermctl";
 const LEFT_SURFACE: &str = "left";
 const QUICK_SURFACE: &str = "quick";
+const DASHBOARD_SURFACE: &str = "dashboard";
 const SURFACE_ADDRESS: &str = "surface:";
 const COMMAND_LIMIT: usize = 512;
 
@@ -164,10 +165,13 @@ fn pane_on<'a>(panes: &'a [Pane], session: &str, surface: &str) -> Option<&'a Pa
     let session = session.to_uppercase();
     let mut found = None;
     for pane in panes {
-        if pane.session == session && pane.pane == surface {
-            found = Some(pane);
-            break;
+        if pane.session != session || pane.pane != surface {
+            continue;
         }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(pane);
     }
     found
 }
@@ -190,10 +194,20 @@ fn surface_on_screen(screen: &Screen, session: &str, surfaces: &[Surface]) -> Op
     if screen.quick_visible {
         return Some(QUICK_SURFACE.to_string());
     }
+    if dashboard_open(&screen.dashboard_members) {
+        return Some(DASHBOARD_SURFACE.to_string());
+    }
     let Some(zoomed) = &screen.zoomed_surface else {
         return active_surface(surfaces);
     };
     zoomed_surface(zoomed, session)
+}
+
+fn dashboard_open(members: &Option<Vec<String>>) -> bool {
+    let Some(members) = members else {
+        return false;
+    };
+    !members.is_empty()
 }
 
 fn zoomed_surface(zoomed: &str, session: &str) -> Option<String> {
@@ -269,6 +283,8 @@ struct Screen {
     quick_visible: bool,
     #[serde(default, rename = "zoomedSurface")]
     zoomed_surface: Option<String>,
+    #[serde(default, rename = "dashboardMembers")]
+    dashboard_members: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -500,6 +516,40 @@ mod tests {
     }
 
     #[test]
+    fn an_open_dashboard_fills_the_window_and_names_no_pane() {
+        let mut tree = captured();
+        tree["result"]["tree"]["dashboardMembers"] = Value::Array(vec![
+            Value::String("5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46:left".to_string()),
+            Value::String("7320056A-9A11-4F0C-B0D2-2E8B5F6A31C4:left".to_string()),
+        ]);
+        let panes = [pane(
+            "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+            "left",
+            &["claude", "--resume"],
+            Some("/Users/pavel.karpovich/Projects/nikki/src"),
+        )];
+
+        let details = parse_tree(&tree.to_string(), &panes);
+
+        assert_eq!(details["session"], "nikki daemon");
+        assert_eq!(details["surface"], "dashboard");
+        assert!(!details.contains_key("command"));
+        assert!(!details.contains_key("cwd"));
+        assert!(!details.contains_key("foreground"));
+    }
+
+    #[test]
+    fn a_closed_dashboard_leaves_the_active_surface_alone() {
+        let mut tree = captured();
+        tree["result"]["tree"]["dashboardMembers"] = Value::Null;
+
+        let details = parse_tree(&tree.to_string(), &[]);
+
+        assert_eq!(details["surface"], "left");
+        assert_eq!(details["foreground"], "claude");
+    }
+
+    #[test]
     fn a_zoomed_pane_outranks_the_one_the_session_calls_active() {
         let mut tree = captured();
         tree["result"]["tree"]["zoomedSurface"] =
@@ -688,6 +738,30 @@ mod tests {
     }
 
     #[test]
+    fn two_processes_claiming_one_pane_leave_the_command_unreported() {
+        let panes = [
+            pane(
+                "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+                "left",
+                &["tmux", "attach"],
+                Some("/Users/pavel.karpovich/Projects/nikki"),
+            ),
+            pane(
+                "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+                "left",
+                &["btop"],
+                Some("/tmp"),
+            ),
+        ];
+
+        let details = parse_tree(CAPTURED, &panes);
+
+        assert_eq!(details["surface"], "left");
+        assert!(!details.contains_key("command"));
+        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki");
+    }
+
+    #[test]
     fn a_command_longer_than_the_cap_is_cut_and_marked() {
         let argument = "a".repeat(600);
         let command = command_line(std::slice::from_ref(&argument)).expect("a command is reported");
@@ -710,11 +784,23 @@ mod tests {
     #[tokio::test]
     #[ignore = "reads the live agterm tree, so scripts/acceptance.sh runs it and cargo test does not"]
     async fn the_live_tree_names_the_surface_on_screen() {
-        let details = active_session().await;
-        if details.is_empty() {
-            println!("agterm reports no active session, so there is nothing on screen to name");
+        let panes = agterm_panes();
+        if panes.is_empty() {
+            println!("no agterm pane is running, so there is no live surface to name");
             return;
         }
+
+        println!("the process table yields {} agterm panes", panes.len());
+        assert!(
+            panes.iter().any(|pane| !pane.argv.is_empty()),
+            "a pane read out of the process table carries the argv of the job in front of it"
+        );
+
+        let details = active_session().await;
+        assert!(
+            !details.is_empty(),
+            "the process table names a live agterm pane, so the tree must yield an active session"
+        );
 
         println!("{}", Value::Object(details.clone()));
         assert!(details.contains_key("workspace"));
@@ -722,17 +808,6 @@ mod tests {
         assert!(
             details.contains_key("surface"),
             "a live session must name the surface the user is looking at"
-        );
-
-        let panes = agterm_panes();
-        println!("the process table yields {} agterm panes", panes.len());
-        assert!(
-            !panes.is_empty(),
-            "a live session runs a shell, so the process table must yield at least one pane"
-        );
-        assert!(
-            panes.iter().any(|pane| !pane.argv.is_empty()),
-            "a pane read out of the process table carries the argv of the job in front of it"
         );
     }
 
