@@ -13,7 +13,7 @@ env:
   # grant for Dia to the signing identity plus this identifier. A different
   # value makes every upgrade look like a new program, both grants are lost,
   # and capture silently degrades to no window titles and no browser tab.
-  BUNDLE_ID: space.pkarpovich.nikki
+  BUNDLE_ID: dev.pkarpovich.nikki
   # Apple Silicon only. The crate links Apple frameworks, the runner is arm64,
   # so this is the native target and nothing is cross-compiled.
   TARGET: aarch64-apple-darwin

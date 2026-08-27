@@ -55,11 +55,25 @@ binary and a released one carry the same identity and share the same TCC grants.
 
 ## Secrets
 
-The workflow reads four repository secrets: `MACOS_CERT_P12_BASE64` and
-`MACOS_CERT_PASSWORD` (the exported Developer ID Application certificate),
-`MACOS_TEAM_ID`, and `HOMEBREW_TAP_TOKEN` (a fine-grained token with write access
-to `pkarpovich/homebrew-apps` and nothing else). They are the same four `nhop`
-uses and are stored in 1Password.
+The workflow reads four repository secrets. They are the same four `nhop` uses, from the
+same 1Password items and the same Developer ID certificate - nothing new has to be
+generated for this repository, only copied into it:
+
+| Secret | What it is |
+|---|---|
+| `MACOS_CERT_P12_BASE64` | the exported Developer ID Application certificate, base64 |
+| `MACOS_CERT_PASSWORD` | the password that export was made with |
+| `MACOS_TEAM_ID` | `GGG699AY79`, the parenthesised suffix of the identity name |
+| `HOMEBREW_TAP_TOKEN` | a fine-grained token with write access to `pkarpovich/homebrew-apps` and nothing else |
+
+```fish
+gh secret set MACOS_CERT_P12_BASE64 --repo pkarpovich/nikki < (base64 -i cert.p12 | psub)
+gh secret set MACOS_CERT_PASSWORD --repo pkarpovich/nikki
+gh secret set HOMEBREW_TAP_TOKEN --repo pkarpovich/nikki
+```
+
+A secret cannot be read back out of GitHub, so a lost one is re-exported from the
+certificate in the login keychain rather than recovered from `nhop`.
 
 `BUNDLE_ID` must never change. macOS ties both the Accessibility grant and the
 Automation grant for Dia to the signing identity plus that identifier, so a

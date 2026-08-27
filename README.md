@@ -47,7 +47,7 @@ workflow refuses to ship a binary without it.
 | Automation -> Dia | the active tab's URL, title and profile | one-time prompt on first use |
 | (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state | none |
 
-Both grants are keyed by the code signature - the Developer ID team plus the `space.pkarpovich.nikki`
+Both grants are keyed by the code signature - the Developer ID team plus the `dev.pkarpovich.nikki`
 identifier that `codesign --identifier` pins - so they survive every upgrade that keeps signing with
 the same pair. Changing the identifier loses both grants silently: capture keeps running, titles go
 null and no tab is ever read again.

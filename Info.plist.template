@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>space.pkarpovich.nikki</string>
+	<string>dev.pkarpovich.nikki</string>
 	<key>CFBundleName</key>
 	<string>nikki</string>
 	<key>CFBundleShortVersionString</key>
