@@ -121,20 +121,24 @@ them.
 - Create: `src/macos/processes.rs`
 - Modify: `src/macos/mod.rs`
 
-- [ ] declare `mod processes;` in `src/macos/mod.rs`
-- [ ] add `libc = "0.2"` to `Cargo.toml` dependencies
-- [ ] create `src/macos/processes.rs` with `pub struct ProcessArgs { pub argv: Vec<String>, pub env: HashMap<String, String> }`
-- [ ] implement the pure `parse_procargs(buffer: &[u8]) -> ProcessArgs`: read `argc` from the first
+- [x] declare `mod processes;` in `src/macos/mod.rs`
+- [x] add `libc = "0.2"` to `Cargo.toml` dependencies
+- [x] create `src/macos/processes.rs` with `pub struct ProcessArgs { pub argv: Vec<String>, pub env: HashMap<String, String> }`
+- [x] implement the pure `parse_procargs(buffer: &[u8]) -> ProcessArgs`: read `argc` from the first
       four native-endian bytes, skip the executable path and the nul padding that follows it, take
       `argc` nul-terminated strings as argv, then take nul-terminated `KEY=VALUE` strings until an
       empty string or the end of the buffer; a string without `=` is skipped, not fatal
-- [ ] implement `pub fn read_args(pid: i32) -> Option<ProcessArgs>` over
+- [x] implement `pub fn read_args(pid: i32) -> Option<ProcessArgs>` over
       `sysctl(CTL_KERN, KERN_PROCARGS2, pid)`, sizing with a probe call and returning `None` on any
       failure (a restricted binary is a normal outcome, not an error to log per tick)
-- [ ] write tests for `parse_procargs` over a hand-built buffer: argv and env both recovered
-- [ ] write tests for `parse_procargs` edge cases: a buffer shorter than four bytes, `argc` larger
+- [x] write tests for `parse_procargs` over a hand-built buffer: argv and env both recovered
+- [x] write tests for `parse_procargs` edge cases: a buffer shorter than four bytes, `argc` larger
       than the strings present, an env entry without `=`, a trailing empty string ending the env
-- [ ] run `mise run check` - must pass before task 2
+- [x] run `mise run check` - must pass before task 2
+
+➕ `read_args` carries `#[expect(dead_code)]` until task 3 wires it up. `#[expect]` errors once the
+expectation is fulfilled, so the attribute removes itself the moment `agterm_panes` calls it - no
+blanket module allow, and no way to forget it.
 
 ### Task 2: Describe a process and its terminal
 

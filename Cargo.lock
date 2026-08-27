@@ -771,6 +771,7 @@ dependencies = [
  "argh",
  "block2",
  "chrono",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-application-services",
