@@ -1,10 +1,118 @@
 use std::collections::HashMap;
 use std::ptr::null_mut;
 
+const PROC_ALL_PIDS: u32 = 1;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessArgs {
     pub argv: Vec<String>,
     pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Process {
+    pub pid: i32,
+    pub pgid: i32,
+    pub tdev: i32,
+    pub tpgid: i32,
+}
+
+impl Process {
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn has_tty(&self) -> bool {
+        self.tdev != -1
+    }
+
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn is_foreground(&self) -> bool {
+        self.has_tty() && self.pgid == self.tpgid
+    }
+}
+
+#[expect(dead_code)]
+pub fn list() -> Vec<Process> {
+    let mut processes = Vec::new();
+    for pid in pids() {
+        let Some(process) = describe(pid) else {
+            continue;
+        };
+        processes.push(process);
+    }
+    processes
+}
+
+fn pids() -> Vec<i32> {
+    let size = unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, null_mut(), 0) };
+    if size <= 0 {
+        return Vec::new();
+    }
+
+    let mut pids = vec![0i32; size as usize / size_of::<i32>()];
+    let bytes = unsafe {
+        libc::proc_listpids(
+            PROC_ALL_PIDS,
+            0,
+            pids.as_mut_ptr().cast(),
+            (pids.len() * size_of::<i32>()) as i32,
+        )
+    };
+    if bytes <= 0 {
+        return Vec::new();
+    }
+
+    pids.truncate(bytes as usize / size_of::<i32>());
+    pids.retain(|pid| *pid > 0);
+    pids
+}
+
+fn describe(pid: i32) -> Option<Process> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = size_of::<libc::proc_bsdinfo>() as i32;
+    let read =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    if read != size {
+        return None;
+    }
+
+    Some(Process {
+        pid,
+        pgid: info.pbi_pgid as i32,
+        tdev: info.e_tdev as i32,
+        tpgid: info.e_tpgid as i32,
+    })
+}
+
+#[expect(dead_code)]
+pub fn cwd(pid: i32) -> Option<String> {
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = size_of::<libc::proc_vnodepathinfo>() as i32;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+
+    let mut path = Vec::new();
+    'chunks: for chunk in info.pvi_cdir.vip_path {
+        for byte in chunk {
+            if byte == 0 {
+                break 'chunks;
+            }
+            path.push(byte as u8);
+        }
+    }
+    if path.is_empty() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&path).into_owned())
 }
 
 #[expect(dead_code)]
@@ -114,6 +222,39 @@ mod tests {
             buffer.push(0);
         }
         buffer
+    }
+
+    fn process(pgid: i32, tdev: i32, tpgid: i32) -> Process {
+        Process {
+            pid: 4242,
+            pgid,
+            tdev,
+            tpgid,
+        }
+    }
+
+    #[test]
+    fn a_process_without_a_terminal_is_neither_attached_nor_foreground() {
+        let daemon = process(900, -1, -1);
+
+        assert!(!daemon.has_tty());
+        assert!(!daemon.is_foreground());
+    }
+
+    #[test]
+    fn a_process_behind_its_terminals_foreground_group_is_not_foreground() {
+        let shell = process(900, 16777222, 1200);
+
+        assert!(shell.has_tty());
+        assert!(!shell.is_foreground());
+    }
+
+    #[test]
+    fn a_process_owning_its_terminals_foreground_group_is_foreground() {
+        let editor = process(1200, 16777222, 1200);
+
+        assert!(editor.has_tty());
+        assert!(editor.is_foreground());
     }
 
     #[test]

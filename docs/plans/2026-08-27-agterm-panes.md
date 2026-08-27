@@ -145,17 +145,25 @@ blanket module allow, and no way to forget it.
 **Files:**
 - Modify: `src/macos/processes.rs`
 
-- [ ] add `pub struct Process { pub pid: i32, pub pgid: i32, pub tdev: i32, pub tpgid: i32 }`
-- [ ] implement `pub fn list() -> Vec<Process>` over `proc_listpids(PROC_ALL_PIDS)` followed by
+- [x] add `pub struct Process { pub pid: i32, pub pgid: i32, pub tdev: i32, pub tpgid: i32 }`
+- [x] implement `pub fn list() -> Vec<Process>` over `proc_listpids(PROC_ALL_PIDS)` followed by
       `proc_pidinfo(PROC_PIDTBSDINFO)` per pid, reading `pbi_pgid`, `e_tdev` and `e_tpgid`; declare
       `PROC_ALL_PIDS` locally as `1` because `libc` does not export it
-- [ ] implement the pure `Process::has_tty(&self) -> bool` as `tdev != -1` and the pure
+- [x] implement the pure `Process::has_tty(&self) -> bool` as `tdev != -1` and the pure
       `Process::is_foreground(&self) -> bool` as `has_tty() && pgid == tpgid`
-- [ ] implement `pub fn cwd(pid: i32) -> Option<String>` over `proc_pidinfo(PROC_PIDVNODEPATHINFO)`,
+- [x] implement `pub fn cwd(pid: i32) -> Option<String>` over `proc_pidinfo(PROC_PIDVNODEPATHINFO)`,
       returning `None` on a short read or an empty path
-- [ ] write tests for `has_tty` and `is_foreground` over constructed values: no tty, tty with a
+- [x] write tests for `has_tty` and `is_foreground` over constructed values: no tty, tty with a
       background pgid, tty with a matching pgid
-- [ ] run `mise run check` - must pass before task 3
+- [x] run `mise run check` - must pass before task 3
+
+➕ `e_tdev` and `e_tpgid` are `u32` in `libc`'s `proc_bsdinfo`, so "no controlling terminal" arrives
+as `0xFFFFFFFF`; casting to `i32` is what makes the plan's `tdev != -1` the right test.
+
+➕ `has_tty` and `is_foreground` carry `#[cfg_attr(not(test), expect(dead_code))]` rather than a bare
+`#[expect]`: their tests already use them, so an unconditional expectation is unfulfilled in the test
+build and `-D warnings` rejects it. `Process` needs no attribute at all - the derived `Debug` reads
+every field.
 
 ### Task 3: Resolve agterm panes from the process table
 
