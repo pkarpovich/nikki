@@ -277,8 +277,11 @@ bundle id in `src/extract/mod.rs` and is invoked **only for the focused applicat
 - `document.rs` - the universal `AXDocument` probe, applied to every focused window, keeping the
   value only when it is non-empty and its scheme is `file`.
 - `dia.rs` - AppleScript against `company.thebrowser.dia`, producing `{url, tab, profile, pinned}`.
-- `agterm.rs` - `agtermctl tree --json` against `com.umputun.agterm`, producing
-  `{workspace, session, cwd, foreground}`.
+- `agterm.rs` - `agtermctl tree --json` against `com.umputun.agterm`, joined against the process
+  table, producing `{workspace, session, surface, command, cwd}` plus a conditional `foreground`.
+  The tree names the active workspace and session; the surface the session calls active and visible
+  names the pane that is on screen; and the process carrying that session's `AGTERM_SESSION_ID` and
+  a matching `AGTERM_PANE`, holding its tty's foreground process group, names what runs in it.
 
 Every extractor is fallible and returns empty rather than failing the tick, and every extractor that
 spawns a subprocess carries a hard 2s deadline after which the child is killed. "Fallible" covers a
@@ -404,6 +407,40 @@ Bodies for the kinds not shown above:
  "kind":"buffer_overflow","dedup_key":"5e2b71c8804fda93","degraded":false,
  "payload":{"details":{"dropped":20000,"dropped_from":"2026-06-14T08:00:00.000Z","dropped_to":"2026-06-21T19:30:00.000Z"}}}
 ```
+
+### `details` on a window record
+
+A free-form object whose keys depend on the focused application's extractor. The server stores it as
+opaque JSON and validates nothing inside it, so a new key needs no service change - but the shapes
+this daemon actually sends are documented here, and any change to them is mirrored into the service
+repository in the same pass.
+
+`company.thebrowser.dia` carries `url`, `tab`, `profile` and `pinned`. `url` is post-redaction.
+
+`com.umputun.agterm` carries `workspace`, `session`, `surface`, `command`, `cwd` and, conditionally,
+`foreground`:
+
+```json
+{"workspace":"nikki","session":"nikki daemon","surface":"scratch",
+ "command":"rx docs/plans/2026-08-27-agterm-panes.md","cwd":"/Users/pavel.karpovich/Projects/nikki/docs"}
+```
+
+- `session` is the session name with its animated status glyph stripped, so an auto-named session is
+  one identity over its lifetime rather than a new one per spinner frame.
+- `surface` is the kind of the pane on screen - `left`, `right` or `scratch`. It is absent when the
+  tree reports no surface that is both active and visible, including an older agterm that omits
+  `surfaces` entirely.
+- `command` is the whole argv of the on-screen pane's foreground process, joined by spaces, **capped
+  at 512 characters** with a trailing `…` when cut. The arguments are the content and are not
+  trimmed away: `rx <plan file>` says what was run, `rx` says nothing. The cap exists only so a
+  pathological command line cannot dominate a record. `command` is absent when no process claims the
+  active surface, rather than falling back to a guess.
+- `cwd` is that same process's own working directory, falling back to the session-level `cwd` from
+  the tree when the process reports none.
+- `foreground` is the file name of the session's foreground program **and is emitted only when
+  `surface` is `left`**. It is a session-level field from the tree describing the left pane alone, so
+  reporting it while scratch is on screen names a program nobody is looking at - which is exactly the
+  defect this shape fixes.
 
 ### Identity
 

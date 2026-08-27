@@ -258,13 +258,18 @@ stop asserting that blind.
 **Files:**
 - Modify: `README.md`
 
-- [ ] update the extractor registry entry for `agterm.rs` to name the fields it now produces
-- [ ] document in the wire contract that `details` for `com.umputun.agterm` carries `workspace`,
+- [x] update the extractor registry entry for `agterm.rs` to name the fields it now produces
+- [x] document in the wire contract that `details` for `com.umputun.agterm` carries `workspace`,
       `session`, `surface`, `command`, `cwd` and a conditional `foreground`
-- [ ] state why `foreground` is conditional: it is a session-level field describing the left pane,
+- [x] state why `foreground` is conditional: it is a session-level field describing the left pane,
       and reporting it while scratch is on screen is what this change fixes
-- [ ] state that `command` is capped and why it is otherwise whole
-- [ ] run `mise run check` - must pass before task 7
+- [x] state that `command` is capped and why it is otherwise whole
+- [x] run `mise run check` - must pass before task 7
+
+➕ The wire contract had no section describing `details` at all - the Dia shape lived only in the
+extractor registry and in an example body. The new `### details on a window record` section documents
+both extractors' shapes in the place the service repository mirrors, so the agterm keys are not the
+only documented ones while Dia's stay implicit.
 
 ### Task 7: Verify acceptance criteria
 
