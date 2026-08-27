@@ -53,7 +53,7 @@
               "fontSize": 18,
               "foreground": null,
               "restoreCommand": "",
-              "surfaces": []
+              "surfaces": [{ "kind": "left", "active": true, "visible": true }]
             },
             {
               "id": "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",

@@ -125,26 +125,16 @@ fn compose(workspace: &str, session: &Session, panes: &[Pane]) -> Details {
         on_screen = pane_on(panes, id, surface);
     }
 
-    let mut command = None;
-    let mut pane_cwd = None;
-    if let Some(Pane {
-        session: _,
-        pane: _,
-        pane_id: _,
-        argv,
-        cwd,
-    }) = on_screen
-    {
-        command = command_line(argv);
-        pane_cwd = cwd.clone();
-    }
-    if let Some(command) = command {
+    let on_left = surface.as_deref() == Some(LEFT_SURFACE);
+    if let Some(command) = on_screen.and_then(|pane| command_line(&pane.argv)) {
         details.insert("command".to_string(), Value::String(command));
     }
 
+    let pane_cwd = on_screen.and_then(|pane| pane.cwd.clone());
     let cwd = match pane_cwd {
-        Some(cwd) => Some(cwd),
-        None => cwd.clone(),
+        Some(pane_cwd) => Some(pane_cwd),
+        None if on_left => cwd.clone(),
+        None => None,
     };
     if let Some(cwd) = cwd
         && !cwd.is_empty()
@@ -152,7 +142,7 @@ fn compose(workspace: &str, session: &Session, panes: &[Pane]) -> Details {
         details.insert("cwd".to_string(), Value::String(cwd));
     }
 
-    if surface.as_deref() != Some(LEFT_SURFACE) {
+    if !on_left {
         return details;
     }
     let Some(foreground) = foreground else {
@@ -189,13 +179,7 @@ fn command_line(argv: &[String]) -> Option<String> {
         return Some(command);
     }
 
-    let mut cut = String::new();
-    for (taken, character) in command.chars().enumerate() {
-        if taken == COMMAND_LIMIT {
-            break;
-        }
-        cut.push(character);
-    }
+    let mut cut: String = command.chars().take(COMMAND_LIMIT).collect();
     cut.push('…');
     Some(cut)
 }
@@ -318,51 +302,6 @@ mod tests {
             argv: arguments,
             cwd: cwd.map(str::to_string),
         }
-    }
-
-    fn workspace_of(stdout: &str) -> String {
-        let response: Response = serde_json::from_str(stdout).expect("the fixture parses");
-        let Response {
-            result: TreeResult {
-                tree: Tree { workspaces },
-            },
-        } = response;
-        for Workspace {
-            name,
-            active,
-            sessions: _,
-        } in workspaces
-        {
-            if active {
-                return name;
-            }
-        }
-        panic!("the fixture has an active workspace");
-    }
-
-    fn active_session_of(stdout: &str) -> Session {
-        let response: Response = serde_json::from_str(stdout).expect("the fixture parses");
-        let Response {
-            result: TreeResult {
-                tree: Tree { workspaces },
-            },
-        } = response;
-        for Workspace {
-            name: _,
-            active,
-            sessions,
-        } in workspaces
-        {
-            if !active {
-                continue;
-            }
-            for session in sessions {
-                if session.active {
-                    return session;
-                }
-            }
-        }
-        panic!("the fixture has an active session");
     }
 
     fn sessions_of(workspace: &mut Value) -> &mut Vec<Value> {
@@ -499,19 +438,11 @@ mod tests {
     }
 
     #[test]
-    fn the_captured_tree_reports_its_left_pane_as_the_active_surface() {
-        let session = active_session_of(CAPTURED);
-        assert_eq!(active_surface(&session.surfaces), Some("left".to_string()));
-    }
-
-    #[test]
     fn the_scratch_tree_reports_its_scratch_pane_as_the_active_surface() {
-        let session = active_session_of(SCRATCH);
-        assert_eq!(
-            active_surface(&session.surfaces),
-            Some("scratch".to_string())
-        );
-        assert_eq!(session_identity(&session.name), "nikki daemon");
+        let details = parse_tree(SCRATCH, &[]);
+        assert_eq!(details["workspace"], "nikki");
+        assert_eq!(details["session"], "nikki daemon");
+        assert_eq!(details["surface"], "scratch");
     }
 
     #[test]
@@ -523,11 +454,10 @@ mod tests {
                 session.remove("surfaces");
             }
         }
-        let stdout = tree.to_string();
-        let details = parse_tree(&stdout, &[]);
+        let details = parse_tree(&tree.to_string(), &[]);
         assert_eq!(details["session"], "nikki daemon");
         assert!(!details.contains_key("surface"));
-        assert!(active_session_of(&stdout).surfaces.is_empty());
+        assert!(!details.contains_key("foreground"));
     }
 
     #[test]
@@ -543,7 +473,6 @@ mod tests {
 
     #[test]
     fn a_visible_scratch_pane_is_reported_instead_of_the_hidden_left_one() {
-        let session = active_session_of(SCRATCH);
         let panes = [
             pane(
                 "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
@@ -559,7 +488,7 @@ mod tests {
             ),
         ];
 
-        let details = compose(&workspace_of(SCRATCH), &session, &panes);
+        let details = parse_tree(SCRATCH, &panes);
 
         assert_eq!(details["workspace"], "nikki");
         assert_eq!(details["session"], "nikki daemon");
@@ -574,7 +503,6 @@ mod tests {
 
     #[test]
     fn a_visible_left_pane_carries_the_session_foreground_alongside_its_command() {
-        let session = active_session_of(CAPTURED);
         let panes = [pane(
             "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
             "left",
@@ -582,7 +510,7 @@ mod tests {
             Some("/Users/pavel.karpovich/Projects/nikki/src"),
         )];
 
-        let details = compose(&workspace_of(CAPTURED), &session, &panes);
+        let details = parse_tree(CAPTURED, &panes);
 
         assert_eq!(details["surface"], "left");
         assert_eq!(details["foreground"], "claude");
@@ -591,8 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn a_surface_no_process_claims_reports_no_command_and_the_session_directory() {
-        let session = active_session_of(SCRATCH);
+    fn a_hidden_left_pane_never_lends_its_directory_to_the_surface_on_screen() {
         let panes = [pane(
             "A-DIFFERENT-SESSION",
             "scratch",
@@ -600,17 +527,16 @@ mod tests {
             Some("/tmp"),
         )];
 
-        let details = compose(&workspace_of(SCRATCH), &session, &panes);
+        let details = parse_tree(SCRATCH, &panes);
 
         assert_eq!(details["surface"], "scratch");
         assert!(!details.contains_key("command"));
-        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki");
+        assert!(!details.contains_key("cwd"));
         assert!(!details.contains_key("foreground"));
     }
 
     #[test]
-    fn a_pane_reporting_no_directory_falls_back_to_the_session_directory() {
-        let session = active_session_of(SCRATCH);
+    fn a_scratch_pane_reporting_no_directory_reports_none_rather_than_the_sessions() {
         let panes = [pane(
             "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
             "scratch",
@@ -618,9 +544,24 @@ mod tests {
             None,
         )];
 
-        let details = compose(&workspace_of(SCRATCH), &session, &panes);
+        let details = parse_tree(SCRATCH, &panes);
 
         assert_eq!(details["command"], "rx");
+        assert!(!details.contains_key("cwd"));
+    }
+
+    #[test]
+    fn a_left_pane_reporting_no_directory_falls_back_to_the_session_directory() {
+        let panes = [pane(
+            "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
+            "left",
+            &["claude"],
+            None,
+        )];
+
+        let details = parse_tree(CAPTURED, &panes);
+
+        assert_eq!(details["command"], "claude");
         assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki");
     }
 

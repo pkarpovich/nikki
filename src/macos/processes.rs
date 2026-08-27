@@ -34,18 +34,24 @@ impl Process {
     pub fn is_foreground(&self) -> bool {
         self.has_tty() && self.pgid == self.tpgid
     }
+
+    pub fn leads_its_group(&self) -> bool {
+        self.pid == self.pgid
+    }
 }
 
 pub fn agterm_panes() -> Vec<Pane> {
     let mut panes = Vec::new();
     for process in list() {
+        if !process.is_foreground() || !process.leads_its_group() {
+            continue;
+        }
         let Some(args) = read_args(process.pid) else {
             continue;
         };
         let Some(mut pane) = pane_of(&process, &args) else {
             continue;
         };
-        pane.session = pane.session.to_uppercase();
         pane.cwd = cwd(process.pid);
         panes.push(pane);
     }
@@ -61,23 +67,18 @@ fn pane_of(process: &Process, args: &ProcessArgs) -> Option<Pane> {
     if session.is_empty() {
         return None;
     }
-    if !process.is_foreground() {
+    if !process.is_foreground() || !process.leads_its_group() {
         return None;
     }
 
-    let pane = match args.env.get("AGTERM_PANE") {
-        Some(pane) => pane.clone(),
-        None => "left".to_string(),
-    };
-    let pane_id = match args.env.get("AGTERM_PANE_ID") {
-        Some(pane_id) => pane_id.clone(),
-        None => String::new(),
-    };
-
     Some(Pane {
-        session: session.clone(),
-        pane,
-        pane_id,
+        session: session.to_uppercase(),
+        pane: args
+            .env
+            .get("AGTERM_PANE")
+            .cloned()
+            .unwrap_or_else(|| "left".to_string()),
+        pane_id: args.env.get("AGTERM_PANE_ID").cloned().unwrap_or_default(),
         argv: args.argv.clone(),
         cwd: None,
     })
@@ -277,11 +278,15 @@ mod tests {
 
     fn process(pgid: i32, tdev: i32, tpgid: i32) -> Process {
         Process {
-            pid: 4242,
+            pid: pgid,
             pgid,
             tdev,
             tpgid,
         }
+    }
+
+    fn child_of(leader: Process, pid: i32) -> Process {
+        Process { pid, ..leader }
     }
 
     #[test]
@@ -306,6 +311,15 @@ mod tests {
 
         assert!(editor.has_tty());
         assert!(editor.is_foreground());
+        assert!(editor.leads_its_group());
+    }
+
+    #[test]
+    fn a_helper_spawned_inside_the_foreground_group_does_not_lead_it() {
+        let helper = child_of(process(1200, 16777222, 1200), 1387);
+
+        assert!(helper.is_foreground());
+        assert!(!helper.leads_its_group());
     }
 
     fn args(argv: &[&str], env: &[(&str, &str)]) -> ProcessArgs {
@@ -334,11 +348,27 @@ mod tests {
 
         let pane = pane_of(&editor, &args).expect("a foreground agterm process is a pane");
 
-        assert_eq!(pane.session, "a1b2");
+        assert_eq!(pane.session, "A1B2");
         assert_eq!(pane.pane, "scratch");
         assert_eq!(pane.pane_id, "p7");
         assert_eq!(pane.argv, vec!["rx".to_string(), "plan.md".to_string()]);
         assert_eq!(pane.cwd, None);
+    }
+
+    #[test]
+    fn a_session_id_is_uppercased_so_it_joins_the_tree_case_insensitively() {
+        let editor = process(1200, 16777222, 1200);
+        let args = args(
+            &["rx"],
+            &[
+                ("AGTERM_ENABLED", "1"),
+                ("AGTERM_SESSION_ID", "5e7b21c4-6f30-4d9a"),
+            ],
+        );
+
+        let pane = pane_of(&editor, &args).expect("a foreground agterm process is a pane");
+
+        assert_eq!(pane.session, "5E7B21C4-6F30-4D9A");
     }
 
     #[test]
@@ -347,6 +377,38 @@ mod tests {
         let args = args(&["vim"], &[("SHELL", "/bin/fish")]);
 
         assert_eq!(pane_of(&editor, &args), None);
+    }
+
+    #[test]
+    fn a_terminal_that_is_not_agterm_carries_no_pane_even_with_a_session_id() {
+        let editor = process(1200, 16777222, 1200);
+        let args = args(
+            &["rx"],
+            &[
+                ("AGTERM_SESSION_ID", "a1b2"),
+                ("AGTERM_PANE", "scratch"),
+                ("AGTERM_PANE_ID", "p7"),
+            ],
+        );
+
+        assert_eq!(pane_of(&editor, &args), None);
+    }
+
+    #[test]
+    fn a_helper_inside_the_foreground_group_is_not_the_pane_its_leader_is() {
+        let leader = process(1200, 16777222, 1200);
+        let helper = child_of(leader, 1387);
+        let args = args(
+            &["chrome-devtools-mcp"],
+            &[
+                ("AGTERM_ENABLED", "1"),
+                ("AGTERM_SESSION_ID", "a1b2"),
+                ("AGTERM_PANE", "left"),
+            ],
+        );
+
+        assert_eq!(pane_of(&helper, &args), None);
+        assert!(pane_of(&leader, &args).is_some());
     }
 
     #[test]

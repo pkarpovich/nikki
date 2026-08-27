@@ -183,6 +183,18 @@ every field.
 - [x] write a test that a missing `AGTERM_PANE` is read as `left`
 - [x] run `mise run check` - must pass before task 4
 
+➕ Review finding: `pgid == tpgid` is true for **every** member of the foreground process group, not
+only its leader, so `pane_on` returned whichever member `proc_listpids` happened to list first. On the
+live machine that made `command` read `chrome-devtools-mcp` for a pane running `claude`, and `vite.js`
+for one running `mise dev` - a value that flips between ticks as helpers come and go. `pane_of` now
+also requires `pid == pgid`: the leader is the job the shell put in front, and a pane whose leader has
+exited reports no command rather than one of its survivors. `is_foreground` and `leads_its_group` are
+hoisted into `agterm_panes`'s loop so `read_args` no longer materialises the full environment of every
+process on the machine before the filter that discards 97% of them.
+
+➕ Review finding: the session-id uppercasing moved from `agterm_panes` into the pure `pane_of`, where
+a test can reach it. It was the whole case-insensitive join and deleting it broke no test.
+
 ➕ `agterm_panes` becomes the only live root in the module, so the `#[expect(dead_code)]` on `list`,
 `read_args`, `cwd`, `has_tty` and `is_foreground` had to go the moment it called them - a fulfilled
 expectation is itself an error under `-D warnings`. `agterm_panes` now carries the attribute alone,
@@ -247,6 +259,24 @@ carry the pair across one call is an abstraction the plan does not need.
 ➕ The join needs the session's `id`, which the extractor did not deserialise before; `Session` gains
 `#[serde(default)] id: String`. `pane_on` uppercases it at the point of comparison, matching what
 `agterm_panes` already does to `AGTERM_SESSION_ID`.
+
+➕ Review finding: the `cwd` fallback is now gated on `surface == left`. The checklist item above asks
+for it unconditionally, but the tree's session-level `cwd` describes the **left** pane - the same
+reason `foreground` is gated - so falling back while scratch is on screen paired `surface: scratch`
+with a directory nobody was looking at. That is the exact falsehood this plan exists to remove, and
+`CLAUDE.md`'s new rule forbids it. The fallback still fires where it is truthful; with any other
+surface on screen and no directory from the process, `cwd` is omitted.
+
+➕ Review finding: `details.command` was exempt from every redaction rule. A user configuring
+`drop = ["title"]` for `com.umputun.agterm` still shipped the whole argv, credentials in flags
+included, and argv-borne URLs bypassed the host-only floor. `redact.rs` now nulls `details.command`
+alongside `details.tab` under the same rule, and the README's Redaction section says why.
+
+➕ Review finding: `a_session_running_nothing_carries_no_foreground` had gone vacuous - the fixture
+session it selects carried `"surfaces": []`, so `compose` returned at the surface gate before reading
+`foreground` at all. The fixture's `notes` session gained an active, visible `left`. The four
+`compose` tests also went through `parse_tree`, deleting two test-local helpers that re-walked the
+tree exactly as `parse_tree` does; a second copy of that walk can drift while the tests keep passing.
 
 ➕ A session whose `surfaces` array is absent or carries nothing active-and-visible now reports
 neither `surface` nor `foreground`. That is the plan's rule read literally: without a known surface

@@ -30,13 +30,27 @@ is why `agterm.rs` emits `foreground` only while the left pane is the active sur
 Joining a process against the pane it belongs to goes through the process table, and two filters make
 that join truthful. A pane's environment is inherited by everything it ever spawned, so a process
 must hold a controlling terminal to claim the pane - otherwise a daemon started months ago becomes
-what the user is doing. It must also own that terminal's foreground process group, or every pane
-reports the parent shell instead of the program running inside it.
+what the user is doing. It must also lead that terminal's foreground process group, or the pane
+reports something other than the job the shell put in front: without the group check it is the parent
+shell sitting behind the program, and with only the group check it is whichever helper the leader
+spawned most recently - an MCP server under `claude`, a dev server under `mise dev`. The leader is
+the job, so `pid == pgid` is the filter, and a pane whose leader has already exited reports no
+command rather than one of its survivors.
 
 ## Tests live inline
 
 Tests go in a `#[cfg(test)] mod tests` block in the file they cover. A sibling `foo_test.rs` is not
 compiled unless something declares it, so it would sit unbuilt while the gate reported success.
+
+A test reaches production code through the entry point the daemon calls, not through a private helper
+the test rebuilt beside it: a second copy of a tree walk drifts, and the day it drifts the test still
+passes while covering nothing. Compose tests go through `parse_tree`, not through a hand-rolled walk
+to `compose`.
+
+A test that reads the live machine rather than a fixture is `#[ignore]`d with a reason, and
+`scripts/acceptance.sh` runs it with `-- --ignored`. `cargo test` must stay reproducible on a machine
+where nothing in particular is open - the gate runs against committed fixtures, and the live
+assertion runs where a human is watching.
 
 ## Declare every module
 
@@ -62,6 +76,11 @@ A change to `Info.plist.template`, `build.rs` or the signing scripts additionall
 `__TEXT,__info_plist` with `CFBundleIdentifier = dev.pkarpovich.nikki` and a non-empty
 `NSAppleEventsUsageDescription`. That identifier is what both TCC grants are keyed to; changing it
 loses them silently, so it must never change.
+
+A change to `src/extract/agterm.rs` or `src/macos/processes.rs` also requires
+`./scripts/acceptance.sh`. Its live-tree case is the only assertion that the join against the process
+table still names a real surface, and it skips itself when `agtermctl` is on neither `PATH` nor
+`/Applications/agterm.app/Contents/MacOS/agtermctl`.
 
 ## Style
 
