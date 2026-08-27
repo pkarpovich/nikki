@@ -55,25 +55,31 @@ binary and a released one carry the same identity and share the same TCC grants.
 
 ## Secrets
 
-The workflow reads four repository secrets. They are the same four `nhop` uses, from the
-same 1Password items and the same Developer ID certificate - nothing new has to be
-generated for this repository, only copied into it:
+The workflow reads four repository secrets. All four come from the 1Password item
+**`nhop release signing`** (Personal vault) - the same Developer ID certificate and the
+same tap token `nhop` releases with. Nothing new has to be generated for this
+repository; the item feeds both, and its `bundle id` field is the only part that does
+not apply here (it names nhop's identifier, not `dev.pkarpovich.nikki`).
 
-| Secret | What it is |
+| Secret | Where it comes from |
 |---|---|
-| `MACOS_CERT_P12_BASE64` | the exported Developer ID Application certificate, base64 |
-| `MACOS_CERT_PASSWORD` | the password that export was made with |
-| `MACOS_TEAM_ID` | `GGG699AY79`, the parenthesised suffix of the identity name |
-| `HOMEBREW_TAP_TOKEN` | a fine-grained token with write access to `pkarpovich/homebrew-apps` and nothing else |
+| `MACOS_CERT_P12_BASE64` | the `p12` attachment, base64 |
+| `MACOS_CERT_PASSWORD` | the `password` field |
+| `MACOS_TEAM_ID` | the `team id` field - `GGG699AY79` |
+| `HOMEBREW_TAP_TOKEN` | the `tap token` field, write access to `pkarpovich/homebrew-apps` and nothing else |
+
+Setting them again, without any value passing through a shell argument or the terminal:
 
 ```fish
-gh secret set MACOS_CERT_P12_BASE64 --repo pkarpovich/nikki < (base64 -i cert.p12 | psub)
-gh secret set MACOS_CERT_PASSWORD --repo pkarpovich/nikki
-gh secret set HOMEBREW_TAP_TOKEN --repo pkarpovich/nikki
+set item op://Personal/yfff2anls7yhcpv7ddhanx3qgi
+op read "$item/p12" | base64 | tr -d '\n' | gh secret set MACOS_CERT_P12_BASE64 --repo pkarpovich/nikki
+op read "$item/password" | gh secret set MACOS_CERT_PASSWORD --repo pkarpovich/nikki
+op read "$item/team id" | gh secret set MACOS_TEAM_ID --repo pkarpovich/nikki
+op read "$item/tap token" | gh secret set HOMEBREW_TAP_TOKEN --repo pkarpovich/nikki
 ```
 
-A secret cannot be read back out of GitHub, so a lost one is re-exported from the
-certificate in the login keychain rather than recovered from `nhop`.
+This needs the 1Password desktop app unlocked. A secret cannot be read back out of
+GitHub, so a lost one is re-set from the item rather than recovered from the repository.
 
 `BUNDLE_ID` must never change. macOS ties both the Accessibility grant and the
 Automation grant for Dia to the signing identity plus that identifier, so a
