@@ -127,10 +127,19 @@ optionality is what an old server and an old daemon each need, not a statement t
 sometimes omits them.
 
 ### Task 5: Verify acceptance criteria
-- [ ] `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` all green
-- [ ] `./scripts/acceptance.sh` passes
-- [ ] confirm the payload additions are optional end to end: a tick built with both flags false still
+- [x] `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` all green
+- [x] `./scripts/acceptance.sh` passes
+- [x] confirm the payload additions are optional end to end: a tick built with both flags false still
       validates against the contract's required-field list
+
+The optionality claim is now asserted rather than assumed. `a_capture_run_matches_the_wire_contract`
+reads every shipped tick, requires both fields to be booleans - which is what proves the daemon emits
+them all the way onto the wire - and then re-runs `check_payload` on the same envelope with both keys
+removed, which is the tick an old daemon sends. The keys stay out of the required-field list, so the
+stripped envelope passes; adding `screen_locked` to that list makes the stripped case fail, so the
+check is live rather than vacuous. The fields are asserted as booleans rather than as `false` because
+the run reads the real machine, and a run started while the screen is locked would otherwise fail on
+a correct reading - the both-false payload is covered by the unit tests in `src/providers/windows.rs`.
 
 ## Technical Details
 
