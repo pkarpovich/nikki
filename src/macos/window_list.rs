@@ -7,7 +7,7 @@ use objc2_core_graphics::{
     kCGWindowOwnerPID,
 };
 
-const MAX_DISPLAYS: u32 = 32;
+pub(crate) const MAX_DISPLAYS: u32 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {

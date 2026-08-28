@@ -578,7 +578,6 @@ mod tests {
         focused: FocusedWindow,
         titles: HashMap<i32, WindowTitle>,
         activity: Arc<Mutex<Activity>>,
-        sampled: Arc<Mutex<Vec<Activity>>>,
         details: Details,
         detail_calls: Arc<Mutex<Vec<String>>>,
         title_calls: Arc<AtomicUsize>,
@@ -621,12 +620,7 @@ mod tests {
         }
 
         fn activity(&self) -> Activity {
-            let activity = *self.activity.lock().expect("the activity is poisoned");
-            self.sampled
-                .lock()
-                .expect("the activity log is poisoned")
-                .push(activity);
-            activity
+            *self.activity.lock().expect("the activity is poisoned")
         }
 
         async fn details(&self, bundle_id: &str) -> Details {
@@ -716,7 +710,6 @@ mod tests {
                 screen_locked: false,
                 display_asleep: false,
             })),
-            sampled: Arc::new(Mutex::new(Vec::new())),
             details: Details::new(),
             detail_calls: Arc::new(Mutex::new(Vec::new())),
             title_calls: Arc::new(AtomicUsize::new(0)),
@@ -854,7 +847,6 @@ mod tests {
     async fn a_tick_reads_the_screen_state_its_source_reports() {
         let sources = sources();
         let activity = Arc::clone(&sources.activity);
-        let sampled = Arc::clone(&sources.sampled);
         *activity.lock().expect("the activity is poisoned") = Activity {
             idle_sec: 600,
             counters: InputCounters {
@@ -871,18 +863,27 @@ mod tests {
         assert_eq!(kind, Kind::Tick);
         assert_eq!(payload["screen_locked"], true);
         assert_eq!(payload["display_asleep"], true);
+    }
 
-        let sampled = sampled.lock().expect("the activity log is poisoned");
-        let Some(Activity {
-            screen_locked,
-            display_asleep,
-            ..
-        }) = sampled.last()
-        else {
-            panic!("the provider never read the activity");
+    #[tokio::test(start_paused = true)]
+    async fn a_locked_session_with_a_lit_panel_reports_the_lock_alone() {
+        let sources = sources();
+        let activity = Arc::clone(&sources.activity);
+        *activity.lock().expect("the activity is poisoned") = Activity {
+            idle_sec: 30,
+            counters: InputCounters {
+                keys: 900_000,
+                mouse: 40_000,
+            },
+            mic_active: false,
+            screen_locked: true,
+            display_asleep: false,
         };
-        assert!(screen_locked);
-        assert!(display_asleep);
+        let (_events, mut emissions) = start(sources, 30);
+
+        let RecordDraft { payload, .. } = one_record(&mut emissions).await;
+        assert_eq!(payload["screen_locked"], true);
+        assert_eq!(payload["display_asleep"], false);
     }
 
     #[tokio::test(start_paused = true)]
