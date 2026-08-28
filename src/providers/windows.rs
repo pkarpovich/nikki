@@ -500,8 +500,8 @@ fn tick_record(
         idle_sec,
         counters: _,
         mic_active,
-        screen_locked: _,
-        display_asleep: _,
+        screen_locked,
+        display_asleep,
     } = activity;
     let InputDelta { keys, mouse } = delta;
 
@@ -511,6 +511,8 @@ fn tick_record(
     payload.insert("keys_delta".to_string(), json!(keys));
     payload.insert("mouse_delta".to_string(), json!(mouse));
     payload.insert("mic_active".to_string(), json!(mic_active));
+    payload.insert("screen_locked".to_string(), json!(screen_locked));
+    payload.insert("display_asleep".to_string(), json!(display_asleep));
 
     RecordDraft {
         provider: runtime::Provider::Windows,
@@ -768,6 +770,8 @@ mod tests {
         assert_eq!(payload["tick_interval_sec"], 30);
         assert_eq!(payload["idle_sec"], 3);
         assert_eq!(payload["mic_active"], false);
+        assert_eq!(payload["screen_locked"], false);
+        assert_eq!(payload["display_asleep"], false);
         assert_eq!(
             payload["visible"].as_array().expect("a visible set").len(),
             3
@@ -863,8 +867,10 @@ mod tests {
         };
         let (_events, mut emissions) = start(sources, 30);
 
-        let RecordDraft { kind, .. } = one_record(&mut emissions).await;
+        let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
         assert_eq!(kind, Kind::Tick);
+        assert_eq!(payload["screen_locked"], true);
+        assert_eq!(payload["display_asleep"], true);
 
         let sampled = sampled.lock().expect("the activity log is poisoned");
         let Some(Activity {
@@ -907,6 +913,8 @@ mod tests {
         assert_eq!(payload["app"], "Dia");
         assert_eq!(payload["bundle_id"], "company.thebrowser.dia");
         assert_eq!(payload["display"], 1);
+        assert!(payload.get("screen_locked").is_none());
+        assert!(payload.get("display_asleep").is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -927,6 +935,8 @@ mod tests {
             assert_eq!(payload["app"], "Zed");
             assert_eq!(payload["bundle_id"], "dev.zed.Zed");
             assert_eq!(payload["display"], 0);
+            assert!(payload.get("screen_locked").is_none());
+            assert!(payload.get("display_asleep").is_none());
         }
     }
 

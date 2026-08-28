@@ -92,13 +92,21 @@ does not carry them yet - that is Task 3 - so the provider test asserts through 
 fake hands out on each tick, which is the whole of what the provider reads today.
 
 ### Task 3: Put both fields on the tick payload
-- [ ] emit `screen_locked` and `display_asleep` in the tick payload beside `mic_active`
-- [ ] write a payload test for the locked-and-dark case (`screen_locked: true`,
+- [x] emit `screen_locked` and `display_asleep` in the tick payload beside `mic_active`
+- [x] write a payload test for the locked-and-dark case (`screen_locked: true`,
       `display_asleep: true`)
-- [ ] write a payload test for the ordinary working case (both false)
-- [ ] confirm the fields ride only on `tick`, not on `focus`/`state_change`, whose payloads are
+- [x] write a payload test for the ordinary working case (both false)
+- [x] confirm the fields ride only on `tick`, not on `focus`/`state_change`, whose payloads are
       unchanged - add an assertion if none covers it
-- [ ] run `cargo test` - must pass before task 4
+- [x] run `cargo test` - must pass before task 4
+
+`tick_record` destructures the two flags it had been discarding and inserts them beside `mic_active`;
+`base_payload`, which is what `focus` and `state_change` are built from, is untouched, so the fields
+ride on `tick` alone. The locked-and-dark assertion joined the Task 2 test that already sets that
+`Activity`, which now reads the payload as well as the sampled activity, and the ordinary case is
+asserted where the working tick payload is already checked field by field. The focus and
+state_change tests assert both keys are absent rather than false, so a future `base_payload` that
+started carrying them would fail rather than pass quietly.
 
 ### Task 4: Mirror the wire contract in the README
 - [ ] add both fields to the `windows/tick` row of the `(provider, kind)` table as **optional**
