@@ -58,17 +58,23 @@ daemon started, which an edge-triggered notification never reports.
 ## Implementation Steps
 
 ### Task 1: Read the screen state from macOS
-- [ ] add `src/macos/screen.rs` with `screen_locked() -> bool` reading
+- [x] add `src/macos/screen.rs` with `screen_locked() -> bool` reading
       `CGSessionCopyCurrentDictionary()` and reporting whether `CGSSessionScreenIsLocked` is present
       and true (absent key = not locked, null dictionary = not locked)
-- [ ] add `displays_asleep() -> bool` reporting true only when there is at least one active display
+- [x] add `displays_asleep() -> bool` reporting true only when there is at least one active display
       and **every** one of them is asleep (`CGGetActiveDisplayList` + `CGDisplayIsAsleep` per display)
       - a single external monitor sleeping while the laptop panel is lit must not read as "screen off"
-- [ ] factor the reduction out as a pure `fn all_asleep(states: &[bool]) -> bool` so it is testable
+- [x] factor the reduction out as a pure `fn all_asleep(states: &[bool]) -> bool` so it is testable
       without a display attached
-- [ ] register the module in `src/macos/mod.rs`
-- [ ] write tests for `all_asleep`: empty slice is false, all-true is true, any-false is false
-- [ ] run `cargo test` - must pass before task 2
+- [x] register the module in `src/macos/mod.rs`
+- [x] write tests for `all_asleep`: empty slice is false, all-true is true, any-false is false
+- [x] run `cargo test` - must pass before task 2
+
+Both probes were already exposed by `objc2-core-graphics`, so no hand-rolled `extern "C"` was needed;
+the crate's `CGSession` and `libc` features had to be turned on in `Cargo.toml`. Until Task 2 wires
+the module into `MacSources`, `cargo clippy -- -D warnings` reports every item in `screen.rs` as
+never used - that is the compiler naming the unwired provider, and it clears in Task 2 rather than
+being silenced with an allow.
 
 ### Task 2: Carry the state through the provider
 - [ ] extend `Activity` in `src/providers/windows.rs` with `screen_locked: bool` and

@@ -13,7 +13,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-application-services = { version = "0.3", default-features = false, features = ["std", "libc", "HIServices", "AXUIElement", "AXError"] }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFBase", "CFCGTypes"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow", "CGDirectDisplay", "CGDisplayConfiguration", "CGEvent", "CGEventSource", "CGEventTypes", "CGError", "CGGeometry", "CGBase"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "libc", "CGWindow", "CGDirectDisplay", "CGDisplayConfiguration", "CGEvent", "CGEventSource", "CGEventTypes", "CGError", "CGGeometry", "CGBase", "CGSession"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSString", "NSArray", "NSDictionary", "NSNotification", "NSDistributedNotificationCenter", "NSOperation", "NSObjCRuntime", "NSObject"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "http2", "charset", "system-proxy"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
