@@ -109,15 +109,22 @@ state_change tests assert both keys are absent rather than false, so a future `b
 started carrying them would fail rather than pass quietly.
 
 ### Task 4: Mirror the wire contract in the README
-- [ ] add both fields to the `windows/tick` row of the `(provider, kind)` table as **optional**
-- [ ] add them to the captured tick body example
-- [ ] write the semantics paragraph: what each field means, that `screen_locked` is the session's own
+- [x] add both fields to the `windows/tick` row of the `(provider, kind)` table as **optional**
+- [x] add them to the captured tick body example
+- [x] write the semantics paragraph: what each field means, that `screen_locked` is the session's own
       lock state and `display_asleep` is the panel, that they are independent, and that
       `display_asleep` is true only when every active display is asleep
-- [ ] state plainly that these supersede the `lock`/`sleep` record kinds for the purpose of marking an
+- [x] state plainly that these supersede the `lock`/`sleep` record kinds for the purpose of marking an
       unattended span, that those kinds remain in the contract but are still never emitted, and why
       (the notification path needs a main-thread run loop)
-- [ ] note that the sibling change in turtle-hub carries the identical section
+- [x] note that the sibling change in turtle-hub carries the identical section
+
+Both paragraphs sit in the wire contract section itself, after the `state_change` note and before the
+bodies for the other kinds, rather than in Known limitations: that is where per-field prose for the
+tick payload already lives, and a second copy beside `mic_active` would drift from the table it
+explains. The fields are optional in the table while this daemon emits them on every tick - the
+optionality is what an old server and an old daemon each need, not a statement that the daemon
+sometimes omits them.
 
 ### Task 5: Verify acceptance criteria
 - [ ] `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` all green
