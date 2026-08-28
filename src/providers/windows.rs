@@ -15,6 +15,7 @@ use crate::macos::activity::{
 };
 use crate::macos::ax::{AxApplication, accessibility_is_trusted};
 use crate::macos::events::{MacEvent, SLEEP_FLUSH_BUDGET, SleepAcknowledgement};
+use crate::macos::screen::{displays_asleep, screen_locked};
 use crate::macos::window_list::{
     DisplayEntry, RunningApplication, WindowEntry, bundle_id_for_pid, display_list,
     frontmost_application, window_list,
@@ -48,6 +49,8 @@ pub struct Activity {
     pub idle_sec: i64,
     pub counters: InputCounters,
     pub mic_active: bool,
+    pub screen_locked: bool,
+    pub display_asleep: bool,
 }
 
 pub trait Sources: Send + Sync + 'static {
@@ -115,6 +118,8 @@ impl Sources for MacSources {
             idle_sec: idle_seconds(),
             counters: input_counters(),
             mic_active: microphone_active(),
+            screen_locked: screen_locked(),
+            display_asleep: displays_asleep(),
         }
     }
 
@@ -495,6 +500,8 @@ fn tick_record(
         idle_sec,
         counters: _,
         mic_active,
+        screen_locked: _,
+        display_asleep: _,
     } = activity;
     let InputDelta { keys, mouse } = delta;
 
@@ -569,6 +576,7 @@ mod tests {
         focused: FocusedWindow,
         titles: HashMap<i32, WindowTitle>,
         activity: Arc<Mutex<Activity>>,
+        sampled: Arc<Mutex<Vec<Activity>>>,
         details: Details,
         detail_calls: Arc<Mutex<Vec<String>>>,
         title_calls: Arc<AtomicUsize>,
@@ -611,7 +619,12 @@ mod tests {
         }
 
         fn activity(&self) -> Activity {
-            *self.activity.lock().expect("the activity is poisoned")
+            let activity = *self.activity.lock().expect("the activity is poisoned");
+            self.sampled
+                .lock()
+                .expect("the activity log is poisoned")
+                .push(activity);
+            activity
         }
 
         async fn details(&self, bundle_id: &str) -> Details {
@@ -698,7 +711,10 @@ mod tests {
                     mouse: 40_000,
                 },
                 mic_active: false,
+                screen_locked: false,
+                display_asleep: false,
             })),
+            sampled: Arc::new(Mutex::new(Vec::new())),
             details: Details::new(),
             detail_calls: Arc::new(Mutex::new(Vec::new())),
             title_calls: Arc::new(AtomicUsize::new(0)),
@@ -775,6 +791,8 @@ mod tests {
                 mouse: 40_022,
             },
             mic_active: true,
+            screen_locked: false,
+            display_asleep: false,
         };
 
         let RecordDraft { payload, .. } = one_record(&mut emissions).await;
@@ -803,6 +821,8 @@ mod tests {
                 mouse: 40_010,
             },
             mic_active: false,
+            screen_locked: false,
+            display_asleep: false,
         };
         tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -817,11 +837,46 @@ mod tests {
                 mouse: 40_015,
             },
             mic_active: false,
+            screen_locked: false,
+            display_asleep: false,
         };
 
         let RecordDraft { payload, .. } = one_record(&mut emissions).await;
         assert_eq!(payload["keys_delta"], 150);
         assert_eq!(payload["mouse_delta"], 15);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tick_reads_the_screen_state_its_source_reports() {
+        let sources = sources();
+        let activity = Arc::clone(&sources.activity);
+        let sampled = Arc::clone(&sources.sampled);
+        *activity.lock().expect("the activity is poisoned") = Activity {
+            idle_sec: 600,
+            counters: InputCounters {
+                keys: 900_000,
+                mouse: 40_000,
+            },
+            mic_active: false,
+            screen_locked: true,
+            display_asleep: true,
+        };
+        let (_events, mut emissions) = start(sources, 30);
+
+        let RecordDraft { kind, .. } = one_record(&mut emissions).await;
+        assert_eq!(kind, Kind::Tick);
+
+        let sampled = sampled.lock().expect("the activity log is poisoned");
+        let Some(Activity {
+            screen_locked,
+            display_asleep,
+            ..
+        }) = sampled.last()
+        else {
+            panic!("the provider never read the activity");
+        };
+        assert!(screen_locked);
+        assert!(display_asleep);
     }
 
     #[tokio::test(start_paused = true)]

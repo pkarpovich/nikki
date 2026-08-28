@@ -77,12 +77,19 @@ never used - that is the compiler naming the unwired provider, and it clears in 
 being silenced with an allow.
 
 ### Task 2: Carry the state through the provider
-- [ ] extend `Activity` in `src/providers/windows.rs` with `screen_locked: bool` and
+- [x] extend `Activity` in `src/providers/windows.rs` with `screen_locked: bool` and
       `display_asleep: bool`
-- [ ] extend the `Sources` trait with the two readings and implement them in `MacSources` from Task 1
-- [ ] update `FakeSources` in the test module so existing tests compile with explicit values
-- [ ] write a test that the provider carries both flags from the source into the sample unchanged
-- [ ] run `cargo test` - must pass before task 3
+- [x] extend the `Sources` trait with the two readings and implement them in `MacSources` from Task 1
+- [x] update `FakeSources` in the test module so existing tests compile with explicit values
+- [x] write a test that the provider carries both flags from the source into the sample unchanged
+- [x] run `cargo test` - must pass before task 3
+
+The two readings ride on the `Activity` the `Sources` trait already returns rather than on two new
+trait methods: the tick calls `activity()` once, so a separate method per reading would be a second
+call per tick for nothing. `MacSources::activity()` fills them from `screen::screen_locked()` and
+`screen::displays_asleep()`, which clears the unused-item warnings Task 1 left behind. The payload
+does not carry them yet - that is Task 3 - so the provider test asserts through the `Activity` the
+fake hands out on each tick, which is the whole of what the provider reads today.
 
 ### Task 3: Put both fields on the tick payload
 - [ ] emit `screen_locked` and `display_asleep` in the tick payload beside `mic_active`
