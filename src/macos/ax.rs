@@ -15,7 +15,6 @@ pub fn accessibility_is_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
-#[allow(dead_code, reason = "becomes the focus source in task 2")]
 pub fn focused_application() -> Option<i32> {
     let system_wide = unsafe { AXUIElement::new_system_wide() };
     apply_messaging_timeout(&system_wide);

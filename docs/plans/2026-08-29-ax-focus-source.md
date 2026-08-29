@@ -93,17 +93,17 @@ knows nothing about the lock screen. The rule is worth copying; the dependency i
 - [x] run `cargo test` - must pass before task 2
 
 ### Task 2: Make Accessibility the focus source, with a filtered fallback
-- [ ] rewrite `frontmost_application()` as: AX first; on no answer, the window list; and **drop** the
+- [x] rewrite `frontmost_application()` as: AX first; on no answer, the window list; and **drop** the
       `NSWorkspace.frontmostApplication` fallback, which has been frozen since it was written
-- [ ] filter the window-list path to owners that are real applications - an owner whose bundle id is
+- [x] filter the window-list path to owners that are real applications - an owner whose bundle id is
       absent or empty is an overlay, not something a person can be "in"
-- [ ] keep the pid-only degraded result when `NSRunningApplication` cannot name a pid, as today
-- [ ] factor the choice into a pure function over (ax answer, window list) so it is testable without
+- [x] keep the pid-only degraded result when `NSRunningApplication` cannot name a pid, as today
+- [x] factor the choice into a pure function over (ax answer, window list) so it is testable without
       a window server
-- [ ] write tests: AX wins when it answers; the window list is used when AX is silent; an
+- [x] write tests: AX wins when it answers; the window list is used when AX is silent; an
       overlay-shaped entry (empty bundle id) is skipped in favour of the next real one; all-overlay
       input yields nothing rather than an overlay
-- [ ] run `cargo test` - must pass before task 3
+- [x] run `cargo test` - must pass before task 3
 
 ### Task 3: Keep reporting what is running while the screen is locked
 - [ ] treat an AX answer of `loginwindow` as no answer, and fall through to the filtered window list,

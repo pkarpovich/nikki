@@ -1,4 +1,4 @@
-use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+use objc2_app_kit::NSRunningApplication;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGGetActiveDisplayList,
@@ -117,33 +117,59 @@ pub fn display_list() -> Vec<DisplayEntry> {
 }
 
 pub fn frontmost_application() -> Option<RunningApplication> {
-    let front = focused_owner(&window_list());
-    let Some(pid) = front else {
-        let workspace = NSWorkspace::sharedWorkspace();
-        let application = workspace.frontmostApplication()?;
-        return Some(running_application(&application));
-    };
-    let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
-    else {
-        return Some(RunningApplication {
+    frontmost_of(
+        super::ax::focused_application(),
+        &window_list(),
+        application_for_pid,
+    )
+}
+
+fn frontmost_of<F>(
+    focused_pid: Option<i32>,
+    windows: &[WindowEntry],
+    application_of: F,
+) -> Option<RunningApplication>
+where
+    F: Fn(i32) -> Option<RunningApplication>,
+{
+    if let Some(pid) = focused_pid {
+        let application = application_of(pid);
+        return Some(application.unwrap_or(RunningApplication {
             pid,
             name: None,
             bundle_id: None,
-        });
-    };
-    Some(running_application(&application))
-}
+        }));
+    }
 
-fn focused_owner(windows: &[WindowEntry]) -> Option<i32> {
     for window in windows {
         let WindowEntry {
             layer, owner_pid, ..
         } = window;
-        if *layer == 0 {
-            return Some(*owner_pid);
+        if *layer != 0 {
+            continue;
         }
+        let Some(application) = application_of(*owner_pid) else {
+            continue;
+        };
+        if !is_application(&application) {
+            continue;
+        }
+        return Some(application);
     }
     None
+}
+
+fn is_application(application: &RunningApplication) -> bool {
+    let RunningApplication { bundle_id, .. } = application;
+    match bundle_id {
+        Some(bundle_id) => !bundle_id.is_empty(),
+        None => false,
+    }
+}
+
+fn application_for_pid(pid: i32) -> Option<RunningApplication> {
+    let application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+    Some(running_application(&application))
 }
 
 pub fn bundle_id_for_pid(pid: i32) -> Option<String> {
@@ -295,26 +321,102 @@ mod tests {
         }
     }
 
+    fn application(pid: i32, bundle_id: Option<&str>) -> RunningApplication {
+        RunningApplication {
+            pid,
+            name: Some(format!("application {pid}")),
+            bundle_id: bundle_id.map(|bundle_id| bundle_id.to_string()),
+        }
+    }
+
+    fn applications(known: Vec<RunningApplication>) -> impl Fn(i32) -> Option<RunningApplication> {
+        move |pid| {
+            let mut found = None;
+            for candidate in &known {
+                if candidate.pid == pid {
+                    found = Some(candidate.clone());
+                    break;
+                }
+            }
+            found
+        }
+    }
+
+    fn every_owner_is_an_application(pid: i32) -> Option<RunningApplication> {
+        Some(application(pid, Some("dev.pkarpovich.example")))
+    }
+
     #[test]
-    fn the_topmost_ordinary_window_names_the_focused_application() {
+    fn accessibility_names_the_focused_application_even_with_windows_in_front() {
         let windows = vec![entry(10, 0, 0), entry(20, 0, 1)];
-        assert_eq!(focused_owner(&windows), Some(10));
+        let front = frontmost_of(Some(20), &windows, every_owner_is_an_application);
+        assert_eq!(front.map(|front| front.pid), Some(20));
+    }
+
+    #[test]
+    fn a_pid_accessibility_names_but_nobody_can_name_is_reported_degraded() {
+        let front = frontmost_of(Some(4321), &[], |_| None);
+        assert_eq!(
+            front,
+            Some(RunningApplication {
+                pid: 4321,
+                name: None,
+                bundle_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn the_topmost_ordinary_window_answers_when_accessibility_is_silent() {
+        let windows = vec![entry(10, 0, 0), entry(20, 0, 1)];
+        let front = frontmost_of(None, &windows, every_owner_is_an_application);
+        assert_eq!(front.map(|front| front.pid), Some(10));
     }
 
     #[test]
     fn windows_above_the_ordinary_layer_are_skipped() {
         let windows = vec![entry(99, 25, 0), entry(10, 0, 1)];
-        assert_eq!(focused_owner(&windows), Some(10));
+        let front = frontmost_of(None, &windows, every_owner_is_an_application);
+        assert_eq!(front.map(|front| front.pid), Some(10));
+    }
+
+    #[test]
+    fn an_overlay_without_a_bundle_id_yields_to_the_next_real_application() {
+        let windows = vec![entry(99, 0, 0), entry(10, 0, 1)];
+        let known = applications(vec![
+            application(99, Some("")),
+            application(10, Some("dev.pkarpovich.example")),
+        ]);
+        let front = frontmost_of(None, &windows, known);
+        assert_eq!(front.map(|front| front.pid), Some(10));
+    }
+
+    #[test]
+    fn an_owner_no_running_application_names_is_an_overlay_too() {
+        let windows = vec![entry(99, 0, 0), entry(10, 0, 1)];
+        let known = applications(vec![
+            application(99, None),
+            application(10, Some("dev.pkarpovich.example")),
+        ]);
+        let front = frontmost_of(None, &windows, known);
+        assert_eq!(front.map(|front| front.pid), Some(10));
+    }
+
+    #[test]
+    fn a_list_of_nothing_but_overlays_names_nobody() {
+        let windows = vec![entry(99, 0, 0), entry(98, 0, 1)];
+        let known = applications(vec![application(99, Some("")), application(98, None)]);
+        assert!(frontmost_of(None, &windows, known).is_none());
     }
 
     #[test]
     fn a_list_without_an_ordinary_window_names_nobody() {
         let windows = vec![entry(99, 25, 0), entry(98, -1, 1)];
-        assert_eq!(focused_owner(&windows), None);
+        assert!(frontmost_of(None, &windows, every_owner_is_an_application).is_none());
     }
 
     #[test]
     fn an_empty_list_names_nobody() {
-        assert_eq!(focused_owner(&[]), None);
+        assert!(frontmost_of(None, &[], every_owner_is_an_application).is_none());
     }
 }
