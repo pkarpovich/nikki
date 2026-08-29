@@ -81,16 +81,16 @@ knows nothing about the lock screen. The rule is worth copying; the dependency i
 ## Implementation Steps
 
 ### Task 1: Ask Accessibility which application is focused
-- [ ] add `focused_application() -> Option<i32>` to `src/macos/ax.rs`, reading
+- [x] add `focused_application() -> Option<i32>` to `src/macos/ax.rs`, reading
       `AXFocusedApplication` from `AXUIElementCreateSystemWide()` and returning its pid
-- [ ] apply the same messaging timeout the module already uses for AX calls - one observed call took
+- [x] apply the same messaging timeout the module already uses for AX calls - one observed call took
       707 ms and a tick must never block on it
-- [ ] treat every AX error, including a null result, as "no answer" rather than an error to propagate;
+- [x] treat every AX error, including a null result, as "no answer" rather than an error to propagate;
       the caller decides what to do with silence
-- [ ] write tests for the pure part: an error code maps to `None`, a null element maps to `None`
-- [ ] add an `#[ignore]`d live test asserting the machine answers with some pid, in the shape
+- [x] write tests for the pure part: an error code maps to `None`, a null element maps to `None`
+- [x] add an `#[ignore]`d live test asserting the machine answers with some pid, in the shape
       `screen.rs` already uses
-- [ ] run `cargo test` - must pass before task 2
+- [x] run `cargo test` - must pass before task 2
 
 ### Task 2: Make Accessibility the focus source, with a filtered fallback
 - [ ] rewrite `frontmost_application()` as: AX first; on no answer, the window list; and **drop** the
@@ -169,6 +169,17 @@ was there" - the third attendance state - and the agterm extractor only runs bec
 application is Agterm. Reporting `loginwindow` would replace that with a fact `screen_locked` already
 states, and blank out the hour. Hence AX is authoritative for who holds focus **while somebody is
 there**; during a lock the useful question changes to what is running, and the window list answers it.
+
+**The system-wide focus read needs a warm connection to the application it names** (measured while
+building task 1, reproducible on this machine). In a process that has never messaged the focused
+application, `AXFocusedApplication` on the system-wide element returns `kAXErrorCannotComplete`
+immediately and keeps returning it - six attempts over two seconds, at 0.4 s, 2 s and 5 s messaging
+timeouts, all failed. One `AXUIElementCreateApplication` read against the pid currently in front makes
+every later system-wide read succeed; the same read against some other application does not. The
+daemon warms it by accident - each tick already builds an `AxApplication` for the front pid to read
+its title - so the practical cost is that the first tick after a switch to an application never
+messaged before falls through to the window list. The live test warms it deliberately for the same
+reason.
 
 **AX silence is normal.** Nine samples in 2123 returned nothing, and two of sixteen observer callbacks
 could not resolve the focused application from inside the callback. Silence must fall through to the
