@@ -1046,17 +1046,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_snapshot_is_private_while_it_exists_and_gone_once_the_poll_is_abandoned() {
-        let home = TempHome::new("abandoned-poll");
-        let user_data = home.user_data();
+    async fn a_history_clone_is_private_to_this_user() {
+        let home = TempHome::new("private-clone");
         let snapshot = home.snapshot();
-        let mut poll = Box::pin(poll_once(
-            &user_data, &snapshot, PROFILE, WINDOW, None, PAGE_LIMIT,
-        ));
-        let elapsed = tokio::time::timeout(Duration::from_millis(0), &mut poll).await;
+        let source = home.user_data().join(DIRECTORY);
 
-        assert!(elapsed.is_err(), "the poll must still be cloning");
-        let mode = fs::metadata(home.snapshot())
+        let copy = clone_history(&source, &snapshot).await;
+        assert!(copy.is_some(), "the history could not be cloned");
+
+        let mode = fs::metadata(&snapshot)
             .expect("the snapshot directory was never made")
             .permissions()
             .mode();
@@ -1065,6 +1063,19 @@ mod tests {
             0o700,
             "an unredacted history clone must not be readable by anyone else"
         );
+
+        discard(&snapshot);
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_poll_leaves_no_history_clone_behind() {
+        let home = TempHome::new("abandoned-poll");
+        let user_data = home.user_data();
+        let snapshot = home.snapshot();
+        let mut poll = Box::pin(poll_once(
+            &user_data, &snapshot, PROFILE, WINDOW, None, PAGE_LIMIT,
+        ));
+        let _ = tokio::time::timeout(Duration::from_millis(0), &mut poll).await;
 
         drop(poll);
         assert!(
