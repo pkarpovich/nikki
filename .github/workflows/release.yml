@@ -226,7 +226,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/nikki.rb
+          # -A, not a single path: the cask replaced the formula, and staging one
+          # path stages the deletion while leaving the new file untracked.
+          git add -A
           git diff --cached --quiet && exit 0
           git commit -m "nikki ${VERSION}"
           git push
