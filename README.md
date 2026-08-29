@@ -43,7 +43,7 @@ workflow refuses to ship a binary without it.
 
 | Permission | What it buys | Indicator / prompts |
 |---|---|---|
-| Accessibility | window titles, the focused window, `AXDocument` paths, title-change events | none |
+| Accessibility | which application is focused, window titles, the focused window, `AXDocument` paths, activation and title-change events | none |
 | Automation -> Dia | the active tab's URL, title and profile | one-time prompt on first use |
 | (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state, the process table | none |
 
@@ -91,7 +91,10 @@ Settings.
 ### Degraded capture
 
 When Accessibility is not granted, or its calls fail, capture continues: application, bundle id,
-geometry, `display` and every activity signal still work, because none of them touch Accessibility.
+geometry, `display` and every activity signal still work. Geometry and the activity signals never
+touch Accessibility at all, and the application is still named because the focus read falls through
+to the filtered window list, which needs no permission - what is lost is focus *events*, since no
+observer can attach, so a switch is noticed by the next tick rather than at the moment it happened.
 The window title and the `AXDocument` path go null, `visible[]` entries lose their titles, and the
 record carries `degraded: true`, which reaches the service and the API - a degraded day must not be
 indistinguishable from a quiet one to whoever reads the timeline later. Extractor `details` survive,
@@ -225,10 +228,10 @@ transport concern. Exactly one module owns it.
 
 ### The two providers
 
-**`windows`** (`src/providers/windows.rs`) is event-driven with a heartbeat. Its sources are
-`NSWorkspace` activation, sleep and wake; distributed lock and unlock; an `AXObserver` on the
-frontmost application watching focused-window, title, created and destroyed, re-registered whenever
-that application changes; display reconfiguration; and a tick every `tick_interval`.
+**`windows`** (`src/providers/windows.rs`) is event-driven with a heartbeat. Its sources are one
+`AXObserver` per application that owns a window, watching activation, deactivation, focused-window,
+title, created and destroyed, and re-scanned on every tick; `NSWorkspace` activation, sleep and wake;
+distributed lock and unlock; display reconfiguration; and a tick every `tick_interval`.
 
 Sample assembly runs in a fixed order: window list and displays first, then the frontmost
 application's front-most on-screen window - which is where `display` comes from, **not** Accessibility,
@@ -263,6 +266,37 @@ Each poll reads `id > cursor - revisit_window` rather than `id > cursor`, becaus
 `visit_duration` in by updating the row it wrote when the visit began. A re-read row is emitted
 **only when its `title`, `transition` or `visit_duration` changed** since it was last shipped; that is
 the difference between roughly 3 000 records a day and 144 000.
+
+### The focus source
+
+**Accessibility answers who is focused**, through `AXFocusedApplication` on the system-wide element,
+under the same messaging timeout every other Accessibility call in the crate carries - one measured
+call took 707 ms and a tick must never block on it. Every error, including a null result, is silence
+rather than a failure: nine samples in 2 123 returned nothing, so silence is a normal outcome and
+falls through to the window list, never to an error and never to a fabricated answer.
+
+**The fallback is the window list filtered to owners that have a bundle id.** Paint order alone puts
+whatever is drawn on top in front, and an overlay that cannot hold focus wins: `borders`, a utility
+that draws a frame around the active window, was recorded as the focused application for 32 minutes on
+28 August. It is not a registered application and ships `bundle_id: ""`, which is what the filter
+tests. An overlay is defined by what it is, not by its name - a notch bar, an HUD and a screenshot
+tool belong to the same class, and a list of process names to ignore would have to grow forever, while
+"no bundle id" is checkable against the records already stored.
+
+**`NSWorkspace.frontmostApplication` was removed rather than fixed.** It was the last fallback in the
+chain and had been frozen since it was written, answering with the same application forever - so a
+wrong answer was indistinguishable from a right one and outlived every real switch. A second silent
+source behind a silent one only makes the silence harder to see, so the chain now ends at the filtered
+window list, which is either empty or right. Do not restore it.
+
+**The system-wide read needs a warm connection to the application it names.** In a process that has
+never messaged the focused application, `AXFocusedApplication` returns `kAXErrorCannotComplete`
+immediately and keeps returning it - measured over six attempts at 0.4 s, 2 s and 5 s messaging
+timeouts, all failed. One `AXUIElementCreateApplication` read against that pid makes every later
+system-wide read succeed, and the daemon warms it by accident: each tick already builds an application
+element for the front pid to read its title. The practical cost is that the first sample after a
+switch to an application never messaged before falls through to the window list, which names the same
+application anyway.
 
 ### Adding a provider
 
@@ -394,6 +428,14 @@ not require it, and the bodies below omit it only for brevity.
 `tick_interval_sec` rides on **every** tick rather than being assumed as a server-side global, which
 is what keeps a second Mac on a 60-second interval from halving that day's reported totals and keeps
 historical rows meaning what they meant when recorded.
+
+`focus` reports that the focused application changed, and carries the same body a `state_change` does
+- the application, its bundle id, the display, the title, the document path, the extractor `details`
+and `visible`. The kind has been in this table since day one and was never emitted until Accessibility
+became the focus source; it now comes from an `AXApplicationActivated` notification, so its `ts` is
+the moment of the switch, captured when the first event of the burst arrives, rather than the tick
+that noticed it up to `tick_interval` later. A switch arrives as a deactivate/activate pair roughly
+20 ms apart, and the 300 ms debounce is what makes that one record instead of two.
 
 `state_change` reports that something about the focused window changed without focus moving: a title
 rewrite, a window created or destroyed, a display reconfiguration. None of those fire an application
@@ -597,6 +639,24 @@ transient state captures it **at callback time**, because resampling when the ev
 the world after the transition it was meant to record. Shutdown is `CFRunLoopStop` on the stored
 reference, then joining the thread.
 
+**The Accessibility observers are attached from that thread, and only from there.** The registry holds
+one `AXObserver` per pid owning a layer-0 window, each registered for `AXApplicationActivated`,
+`AXApplicationDeactivated`, `AXFocusedWindowChanged`, `AXTitleChanged`, `AXWindowCreated` and
+`AXUIElementDestroyed`. `AXObserverGetRunLoopSource` has to be added to the run loop that will
+actually run; adding it from a tokio worker attaches it to a loop nobody pumps, which is the same
+class of mistake that leaves an observer silently dead. An application whose activation resolves to no
+`NSRunningApplication` is reported by pid rather than dropped, and a deactivation is only a hint that
+an activation follows, so it produces no event of its own.
+
+**Every tick asks the thread to re-scan the window owners**, which is how an application launched
+after startup gets an observer - without the re-scan a switch to a pid never attached to produces no
+event at all. The same pass detaches and releases the observer of a pid that no longer owns a window,
+so a daemon running for weeks does not accumulate them. An application that refuses Accessibility -
+two of nineteen on this machine - is warned about once and remembered as refusing, so it is not
+retried on every pass; it is invisible to focus events for as long as it runs, and only the tick,
+which reads the window list rather than the observers, still names it. A refusing pid is forgotten
+once it goes away, so its successor at the same pid is tried again.
+
 **`willSleep` is the one exception to post-and-return.** It sends its event with a completion handle
 and blocks on the flush acknowledgement for at most 2 seconds. The service's liveness rule treats a
 `sleep` marker as expected quiet and alarms without one, so a marker that only reaches the server
@@ -636,12 +696,12 @@ delivered in one drain, so it scripts a burst rather than a timeline.
 ```
 src/config.rs          config parsing and validation
 src/macos/             every unsafe block in the crate
-  ax.rs                Accessibility: elements, titles, AXDocument, messaging timeout
-  window_list.rs       CGWindowList, CGDisplayBounds, frontmost application, bundle id for pid
+  ax.rs                Accessibility: the focused application, elements, titles, AXDocument, messaging timeout
+  window_list.rs       CGWindowList, CGDisplayBounds, the focus choice and its filtered fallback, bundle id for pid
   activity.rs          idle seconds, input counters, microphone, cursor display
   screen.rs            the session lock state and per-display sleep
   processes.rs         the process table: argv, environment, controlling tty, cwd, agterm panes
-  events.rs            the CFRunLoop thread and every notification source
+  events.rs            the CFRunLoop thread, the AXObserver registry and every notification source
 src/window/visibility.rs  the pure visible-set resolver
 src/extract/           the bundle-id-keyed extractor registry
 src/providers/         the Provider trait, the supervisor, and the two providers

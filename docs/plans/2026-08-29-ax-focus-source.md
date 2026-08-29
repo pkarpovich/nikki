@@ -142,13 +142,13 @@ knows nothing about the lock screen. The rule is worth copying; the dependency i
 - [x] run `cargo test` - must pass before task 6
 
 ### Task 6: Documentation
-- [ ] `README.md`: name Accessibility as the focus source, the window list as the filtered fallback,
+- [x] `README.md`: name Accessibility as the focus source, the window list as the filtered fallback,
       and record why the `NSWorkspace` path was removed rather than fixed - so nobody restores it
-- [ ] describe the observer lifecycle and the per-tick re-scan, including that an application which
+- [x] describe the observer lifecycle and the per-tick re-scan, including that an application which
       refuses AX is invisible to focus events
-- [ ] state that `focus` records now exist, what they carry, and that their timestamps are the moment
+- [x] state that `focus` records now exist, what they carry, and that their timestamps are the moment
       of the switch rather than the tick that noticed it
-- [ ] update the `src/macos/` file table with the new responsibilities
+- [x] update the `src/macos/` file table with the new responsibilities
 
 ### Task 7: Verify acceptance criteria
 - [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` green
