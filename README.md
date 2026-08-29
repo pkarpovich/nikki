@@ -14,28 +14,31 @@ elsewhere, from the service API.
 ## Install
 
 ```
-brew install pkarpovich/apps/nikki
+brew install --cask pkarpovich/apps/nikki
 nikki install
 ```
 
 Write `~/.config/nikki/config.toml` **before** installing the service - `service_url` and `device`
 are required and the daemon exits without them, which under `keep_alive` is a restart loop. Then
-`nikki --check-config`, `nikki install`, and grant Accessibility to
-`~/Library/Application Support/nikki/bin/nikki`.
+`nikki --check-config`, `nikki install`, and grant Accessibility to Nikki.
 
-`nikki install` copies the running binary to `~/Library/Application Support/nikki/bin/nikki` and
-loads that copy as the launchd agent `dev.pkarpovich.nikki`, logging to `~/Library/Logs/nikki.log`.
-Installing over an existing Homebrew service unloads it and removes its agent, so the two never run
-at once. `nikki uninstall` unloads the agent and removes both files, leaving captured data alone.
+The cask puts `Nikki.app` in `/Applications` and puts `nikki` on `PATH` as a symlink into it, so the
+CLI and the daemon are the same binary. `nikki install` writes the launchd agent
+`dev.pkarpovich.nikki` against that app, logging to `~/Library/Logs/nikki.log`, and unloads and
+removes the agent `brew services` used to write so the two never run at once. `nikki uninstall`
+reverses it and leaves the app and the captured data alone. **An upgrade needs nothing further** -
+Homebrew replaces the app in place and the agent already points at it.
 
-**Do not use `brew services`, and re-run `nikki install` after every upgrade.** Homebrew's agent runs
-the binary through `opt_bin`, which resolves into a versioned Cellar path, and macOS ties an
-Accessibility grant to that resolved path - so `0.2.0` becoming `0.3.0` made it a different program
-and the grant was lost, three upgrades in a row. The copy has a path that never changes, and since
-the signing identity does not change either, replacing the file in place keeps the grant. The cost of
-that trade is explicit: Homebrew updates the Cellar and knows nothing about the copy, so an upgrade
-without `nikki install` leaves the agent running the previous version silently. If `nikki` is in a
-Brewfile, drop any `restart_service:` from its line - there is no service block to restart.
+**Why a cask and not a formula.** macOS identifies a bundle by its bundle id at a path that never
+moves, and a loose binary by its absolute path alone. A formula installs into a versioned Cellar
+directory, so `0.2.0` becoming `0.3.0` was a different program to TCC and the Accessibility grant was
+lost - three upgrades in a row. `yabai` lives with the same thing and its upgrade instructions say to
+uninstall the service first "because homebrew changes binary path". The app bundle removes the
+problem rather than working around it.
+
+Migrating from the formula: `brew uninstall nikki`, then install the cask and run `nikki install`.
+The grant resets once more on the move, because the path changes one last time. If `nikki` is in a
+Brewfile, it becomes a `cask` line without `restart_service:`.
 
 Releases are cut by tagging; see `docs/releasing.md`.
 
@@ -88,6 +91,8 @@ every start is worse than one that logs what it is missing - so the checkbox is 
 macOS caches the denial for the life of the process. Until the agent is reloaded - `nikki install`
 runs the whole sequence again and is the simplest way - the daemon keeps running as if nothing was
 granted, and the only place that says so is the `accessibility=false` field on the startup line.
+The grant itself survives upgrades, because the app's identity is its bundle id and its path does
+not move.
 
 **Screen Recording is deliberately never requested.** Holding it triggers a macOS re-consent dialog
 roughly monthly which cannot be disabled, in exchange for `kCGWindowName` - a field this design gets

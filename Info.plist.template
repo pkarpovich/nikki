@@ -6,6 +6,12 @@
 	<string>dev.pkarpovich.nikki</string>
 	<key>CFBundleName</key>
 	<string>nikki</string>
+	<key>CFBundleExecutable</key>
+	<string>nikki</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSUIElement</key>
+	<true/>
 	<key>CFBundleShortVersionString</key>
 	<string>__VERSION__</string>
 	<key>CFBundleVersion</key>
