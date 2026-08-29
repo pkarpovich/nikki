@@ -14,7 +14,9 @@ use crate::macos::activity::{
     input_counters, microphone_active,
 };
 use crate::macos::ax::{AxApplication, accessibility_is_trusted};
-use crate::macos::events::{MacEvent, RescanHandle, SLEEP_FLUSH_BUDGET, SleepAcknowledgement};
+use crate::macos::events::{
+    MacEvent, Observed, RescanHandle, SLEEP_FLUSH_BUDGET, SleepAcknowledgement,
+};
 use crate::macos::screen::{displays_asleep, screen_locked};
 use crate::macos::window_list::{
     DisplayEntry, RunningApplication, WindowEntry, bundle_id_for_pid, display_list,
@@ -143,12 +145,12 @@ impl Sources for MacSources {
 
 pub struct WindowProvider<S> {
     sources: S,
-    events: UnboundedReceiver<MacEvent>,
+    events: UnboundedReceiver<Observed>,
     counters: InputCounterTracker,
 }
 
 impl<S: Sources> WindowProvider<S> {
-    pub fn new(sources: S, events: UnboundedReceiver<MacEvent>) -> WindowProvider<S> {
+    pub fn new(sources: S, events: UnboundedReceiver<Observed>) -> WindowProvider<S> {
         WindowProvider {
             sources,
             events,
@@ -179,13 +181,13 @@ impl<S: Sources> Provider for WindowProvider<S> {
 
             tokio::select! {
                 event = events.recv() => {
-                    let Some(event) = event else {
+                    let Some(Observed { at, event }) = event else {
                         tracing::info!("the event thread is gone, so the window provider stops");
                         return Ok(());
                     };
                     match signal(event) {
                         Signal::Sample { kind, application } => {
-                            pending = Some(schedule(pending, kind, application));
+                            pending = Some(schedule(pending, kind, application, at));
                         }
                         Signal::Marker { kind } => {
                             if out.send(Emission::new(vec![marker(kind)])).await.is_err() {
@@ -282,12 +284,13 @@ fn schedule(
     pending: Option<Pending>,
     kind: Kind,
     application: Option<RunningApplication>,
+    ts: Timestamp,
 ) -> Pending {
     let now = Instant::now();
     let Some(pending) = pending else {
         return Pending {
             kind,
-            ts: Timestamp::now(),
+            ts,
             application,
             first: now,
             deadline: now + DEBOUNCE,
@@ -295,16 +298,18 @@ fn schedule(
     };
     let Pending {
         kind: scheduled,
-        ts,
+        ts: scheduled_ts,
         application: earlier,
         first,
         ..
     } = pending;
-    let kind = if scheduled == Kind::Focus || kind == Kind::Focus {
+    let activation = kind == Kind::Focus;
+    let kind = if activation || scheduled == Kind::Focus {
         Kind::Focus
     } else {
         Kind::StateChange
     };
+    let ts = if activation { ts } else { scheduled_ts };
     Pending {
         kind,
         ts,
@@ -745,12 +750,24 @@ mod tests {
     fn start(
         sources: FakeSources,
         tick_interval: u64,
-    ) -> (UnboundedSender<MacEvent>, Receiver<Emission>) {
+    ) -> (UnboundedSender<Observed>, Receiver<Emission>) {
         let (events, inbox) = unbounded_channel();
         let (out, emissions) = channel(16);
         let mut provider = WindowProvider::new(sources, inbox);
         tokio::spawn(async move { provider.run(test_ctx(tick_interval), out).await });
         (events, emissions)
+    }
+
+    fn send(events: &UnboundedSender<Observed>, event: MacEvent) {
+        events
+            .send(Observed::now(event))
+            .expect("the provider is listening");
+    }
+
+    fn observed_at(events: &UnboundedSender<Observed>, at: Timestamp, event: MacEvent) {
+        events
+            .send(Observed { at, event })
+            .expect("the provider is listening");
     }
 
     async fn one_record(emissions: &mut Receiver<Emission>) -> RecordDraft {
@@ -816,9 +833,7 @@ mod tests {
         let rescans = Arc::clone(&sources.rescans);
         let (events, mut emissions) = start(sources, LONG_TICK);
 
-        events
-            .send(MacEvent::TitleChanged { pid: ZED_PID })
-            .expect("the provider is listening");
+        send(&events, MacEvent::TitleChanged { pid: ZED_PID });
 
         one_record(&mut emissions).await;
         assert_eq!(rescans.load(Ordering::SeqCst), 0);
@@ -941,12 +956,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_burst_never_pushes_the_deadline_past_the_ceiling() {
-        let mut pending = schedule(None, Kind::StateChange, None);
+        let mut pending = schedule(None, Kind::StateChange, None, Timestamp::now());
         let ceiling = pending.first + DEBOUNCE_CEILING;
 
         for _ in 0..10 {
             tokio::time::advance(Duration::from_millis(200)).await;
-            pending = schedule(Some(pending), Kind::StateChange, None);
+            pending = schedule(Some(pending), Kind::StateChange, None, Timestamp::now());
             assert!(pending.deadline <= ceiling);
         }
         assert_eq!(pending.deadline, ceiling);
@@ -956,11 +971,12 @@ mod tests {
     async fn an_activation_emits_a_focus_record_for_the_application_it_carried() {
         let (events, mut emissions) = start(sources(), LONG_TICK);
 
-        events
-            .send(MacEvent::ApplicationActivated {
+        send(
+            &events,
+            MacEvent::ApplicationActivated {
                 application: application(DIA_PID, "Dia", "company.thebrowser.dia"),
-            })
-            .expect("the provider is listening");
+            },
+        );
 
         let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
         assert_eq!(kind, Kind::Focus);
@@ -969,6 +985,25 @@ mod tests {
         assert_eq!(payload["display"], 1);
         assert!(payload.get("screen_locked").is_none());
         assert!(payload.get("display_asleep").is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_focus_record_carries_the_moment_the_switch_was_observed_not_the_moment_it_was_read()
+    {
+        let (events, mut emissions) = start(sources(), LONG_TICK);
+        let switched = Timestamp::from_millis(1_756_000_000_000);
+
+        observed_at(
+            &events,
+            switched,
+            MacEvent::ApplicationActivated {
+                application: application(DIA_PID, "Dia", "company.thebrowser.dia"),
+            },
+        );
+
+        let RecordDraft { kind, ts, .. } = one_record(&mut emissions).await;
+        assert_eq!(kind, Kind::Focus);
+        assert_eq!(ts, switched);
     }
 
     #[tokio::test(start_paused = true)]
@@ -984,7 +1019,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let event = ax_event(AxNotification::ApplicationActivated, DIA_PID, named)
             .expect("an activation describes an event");
-        events.send(event).expect("the provider is listening");
+        send(&events, event);
 
         let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
         assert_eq!(kind, Kind::Focus);
@@ -997,11 +1032,12 @@ mod tests {
     async fn an_activation_of_the_lock_screen_reports_what_is_still_on_screen() {
         let (events, mut emissions) = start(sources(), LONG_TICK);
 
-        events
-            .send(MacEvent::ApplicationActivated {
+        send(
+            &events,
+            MacEvent::ApplicationActivated {
                 application: application(LOGIN_WINDOW_PID, "loginwindow", "com.apple.loginwindow"),
-            })
-            .expect("the provider is listening");
+            },
+        );
 
         let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
         assert_eq!(kind, Kind::Focus);
@@ -1015,7 +1051,7 @@ mod tests {
 
         let event = ax_event(AxNotification::TitleChanged, ZED_PID, no_application)
             .expect("a title change describes an event");
-        events.send(event).expect("the provider is listening");
+        send(&events, event);
 
         let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
         assert_eq!(kind, Kind::StateChange);
@@ -1035,7 +1071,7 @@ mod tests {
         ];
         for event in events {
             let (sender, mut emissions) = start(sources(), LONG_TICK);
-            sender.send(event).expect("the provider is listening");
+            send(&sender, event);
 
             let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
             assert_eq!(kind, Kind::StateChange);
@@ -1056,7 +1092,7 @@ mod tests {
         ];
         for (event, expected) in expectations {
             let (sender, mut emissions) = start(sources(), LONG_TICK);
-            sender.send(event).expect("the provider is listening");
+            send(&sender, event);
 
             let RecordDraft {
                 kind,
@@ -1074,9 +1110,7 @@ mod tests {
     async fn a_sleep_event_is_acknowledged_only_once_the_record_is_committed() {
         let (events, mut emissions) = start(sources(), LONG_TICK);
         let (acknowledgement, receipt) = SleepAcknowledgement::channel();
-        events
-            .send(MacEvent::WillSleep { acknowledgement })
-            .expect("the provider is listening");
+        send(&events, MacEvent::WillSleep { acknowledgement });
 
         let Some(emission) = emissions.recv().await else {
             panic!("the provider stopped without emitting");
@@ -1191,9 +1225,7 @@ mod tests {
         let (events, mut emissions) = start(sources, LONG_TICK);
 
         for _ in 0..5 {
-            events
-                .send(MacEvent::TitleChanged { pid: ZED_PID })
-                .expect("the provider is listening");
+            send(&events, MacEvent::TitleChanged { pid: ZED_PID });
         }
 
         let RecordDraft { kind, .. } = one_record(&mut emissions).await;
@@ -1212,17 +1244,14 @@ mod tests {
     async fn an_activation_inside_a_burst_wins_over_a_state_change() {
         let (events, mut emissions) = start(sources(), LONG_TICK);
 
-        events
-            .send(MacEvent::TitleChanged { pid: ZED_PID })
-            .expect("the provider is listening");
-        events
-            .send(MacEvent::ApplicationActivated {
+        send(&events, MacEvent::TitleChanged { pid: ZED_PID });
+        send(
+            &events,
+            MacEvent::ApplicationActivated {
                 application: application(DIA_PID, "Dia", "company.thebrowser.dia"),
-            })
-            .expect("the provider is listening");
-        events
-            .send(MacEvent::WindowCreated { pid: DIA_PID })
-            .expect("the provider is listening");
+            },
+        );
+        send(&events, MacEvent::WindowCreated { pid: DIA_PID });
 
         let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
         assert_eq!(kind, Kind::Focus);
@@ -1239,12 +1268,8 @@ mod tests {
             .expect("the frontmost application is poisoned") = None;
         let (events, mut emissions) = start(sources, LONG_TICK);
 
-        events
-            .send(MacEvent::TitleChanged { pid: ZED_PID })
-            .expect("the provider is listening");
-        events
-            .send(MacEvent::ScreenLocked)
-            .expect("the provider is listening");
+        send(&events, MacEvent::TitleChanged { pid: ZED_PID });
+        send(&events, MacEvent::ScreenLocked);
 
         let RecordDraft { kind, .. } = one_record(&mut emissions).await;
         assert_eq!(kind, Kind::Lock);
@@ -1262,11 +1287,12 @@ mod tests {
         let detail_calls = Arc::clone(&sources.detail_calls);
         let (events, mut emissions) = start(sources, LONG_TICK);
 
-        events
-            .send(MacEvent::ApplicationActivated {
+        send(
+            &events,
+            MacEvent::ApplicationActivated {
                 application: application(DIA_PID, "Dia", "company.thebrowser.dia"),
-            })
-            .expect("the provider is listening");
+            },
+        );
 
         let RecordDraft { payload, .. } = one_record(&mut emissions).await;
         assert_eq!(
@@ -1283,20 +1309,66 @@ mod tests {
     }
 
     #[test]
-    fn a_burst_of_events_keeps_the_first_timestamp_and_the_latest_application() {
-        let first = schedule(None, Kind::StateChange, None);
-        let ts = first.ts;
+    fn a_burst_of_state_changes_keeps_the_timestamp_of_the_first() {
+        let first = schedule(None, Kind::StateChange, None, Timestamp::from_millis(1_000));
+        let merged = schedule(
+            Some(first),
+            Kind::StateChange,
+            None,
+            Timestamp::from_millis(1_200),
+        );
+
+        let Pending { kind, ts, .. } = merged;
+        assert_eq!(kind, Kind::StateChange);
+        assert_eq!(ts, Timestamp::from_millis(1_000));
+    }
+
+    #[test]
+    fn an_activation_inside_a_burst_carries_the_moment_the_switch_arrived() {
+        let first = schedule(None, Kind::StateChange, None, Timestamp::from_millis(1_000));
         let dia = application(DIA_PID, "Dia", "company.thebrowser.dia");
-        let merged = schedule(Some(first), Kind::Focus, Some(dia.clone()));
+        let merged = schedule(
+            Some(first),
+            Kind::Focus,
+            Some(dia.clone()),
+            Timestamp::from_millis(1_300),
+        );
 
         let Pending {
             kind,
-            ts: kept,
+            ts,
             application,
             ..
         } = merged;
         assert_eq!(kind, Kind::Focus);
-        assert_eq!(kept, ts);
+        assert_eq!(ts, Timestamp::from_millis(1_300));
+        assert_eq!(application, Some(dia));
+    }
+
+    #[test]
+    fn a_state_change_after_an_activation_keeps_the_moment_of_the_switch() {
+        let dia = application(DIA_PID, "Dia", "company.thebrowser.dia");
+        let first = schedule(
+            None,
+            Kind::Focus,
+            Some(dia.clone()),
+            Timestamp::from_millis(1_000),
+        );
+        let merged = schedule(
+            Some(first),
+            Kind::StateChange,
+            None,
+            Timestamp::from_millis(1_200),
+        );
+
+        let Pending {
+            kind,
+            ts,
+            application,
+            ..
+        } = merged;
+        assert_eq!(kind, Kind::Focus);
+        assert_eq!(ts, Timestamp::from_millis(1_000));
         assert_eq!(application, Some(dia));
     }
 

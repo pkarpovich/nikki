@@ -34,6 +34,7 @@ use super::window_list::{
     RunningApplication, WindowEntry, application_for_pid, every_window, is_regular_application,
     running_application,
 };
+use crate::runtime::Timestamp;
 
 pub const SLEEP_FLUSH_BUDGET: Duration = Duration::from_secs(2);
 pub const TEST_EVENTS_VAR: &str = "NIKKI_TEST_EVENTS";
@@ -122,20 +123,35 @@ pub enum MacEvent {
     DidWake,
 }
 
+#[derive(Debug)]
+pub struct Observed {
+    pub at: Timestamp,
+    pub event: MacEvent,
+}
+
+impl Observed {
+    pub fn now(event: MacEvent) -> Observed {
+        Observed {
+            at: Timestamp::now(),
+            event,
+        }
+    }
+}
+
 enum Injected {
     Event(MacEvent),
     Sleep,
 }
 
 struct Inbox {
-    sender: UnboundedSender<MacEvent>,
+    sender: UnboundedSender<Observed>,
     injected: Mutex<VecDeque<Injected>>,
     rescan: AtomicBool,
 }
 
 impl Inbox {
     fn emit(&self, event: MacEvent) {
-        if self.sender.send(event).is_ok() {
+        if self.sender.send(Observed::now(event)).is_ok() {
             return;
         }
         tracing::debug!("an event was dropped because the runtime is gone");
@@ -173,6 +189,7 @@ impl RescanHandle {
 struct SourceState {
     inbox: Arc<Inbox>,
     run_loop: CFRetained<CFRunLoop>,
+    register: RegisterSystemSources,
     observers: HashMap<i32, ObserverRegistration>,
     refused: HashSet<i32>,
 }
@@ -212,7 +229,7 @@ pub struct EventThread {
 }
 
 impl EventThread {
-    pub fn spawn(sender: UnboundedSender<MacEvent>) -> std::io::Result<Self> {
+    pub fn spawn(sender: UnboundedSender<Observed>) -> std::io::Result<Self> {
         let Some(script) = var_os(TEST_EVENTS_VAR) else {
             return Self::start(sender, RegisterSystemSources::Yes, VecDeque::new());
         };
@@ -228,13 +245,13 @@ impl EventThread {
 
     #[cfg(test)]
     pub fn spawn_without_system_sources(
-        sender: UnboundedSender<MacEvent>,
+        sender: UnboundedSender<Observed>,
     ) -> std::io::Result<Self> {
         Self::start(sender, RegisterSystemSources::No, VecDeque::new())
     }
 
     fn start(
-        sender: UnboundedSender<MacEvent>,
+        sender: UnboundedSender<Observed>,
         register: RegisterSystemSources,
         scripted: VecDeque<Injected>,
     ) -> std::io::Result<Self> {
@@ -327,6 +344,7 @@ fn run_event_loop(
     let state = Box::into_raw(Box::new(SourceState {
         inbox: Arc::clone(&inbox),
         run_loop: run_loop.clone(),
+        register,
         observers: HashMap::new(),
         refused: HashSet::new(),
     }));
@@ -492,7 +510,7 @@ fn activated_application(notification: &NSNotification) -> Option<RunningApplica
 fn deliver_will_sleep(inbox: &Inbox, budget: Duration) -> SleepFlush {
     let (acknowledgement, receiver) = SleepAcknowledgement::channel();
     let event = MacEvent::WillSleep { acknowledgement };
-    if inbox.sender.send(event).is_err() {
+    if inbox.sender.send(Observed::now(event)).is_err() {
         return SleepFlush::Abandoned;
     }
     match receiver.recv_timeout(budget) {
@@ -696,6 +714,10 @@ unsafe extern "C-unwind" fn perform_source(info: *mut c_void) {
     if !state.inbox.rescan.swap(false, Ordering::SeqCst) {
         return;
     }
+    match state.register {
+        RegisterSystemSources::No => return,
+        RegisterSystemSources::Yes => {}
+    }
     rescan_observers(
         state,
         &application_pids(&every_window(), is_regular_application),
@@ -840,7 +862,7 @@ mod tests {
 
     use crate::macos::window_list::Rect;
 
-    fn inbox() -> (Arc<Inbox>, tokio::sync::mpsc::UnboundedReceiver<MacEvent>) {
+    fn inbox() -> (Arc<Inbox>, tokio::sync::mpsc::UnboundedReceiver<Observed>) {
         let (sender, receiver) = unbounded_channel();
         let inbox = Arc::new(Inbox {
             sender,
@@ -1164,7 +1186,11 @@ mod tests {
     fn the_sleep_handler_waits_for_the_acknowledgement() {
         let (inbox, mut receiver) = inbox();
         let flusher = std::thread::spawn(move || {
-            let Some(MacEvent::WillSleep { acknowledgement }) = receiver.blocking_recv() else {
+            let Some(Observed {
+                event: MacEvent::WillSleep { acknowledgement },
+                ..
+            }) = receiver.blocking_recv()
+            else {
                 return;
             };
             std::thread::sleep(Duration::from_millis(120));
@@ -1208,17 +1234,29 @@ mod tests {
     }
 
     #[test]
+    fn an_emitted_event_carries_the_moment_it_was_observed() {
+        let (inbox, mut receiver) = inbox();
+        let before = Timestamp::now();
+        inbox.emit(MacEvent::ScreenLocked);
+        let after = Timestamp::now();
+
+        let Observed { at, .. } = receiver.blocking_recv().expect("no event was delivered");
+        assert!(at >= before, "the observation predates the emission");
+        assert!(at <= after, "the observation postdates the emission");
+    }
+
+    #[test]
     fn the_event_thread_delivers_an_injected_event_and_stops() {
         let (sender, mut receiver) = unbounded_channel();
         let thread = EventThread::spawn_without_system_sources(sender)
             .expect("the event thread could not start");
 
         thread.inject(MacEvent::TitleChanged { pid: 77 });
-        let event = receiver.blocking_recv().expect("no event was delivered");
+        let Observed { event, .. } = receiver.blocking_recv().expect("no event was delivered");
         assert_eq!(describe(&event), ("title_changed", 77));
 
         thread.inject(MacEvent::ScreenLocked);
-        let event = receiver.blocking_recv().expect("no event was delivered");
+        let Observed { event, .. } = receiver.blocking_recv().expect("no event was delivered");
         assert_eq!(describe(&event), ("screen_locked", 0));
 
         thread.stop();

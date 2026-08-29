@@ -433,8 +433,12 @@ historical rows meaning what they meant when recorded.
 - the application, its bundle id, the display, the title, the document path, the extractor `details`
 and `visible`. The kind has been in this table since day one and was never emitted until Accessibility
 became the focus source; it now comes from an `AXApplicationActivated` notification, so its `ts` is
-the moment of the switch, captured when the first event of the burst arrives, rather than the tick
-that noticed it up to `tick_interval` later. A switch arrives as a deactivate/activate pair roughly
+the moment of the switch: every event is stamped in the run loop callback that receives it, so the
+timestamp survives a provider busy inside an extractor, and it is neither the moment the burst around
+it opened nor the tick that noticed it up to `tick_interval` later. A burst that started
+with a title change and is then promoted to a `focus` by an activation takes the activation's
+timestamp, because a `focus` timestamped before the switch it reports would move a run boundary by up
+to the 1 s debounce ceiling. A switch arrives as a deactivate/activate pair roughly
 20 ms apart, and the 300 ms debounce is what makes that one record instead of two.
 
 `state_change` reports that something about the screen changed without focus moving: a title
@@ -684,8 +688,10 @@ leaving the record durable in the buffer to ship on wake.
 
 `NIKKI_TEST_EVENTS=<path>` makes the event thread read newline-delimited event values from that file
 instead of registering OS sources. Without this seam the entire event half of the daemon could only
-be exercised by a human doing things on a Mac. Each line is tab-separated and named by its first
-field:
+be exercised by a human doing things on a Mac. The scripted file is the **only** event source in that
+mode: the per-tick re-scan attaches no Accessibility observers, so a machine that has granted
+Accessibility cannot mix live activations and title changes into a scripted run. Each line is
+tab-separated and named by its first field:
 
 ```
 application_activated <pid> [name] [bundle_id]
