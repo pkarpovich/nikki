@@ -3,6 +3,7 @@ mod extract;
 mod macos;
 mod providers;
 mod runtime;
+mod service;
 mod window;
 
 use std::env::var_os;
@@ -33,13 +34,39 @@ struct Args {
     /// load and validate the configuration, then exit
     #[argh(switch)]
     check_config: bool,
+    #[argh(subcommand)]
+    command: Option<Service>,
 }
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum Service {
+    Install(Install),
+    Uninstall(Uninstall),
+}
+
+/// copy this binary to a stable path and run it as a launchd agent, so macOS permissions survive an upgrade
+#[derive(FromArgs)]
+#[argh(subcommand, name = "install")]
+struct Install {}
+
+/// unload the launchd agent and remove what install wrote, leaving captured data alone
+#[derive(FromArgs)]
+#[argh(subcommand, name = "uninstall")]
+struct Uninstall {}
 
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let Args { check_config } = argh::from_env();
+    let Args {
+        check_config,
+        command,
+    } = argh::from_env();
+
+    if let Some(command) = command {
+        return run_service(command);
+    }
 
     let paths = match Paths::from_env() {
         Ok(paths) => paths,
@@ -98,6 +125,41 @@ async fn main() -> ExitCode {
             tracing::error!(%reason, "nikki stopped");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn run_service(command: Service) -> ExitCode {
+    match command {
+        Service::Install(Install {}) => match service::install() {
+            Ok(layout) => {
+                let service::Layout { binary, agent, .. } = &layout;
+                tracing::info!(
+                    binary = %binary.display(),
+                    agent = %agent.display(),
+                    "nikki is installed and running"
+                );
+                tracing::info!(
+                    path = %binary.display(),
+                    "grant Accessibility to this path, not to the Homebrew one"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                tracing::error!(%error, "nikki could not be installed");
+                ExitCode::FAILURE
+            }
+        },
+        Service::Uninstall(Uninstall {}) => match service::uninstall() {
+            Ok(layout) => {
+                let service::Layout { agent, .. } = &layout;
+                tracing::info!(agent = %agent.display(), "nikki is uninstalled");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                tracing::error!(%error, "nikki could not be uninstalled");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
 

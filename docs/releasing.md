@@ -34,13 +34,20 @@ and rewrites `Formula/nikki.rb` in `pkarpovich/homebrew-apps`.
 
 ```sh
 curl -sfL https://raw.githubusercontent.com/pkarpovich/homebrew-apps/main/Formula/nikki.rb
-brew update && brew upgrade nikki && brew services restart nikki
+brew update && brew upgrade nikki && nikki install
 nikki --check-config
-tail -f "$(brew --prefix)/var/log/nikki.log"
+tail -f ~/Library/Logs/nikki.log
 ```
 
 The `sha256` in the formula has to match `checksums.txt` on the release. After a
 restart the log carries one `nikki started` line and records resume within a tick.
+
+`nikki install` is not optional on an upgrade: Homebrew replaces the Cellar binary,
+while the launchd agent runs the copy at
+`~/Library/Application Support/nikki/bin/nikki`. Skip it and the old version keeps
+running with nothing in the log to say so - check the startup line's revision when
+in doubt. The step exists so the Accessibility grant survives the upgrade, which it
+does not when launchd runs the versioned Cellar path.
 
 ## Signing locally
 
