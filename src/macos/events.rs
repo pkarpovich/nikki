@@ -578,7 +578,7 @@ fn ax_notification_from_name(name: &str) -> Option<AxNotification> {
     None
 }
 
-fn ax_event<F>(notification: AxNotification, pid: i32, application_of: F) -> Option<MacEvent>
+pub fn ax_event<F>(notification: AxNotification, pid: i32, application_of: F) -> Option<MacEvent>
 where
     F: Fn(i32) -> Option<RunningApplication>,
 {

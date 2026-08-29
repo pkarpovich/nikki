@@ -574,6 +574,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc::{Receiver, UnboundedSender, channel, unbounded_channel};
 
+    use crate::macos::events::{AxNotification, ax_event};
     use crate::macos::window_list::Rect;
     use crate::providers::tests::test_ctx;
 
@@ -660,6 +661,10 @@ mod tests {
             layer: 0,
             z,
         }
+    }
+
+    fn no_application(_pid: i32) -> Option<RunningApplication> {
+        None
     }
 
     fn application(pid: i32, name: &str, bundle_id: &str) -> RunningApplication {
@@ -963,6 +968,45 @@ mod tests {
         assert_eq!(payload["display"], 1);
         assert!(payload.get("screen_locked").is_none());
         assert!(payload.get("display_asleep").is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deactivation_and_an_activation_twenty_milliseconds_apart_emit_one_focus_record() {
+        let (events, mut emissions) = start(sources(), LONG_TICK);
+        let dia = application(DIA_PID, "Dia", "company.thebrowser.dia");
+        let named = |pid: i32| match pid == DIA_PID {
+            true => Some(dia.clone()),
+            false => None,
+        };
+
+        if let Some(event) = ax_event(AxNotification::ApplicationDeactivated, ZED_PID, named) {
+            events.send(event).expect("the provider is listening");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let event = ax_event(AxNotification::ApplicationActivated, DIA_PID, named)
+            .expect("an activation describes an event");
+        events.send(event).expect("the provider is listening");
+
+        let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
+        assert_eq!(kind, Kind::Focus);
+        assert_eq!(payload["app"], "Dia");
+        assert_eq!(payload["bundle_id"], "company.thebrowser.dia");
+        assert!(emissions.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_title_change_on_the_focused_application_is_a_state_change_and_never_a_focus() {
+        let (events, mut emissions) = start(sources(), LONG_TICK);
+
+        let event = ax_event(AxNotification::TitleChanged, ZED_PID, no_application)
+            .expect("a title change describes an event");
+        events.send(event).expect("the provider is listening");
+
+        let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
+        assert_eq!(kind, Kind::StateChange);
+        assert_eq!(payload["app"], "Zed");
+        assert_eq!(payload["title"], "nikki — windows.rs");
+        assert!(emissions.try_recv().is_err());
     }
 
     #[tokio::test(start_paused = true)]

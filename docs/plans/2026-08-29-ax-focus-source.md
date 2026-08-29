@@ -130,16 +130,16 @@ knows nothing about the lock screen. The rule is worth copying; the dependency i
 - [x] run `cargo test` - must pass before task 5
 
 ### Task 5: Turn the notifications into records
-- [ ] map the observer callbacks into the existing `MacEvent` channel so they pass through the current
+- [x] map the observer callbacks into the existing `MacEvent` channel so they pass through the current
       300 ms debounce rather than emitting a record per notification
-- [ ] emit `focus` records on an application activation, with the payload the contract already
+- [x] emit `focus` records on an application activation, with the payload the contract already
       specifies - the kind exists and has never been used
-- [ ] let `AXTitleChanged` feed the existing `state_change` path instead of waiting for a tick to
+- [x] let `AXTitleChanged` feed the existing `state_change` path instead of waiting for a tick to
       notice a rewritten title
-- [ ] write a test that a deactivate/activate pair 20 ms apart produces one focus record, not two
-- [ ] write a test that a title change on the focused application produces a `state_change` and no
+- [x] write a test that a deactivate/activate pair 20 ms apart produces one focus record, not two
+- [x] write a test that a title change on the focused application produces a `state_change` and no
       `focus`
-- [ ] run `cargo test` - must pass before task 6
+- [x] run `cargo test` - must pass before task 6
 
 ### Task 6: Documentation
 - [ ] `README.md`: name Accessibility as the focus source, the window list as the filtered fallback,
