@@ -18,7 +18,7 @@ use crate::macos::events::{MacEvent, RescanHandle, SLEEP_FLUSH_BUDGET, SleepAckn
 use crate::macos::screen::{displays_asleep, screen_locked};
 use crate::macos::window_list::{
     DisplayEntry, RunningApplication, WindowEntry, bundle_id_for_pid, display_list,
-    frontmost_application, window_list,
+    frontmost_application, is_lock_screen, window_list,
 };
 use crate::runtime::{self, KeySource, Kind, RecordDraft, Timestamp};
 use crate::window::visibility::{VisibleWindow, visible_windows};
@@ -345,8 +345,8 @@ async fn assemble<S: Sources>(
     let visible = visible_windows(&windows, &displays);
 
     let application = match activated {
-        Some(application) => Some(application),
-        None => sources.frontmost(),
+        Some(application) if !is_lock_screen(&application) => Some(application),
+        _ => sources.frontmost(),
     };
     let Some(RunningApplication {
         pid,
@@ -581,6 +581,7 @@ mod tests {
     const ZED_PID: i32 = 501;
     const DIA_PID: i32 = 502;
     const TELEGRAM_PID: i32 = 503;
+    const LOGIN_WINDOW_PID: i32 = 504;
     const LONG_TICK: u64 = 3600;
 
     #[derive(Clone)]
@@ -979,9 +980,7 @@ mod tests {
             false => None,
         };
 
-        if let Some(event) = ax_event(AxNotification::ApplicationDeactivated, ZED_PID, named) {
-            events.send(event).expect("the provider is listening");
-        }
+        assert!(ax_event(AxNotification::ApplicationDeactivated, ZED_PID, named).is_none());
         tokio::time::sleep(Duration::from_millis(20)).await;
         let event = ax_event(AxNotification::ApplicationActivated, DIA_PID, named)
             .expect("an activation describes an event");
@@ -992,6 +991,22 @@ mod tests {
         assert_eq!(payload["app"], "Dia");
         assert_eq!(payload["bundle_id"], "company.thebrowser.dia");
         assert!(emissions.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_activation_of_the_lock_screen_reports_what_is_still_on_screen() {
+        let (events, mut emissions) = start(sources(), LONG_TICK);
+
+        events
+            .send(MacEvent::ApplicationActivated {
+                application: application(LOGIN_WINDOW_PID, "loginwindow", "com.apple.loginwindow"),
+            })
+            .expect("the provider is listening");
+
+        let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
+        assert_eq!(kind, Kind::Focus);
+        assert_eq!(payload["app"], "Zed");
+        assert_eq!(payload["bundle_id"], "dev.zed.Zed");
     }
 
     #[tokio::test(start_paused = true)]

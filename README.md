@@ -437,8 +437,11 @@ the moment of the switch, captured when the first event of the burst arrives, ra
 that noticed it up to `tick_interval` later. A switch arrives as a deactivate/activate pair roughly
 20 ms apart, and the 300 ms debounce is what makes that one record instead of two.
 
-`state_change` reports that something about the focused window changed without focus moving: a title
-rewrite, a window created or destroyed, a display reconfiguration. None of those fire an application
+`state_change` reports that something about the screen changed without focus moving: a title
+rewrite, a window created or destroyed, a display reconfiguration. The trigger need not belong to the
+focused application - one observer is attached per application owning a window, so a background window
+rewriting its title also emits one, and the body still describes whatever is focused when the debounce
+expires, with the background title carried in `visible`. None of those fire an application
 activation or a focus change, and a title rewrite is the only signal for switching files inside an
 editor, a build finishing and rewriting a terminal title, or switching between two already-loaded
 tabs in one browser window - which writes no history row either. The server breaks a coalesced run on

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ use objc2_core_graphics::{
 use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSString};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::ax::MESSAGING_TIMEOUT_SECONDS;
+use super::ax::{MESSAGING_TIMEOUT_SECONDS, accessibility_is_trusted};
 use super::window_list::{
     RunningApplication, WindowEntry, application_for_pid, running_application, window_list,
 };
@@ -150,7 +150,7 @@ struct SourceRef(CFRetained<CFRunLoopSource>);
 unsafe impl Send for SourceRef {}
 
 pub struct RescanHandle {
-    inbox: Arc<Inbox>,
+    inbox: Weak<Inbox>,
     source: CFRetained<CFRunLoopSource>,
     run_loop: CFRetained<CFRunLoop>,
 }
@@ -160,7 +160,10 @@ unsafe impl Sync for RescanHandle {}
 
 impl RescanHandle {
     pub fn request(&self) {
-        self.inbox.rescan.store(true, Ordering::SeqCst);
+        let Some(inbox) = self.inbox.upgrade() else {
+            return;
+        };
+        inbox.rescan.store(true, Ordering::SeqCst);
         self.source.signal();
         self.run_loop.wake_up();
     }
@@ -263,7 +266,7 @@ impl EventThread {
 
     pub fn rescan_handle(&self) -> RescanHandle {
         RescanHandle {
-            inbox: Arc::clone(&self.inbox),
+            inbox: Arc::downgrade(&self.inbox),
             source: self.source.0.clone(),
             run_loop: self.run_loop.0.clone(),
         }
@@ -690,6 +693,11 @@ unsafe extern "C-unwind" fn perform_source(info: *mut c_void) {
 }
 
 fn rescan_observers(state: &mut SourceState, present: &[i32]) {
+    if !accessibility_is_trusted() {
+        tracing::debug!("accessibility is not granted, so no application can be observed yet");
+        return;
+    }
+
     let mut attached = Vec::with_capacity(state.observers.len());
     for pid in state.observers.keys() {
         attached.push(*pid);

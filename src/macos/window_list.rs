@@ -174,7 +174,7 @@ where
     Some(application)
 }
 
-fn is_lock_screen(application: &RunningApplication) -> bool {
+pub fn is_lock_screen(application: &RunningApplication) -> bool {
     let RunningApplication { bundle_id, .. } = application;
     match bundle_id {
         Some(bundle_id) => bundle_id == LOCK_SCREEN_BUNDLE_ID,
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pid_accessibility_names_but_nobody_can_name_is_reported_degraded() {
+    fn a_pid_accessibility_names_but_nobody_can_name_is_reported_by_its_pid_alone() {
         let front = frontmost_of(Some(4321), &[], |_| None);
         assert_eq!(
             front,
