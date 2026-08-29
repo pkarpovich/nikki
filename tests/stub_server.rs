@@ -792,6 +792,20 @@ fn a_capture_run_matches_the_wire_contract() {
             tick["payload"]["tick_interval_sec"], 1,
             "a tick carries the wrong interval: {tick}"
         );
+        assert!(
+            tick["payload"]["screen_locked"].is_boolean(),
+            "a tick carries no `screen_locked`: {tick}"
+        );
+        assert!(
+            tick["payload"]["display_asleep"].is_boolean(),
+            "a tick carries no `display_asleep`: {tick}"
+        );
+
+        let mut older = tick.clone();
+        let payload = older["payload"].as_object_mut().expect("a tick payload");
+        payload.remove("screen_locked");
+        payload.remove("display_asleep");
+        check_payload(&older);
     }
 
     let changes = of_kind(&envelopes, "state_change");

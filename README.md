@@ -334,6 +334,8 @@ section, and any change here must be mirrored there in the same pass.**
         "keys_delta": 184,
         "mouse_delta": 22,
         "mic_active": false,
+        "screen_locked": false,
+        "display_asleep": false,
         "visible": [
           {"app": "Dia", "bundle_id": "company.thebrowser.dia", "title": "Home – Home Assistant", "title_reason": null, "display": 2, "z": 1},
           {"app": "Telegram", "bundle_id": "ru.keepcoder.Telegram", "title": null, "title_reason": "ambiguous", "display": 2, "z": 4}
@@ -377,7 +379,7 @@ retried** - so a kind missing from this table is destroyed permanently the first
 
 | provider | kind | required payload fields | optional |
 |---|---|---|---|
-| `windows` | `tick` | `app`, `bundle_id`, `display`, `tick_interval_sec`, `idle_sec`, `keys_delta`, `mouse_delta`, `mic_active`, `visible` | `title`, `path`, `details` |
+| `windows` | `tick` | `app`, `bundle_id`, `display`, `tick_interval_sec`, `idle_sec`, `keys_delta`, `mouse_delta`, `mic_active`, `visible` | `title`, `path`, `details`, `screen_locked`, `display_asleep` |
 | `windows` | `focus` | `app`, `bundle_id`, `display` | `title`, `path`, `details`, `visible` |
 | `windows` | `state_change` | `app`, `bundle_id`, `display` | `title`, `path`, `details`, `visible` |
 | `windows` | `lock`, `unlock`, `sleep`, `wake` | none | none |
@@ -399,6 +401,31 @@ activation or a focus change, and a title rewrite is the only signal for switchi
 editor, a build finishing and rewriting a terminal title, or switching between two already-loaded
 tabs in one browser window - which writes no history row either. The server breaks a coalesced run on
 it and gives it no duration; the tick that follows opens the run where the duration lives.
+
+`screen_locked` and `display_asleep` ride on `tick` alone and are what tells "sitting here reading"
+apart from "walked away". `screen_locked` is the login session's own lock state, read from
+`CGSessionCopyCurrentDictionary()`; the key it reports is present only while the session is locked, so
+an absent key, a value that is not a boolean and a missing dictionary all read as unlocked, because a
+wrong `true` would mark a working hour as absence. `display_asleep` is the physical panel, read per
+display from `CGDisplayIsAsleep`, and is true only when there is at least one connected display and
+**every** one of them is asleep - an external monitor sleeping beside a lit laptop panel is not a dark
+screen. The displays are enumerated with `CGGetOnlineDisplayList` rather than the active list the
+window side uses, because a display is active only while it is *awake* and drawable: enumerating the
+active list would drop the very panel whose sleep is being reported, and the field would never read
+true. The two are independent: a machine locks with its panel still lit, sleeps its panel on idle
+without ever locking, and reports the pair in whichever combination the machine is actually in. Both
+are marked optional so the addition stays additive in both directions - a new daemon reporting to an
+old server and an old daemon reporting to a new one both keep working - but this daemon emits them on
+every tick.
+
+They supersede the `lock` and `unlock` record kinds for the purpose of marking an unattended span.
+Those kinds remain in the table above and keep their meaning - the event thread still registers the
+`com.apple.screenIsLocked` and `screenIsUnlocked` observers, and `sleep` in particular is still what
+the service's liveness rule reads - but none of them arrived during the night that motivated this
+change, and an edge-triggered record cannot describe a machine that was already locked when the
+daemon started. The polled fields are level rather than edge triggered, so every tick answers for
+itself regardless of which notifications were delivered. The sibling change in turtle-hub carries this
+identical section.
 
 Bodies for the kinds not shown above:
 
@@ -603,6 +630,7 @@ src/macos/             every unsafe block in the crate
   ax.rs                Accessibility: elements, titles, AXDocument, messaging timeout
   window_list.rs       CGWindowList, CGDisplayBounds, frontmost application, bundle id for pid
   activity.rs          idle seconds, input counters, microphone, cursor display
+  screen.rs            the session lock state and per-display sleep
   processes.rs         the process table: argv, environment, controlling tty, cwd, agterm panes
   events.rs            the CFRunLoop thread and every notification source
 src/window/visibility.rs  the pure visible-set resolver

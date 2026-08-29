@@ -15,6 +15,7 @@ use crate::macos::activity::{
 };
 use crate::macos::ax::{AxApplication, accessibility_is_trusted};
 use crate::macos::events::{MacEvent, SLEEP_FLUSH_BUDGET, SleepAcknowledgement};
+use crate::macos::screen::{displays_asleep, screen_locked};
 use crate::macos::window_list::{
     DisplayEntry, RunningApplication, WindowEntry, bundle_id_for_pid, display_list,
     frontmost_application, window_list,
@@ -48,6 +49,8 @@ pub struct Activity {
     pub idle_sec: i64,
     pub counters: InputCounters,
     pub mic_active: bool,
+    pub screen_locked: bool,
+    pub display_asleep: bool,
 }
 
 pub trait Sources: Send + Sync + 'static {
@@ -115,6 +118,8 @@ impl Sources for MacSources {
             idle_sec: idle_seconds(),
             counters: input_counters(),
             mic_active: microphone_active(),
+            screen_locked: screen_locked(),
+            display_asleep: displays_asleep(),
         }
     }
 
@@ -495,6 +500,8 @@ fn tick_record(
         idle_sec,
         counters: _,
         mic_active,
+        screen_locked,
+        display_asleep,
     } = activity;
     let InputDelta { keys, mouse } = delta;
 
@@ -504,6 +511,8 @@ fn tick_record(
     payload.insert("keys_delta".to_string(), json!(keys));
     payload.insert("mouse_delta".to_string(), json!(mouse));
     payload.insert("mic_active".to_string(), json!(mic_active));
+    payload.insert("screen_locked".to_string(), json!(screen_locked));
+    payload.insert("display_asleep".to_string(), json!(display_asleep));
 
     RecordDraft {
         provider: runtime::Provider::Windows,
@@ -698,6 +707,8 @@ mod tests {
                     mouse: 40_000,
                 },
                 mic_active: false,
+                screen_locked: false,
+                display_asleep: false,
             })),
             details: Details::new(),
             detail_calls: Arc::new(Mutex::new(Vec::new())),
@@ -752,6 +763,8 @@ mod tests {
         assert_eq!(payload["tick_interval_sec"], 30);
         assert_eq!(payload["idle_sec"], 3);
         assert_eq!(payload["mic_active"], false);
+        assert_eq!(payload["screen_locked"], false);
+        assert_eq!(payload["display_asleep"], false);
         assert_eq!(
             payload["visible"].as_array().expect("a visible set").len(),
             3
@@ -775,6 +788,8 @@ mod tests {
                 mouse: 40_022,
             },
             mic_active: true,
+            screen_locked: false,
+            display_asleep: false,
         };
 
         let RecordDraft { payload, .. } = one_record(&mut emissions).await;
@@ -803,6 +818,8 @@ mod tests {
                 mouse: 40_010,
             },
             mic_active: false,
+            screen_locked: false,
+            display_asleep: false,
         };
         tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -817,11 +834,56 @@ mod tests {
                 mouse: 40_015,
             },
             mic_active: false,
+            screen_locked: false,
+            display_asleep: false,
         };
 
         let RecordDraft { payload, .. } = one_record(&mut emissions).await;
         assert_eq!(payload["keys_delta"], 150);
         assert_eq!(payload["mouse_delta"], 15);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tick_reads_the_screen_state_its_source_reports() {
+        let sources = sources();
+        let activity = Arc::clone(&sources.activity);
+        *activity.lock().expect("the activity is poisoned") = Activity {
+            idle_sec: 600,
+            counters: InputCounters {
+                keys: 900_000,
+                mouse: 40_000,
+            },
+            mic_active: false,
+            screen_locked: true,
+            display_asleep: true,
+        };
+        let (_events, mut emissions) = start(sources, 30);
+
+        let RecordDraft { kind, payload, .. } = one_record(&mut emissions).await;
+        assert_eq!(kind, Kind::Tick);
+        assert_eq!(payload["screen_locked"], true);
+        assert_eq!(payload["display_asleep"], true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_locked_session_with_a_lit_panel_reports_the_lock_alone() {
+        let sources = sources();
+        let activity = Arc::clone(&sources.activity);
+        *activity.lock().expect("the activity is poisoned") = Activity {
+            idle_sec: 30,
+            counters: InputCounters {
+                keys: 900_000,
+                mouse: 40_000,
+            },
+            mic_active: false,
+            screen_locked: true,
+            display_asleep: false,
+        };
+        let (_events, mut emissions) = start(sources, 30);
+
+        let RecordDraft { payload, .. } = one_record(&mut emissions).await;
+        assert_eq!(payload["screen_locked"], true);
+        assert_eq!(payload["display_asleep"], false);
     }
 
     #[tokio::test(start_paused = true)]
@@ -852,6 +914,8 @@ mod tests {
         assert_eq!(payload["app"], "Dia");
         assert_eq!(payload["bundle_id"], "company.thebrowser.dia");
         assert_eq!(payload["display"], 1);
+        assert!(payload.get("screen_locked").is_none());
+        assert!(payload.get("display_asleep").is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -872,6 +936,8 @@ mod tests {
             assert_eq!(payload["app"], "Zed");
             assert_eq!(payload["bundle_id"], "dev.zed.Zed");
             assert_eq!(payload["display"], 0);
+            assert!(payload.get("screen_locked").is_none());
+            assert!(payload.get("display_asleep").is_none());
         }
     }
 
