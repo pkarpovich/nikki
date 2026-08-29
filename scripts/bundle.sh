@@ -30,8 +30,17 @@ app="$out_dir/$APP"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 
-sed "s/__VERSION__/$version/g" "$root/Info.plist.template" > "$app/Contents/Info.plist"
-plutil -lint "$app/Contents/Info.plist"
+plist="$app/Contents/Info.plist"
+sed "s/__VERSION__/$version/g" "$root/Info.plist.template" > "$plist"
+
+# Bundle-only keys, deliberately absent from Info.plist.template because build.rs
+# embeds that template into the bare binary's __TEXT,__info_plist. Declaring a
+# loose daemon an APPL bundle makes macOS treat it as a UI application, and on a
+# machine with no window server it then stops producing records at all.
+/usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string nikki" "$plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$plist"
+/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$plist"
+plutil -lint "$plist"
 cp "$binary" "$app/Contents/MacOS/nikki"
 
 # The bundle is what makes a macOS permission durable: TCC identifies a bundle by
