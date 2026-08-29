@@ -664,9 +664,11 @@ have its observer detached and the switch back to it - the moment that most need
 would deliver nothing, because its window only becomes on-screen after the switch. Measured on this
 machine: 15 applications with an on-screen window against 24 with any window. The full list also
 carries the panels and view services that never hold focus, so the owners are filtered to
-`NSApplicationActivationPolicy.regular` - 63 window owners down to those 24 - which is the same
-question the `app` field asks, "something a person can be in", answered per pid rather than by bundle
-id. The same pass detaches and releases the observer of a pid that no longer owns a window,
+`NSApplicationActivationPolicy.regular` - 63 window owners down to those 24. That filter is stricter
+than the one the `app` field uses, which asks only for a non-empty bundle id: an accessory application
+that hides from the Dock can be named by a tick and yet own no observer, so a switch to it is noticed
+at the next tick rather than the moment it happens. The same pass detaches and releases the observer
+of a pid that no longer owns a window,
 so a daemon running for weeks does not accumulate them. An application that refuses Accessibility -
 two of nineteen on this machine - is warned about once and remembered as refusing, so it is not
 retried on every pass; it is invisible to focus events for as long as it runs, and only the tick,

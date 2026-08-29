@@ -190,12 +190,12 @@ impl<S: Sources> Provider for WindowProvider<S> {
                             pending = Some(schedule(pending, kind, application, at));
                         }
                         Signal::Marker { kind } => {
-                            if out.send(Emission::new(vec![marker(kind)])).await.is_err() {
+                            if out.send(Emission::new(vec![marker(kind, at)])).await.is_err() {
                                 return Ok(());
                             }
                         }
                         Signal::Sleep { acknowledgement } => {
-                            deliver_sleep(&out, acknowledgement).await;
+                            deliver_sleep(&out, at, acknowledgement).await;
                         }
                     }
                 }
@@ -327,8 +327,12 @@ async fn wait_until(deadline: Option<Instant>) {
     sleep_until(deadline).await;
 }
 
-async fn deliver_sleep(out: &Sender<Emission>, acknowledgement: SleepAcknowledgement) {
-    let (emission, committed) = Emission::awaiting_commit(vec![marker(Kind::Sleep)], None);
+async fn deliver_sleep(
+    out: &Sender<Emission>,
+    ts: Timestamp,
+    acknowledgement: SleepAcknowledgement,
+) {
+    let (emission, committed) = Emission::awaiting_commit(vec![marker(Kind::Sleep, ts)], None);
     if out.send(emission).await.is_err() {
         acknowledgement.acknowledge();
         return;
@@ -485,11 +489,11 @@ fn visible_entries<S: Sources>(
     entries
 }
 
-fn marker(kind: Kind) -> RecordDraft {
+fn marker(kind: Kind, ts: Timestamp) -> RecordDraft {
     RecordDraft {
         provider: runtime::Provider::Windows,
         kind,
-        ts: Timestamp::now(),
+        ts,
         degraded: false,
         payload: json!({}),
         key: KeySource::Windows,
@@ -1004,6 +1008,18 @@ mod tests {
         let RecordDraft { kind, ts, .. } = one_record(&mut emissions).await;
         assert_eq!(kind, Kind::Focus);
         assert_eq!(ts, switched);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lock_marker_carries_the_moment_the_lock_was_observed_not_the_moment_it_was_read() {
+        let (events, mut emissions) = start(sources(), LONG_TICK);
+        let locked = Timestamp::from_millis(1_756_000_000_000);
+
+        observed_at(&events, locked, MacEvent::ScreenLocked);
+
+        let RecordDraft { kind, ts, .. } = one_record(&mut emissions).await;
+        assert_eq!(kind, Kind::Lock);
+        assert_eq!(ts, locked);
     }
 
     #[tokio::test(start_paused = true)]
