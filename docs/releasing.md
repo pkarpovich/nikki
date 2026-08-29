@@ -1,15 +1,17 @@
 # Releasing
 
 A release is a tag. Everything after the tag is CI: `.github/workflows/release.yml`
-builds for `aarch64-apple-darwin`, checks the embedded `Info.plist` survived, signs
-with the Developer ID, publishes a GitHub Release with the tarball and its checksum,
-and rewrites `Formula/nikki.rb` in `pkarpovich/homebrew-apps`.
+builds for `aarch64-apple-darwin`, checks the embedded `Info.plist` survived,
+assembles and signs `Nikki.app` with the Developer ID, publishes a GitHub Release
+with the zipped app and its checksum, and rewrites `Casks/nikki.rb` in
+`pkarpovich/homebrew-apps`.
 
 ## Steps
 
 1. Bump `version` in `Cargo.toml` and let `cargo` update `Cargo.lock`. Do it in a
    pull request together with whatever is being released - CI refuses a tag whose
-   version disagrees with the crate.
+   version disagrees with the crate. The version also lands in the app bundle's
+   `Info.plist`, which `scripts/bundle.sh` renders from `Info.plist.template`.
 2. Merge the pull request.
 3. Tag the merge commit on `main` and push the tag:
 
@@ -34,13 +36,25 @@ and rewrites `Formula/nikki.rb` in `pkarpovich/homebrew-apps`.
 
 ```sh
 curl -sfL https://raw.githubusercontent.com/pkarpovich/homebrew-apps/main/Formula/nikki.rb
-brew update && brew upgrade nikki && brew services restart nikki
+curl -sfL https://raw.githubusercontent.com/pkarpovich/homebrew-apps/main/Casks/nikki.rb
+brew update && brew upgrade --cask nikki
 nikki --check-config
-tail -f "$(brew --prefix)/var/log/nikki.log"
+tail -f ~/Library/Logs/nikki.log
 ```
 
-The `sha256` in the formula has to match `checksums.txt` on the release. After a
+The `sha256` in the cask has to match `checksums.txt` on the release. After a
 restart the log carries one `nikki started` line and records resume within a tick.
+
+An upgrade needs no `nikki install`: the cask replaces `/Applications/Nikki.app`
+in place and the agent already points inside it. That is the whole reason the
+release ships an app bundle rather than a bare binary - macOS keys an
+Accessibility grant to a bundle id at a fixed path, and to the absolute path
+alone for a loose binary, which Homebrew changes with every version.
+
+The release publishes `Nikki-arm64-<version>.zip` and rewrites `Casks/nikki.rb`
+in the tap, deleting `Formula/nikki.rb` if it is still there. The app is signed
+with the Developer ID but not notarized, so a first launch from a quarantined
+download needs one pass through System Settings > Privacy & Security.
 
 ## Signing locally
 

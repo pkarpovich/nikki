@@ -71,9 +71,11 @@ jobs:
           p12-file-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
           p12-password: ${{ secrets.MACOS_CERT_PASSWORD }}
 
-      # Hardened runtime and a timestamp, matching scripts/build-signed.sh, so a
-      # binary from CI and one built locally carry the same identity.
-      - name: Sign
+      # The app bundle is the whole point of shipping a cask: TCC identifies a
+      # bundle by its identifier at a path that never moves, and a loose binary
+      # by its path alone - which Homebrew changes on every version, losing the
+      # Accessibility grant on each upgrade.
+      - name: Bundle and sign
         env:
           TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
         run: |
@@ -84,16 +86,15 @@ jobs:
             echo "no Developer ID Application identity for team $TEAM_ID" >&2
             exit 1
           fi
-          binary="target/$TARGET/release/nikki"
-          codesign --force --timestamp --options runtime \
-            --identifier "$BUNDLE_ID" --sign "$identity" "$binary"
-          codesign --verify --strict --verbose=2 "$binary"
+          mkdir -p dist
+          ./scripts/bundle.sh "target/$TARGET/release/nikki" dist "$identity"
 
       - name: Package
         run: |
-          mkdir -p dist
-          tar -czf "dist/nikki-$TARGET.tar.gz" -C "target/$TARGET/release" nikki
-          cd dist && shasum -a 256 *.tar.gz > checksums.txt && cat checksums.txt
+          version="${GITHUB_REF_NAME#v}"
+          ditto -c -k --keepParent dist/Nikki.app "dist/Nikki-arm64-$version.zip"
+          rm -rf dist/Nikki.app
+          cd dist && shasum -a 256 *.zip > checksums.txt && cat checksums.txt
 
       - uses: actions/upload-artifact@v7
         with:
@@ -114,11 +115,11 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           files: |
-            dist/*.tar.gz
+            dist/*.zip
             dist/checksums.txt
           generate_release_notes: true
 
-  formula:
+  cask:
     needs: release
     runs-on: ubuntu-latest
     steps:
@@ -131,8 +132,9 @@ jobs:
         id: facts
         run: |
           {
-            echo "version=${GITHUB_REF_NAME#v}"
-            echo "sha=$(shasum -a 256 "dist/nikki-$TARGET.tar.gz" | cut -d' ' -f1)"
+            version="${GITHUB_REF_NAME#v}"
+            echo "version=$version"
+            echo "sha=$(shasum -a 256 "dist/Nikki-arm64-$version.zip" | cut -d' ' -f1)"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7
@@ -141,72 +143,79 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
-      - name: Write the formula
+      - name: Write the cask
         env:
           VERSION: ${{ steps.facts.outputs.version }}
           SHA: ${{ steps.facts.outputs.sha }}
         run: |
-          cat > tap/Formula/nikki.rb <<EOF
-          class Nikki < Formula
-            desc "macOS activity capture daemon"
-            homepage "https://github.com/pkarpovich/nikki"
+          rm -f tap/Formula/nikki.rb
+          mkdir -p tap/Casks
+          cat > tap/Casks/nikki.rb <<EOF
+          cask "nikki" do
             version "${VERSION}"
-            license "MIT"
-
-            depends_on arch: :arm64
-            depends_on :macos
-
-            url "https://github.com/pkarpovich/nikki/releases/download/v${VERSION}/nikki-${TARGET}.tar.gz"
             sha256 "${SHA}"
 
-            def install
-              bin.install "nikki"
-            end
+            url "https://github.com/pkarpovich/nikki/releases/download/v#{version}/Nikki-arm64-#{version}.zip"
+            name "nikki"
+            desc "macOS activity capture daemon"
+            homepage "https://github.com/pkarpovich/nikki"
 
-            # Homebrew writes and loads the LaunchAgent itself, so launchd is the
-            # responsible process for TCC and both grants land on nikki rather
-            # than on whatever terminal started it.
-            service do
-              run [opt_bin/"nikki"]
-              keep_alive true
-              log_path var/"log/nikki.log"
-              error_log_path var/"log/nikki.err.log"
-            end
+            depends_on arch: :arm64
 
-            def caveats
-              <<~CAVEATS
-                Write ~/.config/nikki/config.toml BEFORE starting the service.
-                service_url and device are required and the daemon exits without
-                them, which under keep_alive is a restart loop. The full set of
-                keys is in the README; the minimum is:
+            # The app is what makes the macOS permissions durable. TCC identifies a
+            # bundle by its identifier at a path that never moves, and a loose binary
+            # by its path alone - so the Homebrew formula this cask replaced lost the
+            # Accessibility grant on every upgrade, the Cellar path carrying the
+            # version. The binary stanza keeps \`nikki\` on PATH, pointing inside the
+            # app rather than at a copy, so an upgrade replaces both at once.
+            app "Nikki.app"
+            binary "#{appdir}/Nikki.app/Contents/MacOS/nikki"
 
-                  service_url = "https://nikki.example"
-                  device = "mbp-21"
+            caveats <<~CAVEATS
+              Write ~/.config/nikki/config.toml BEFORE installing the service.
+              service_url and device are required and the daemon exits without
+              them, which under keep_alive is a restart loop. The full set of
+              keys is in the README; the minimum is:
 
-                  [browser]
-                  profile = "MBP_21"
+                service_url = "https://nikki.example"
+                device = "mbp-21"
 
-                Then:
+                [browser]
+                profile = "MBP_21"
 
-                  nikki --check-config
-                  brew services start nikki
+              Then:
 
-                Grant Accessibility to nikki in System Settings > Privacy &
-                Security, then restart the service - macOS caches the denial for
-                the life of the process, so the grant does not take until
-                `brew services restart nikki`. Without it capture continues, but
-                every window title and document path is null and the records
-                carry degraded: true.
+                nikki --check-config
+                nikki install
 
-                The first time it reads a browser tab macOS asks for Automation
-                access to Dia. Declining is permanent for this binary and the
-                only symptom is a -1743 in the log.
-              CAVEATS
-            end
+              \`nikki install\` writes the launchd agent dev.pkarpovich.nikki and
+              starts it. It also unloads and removes the agent \`brew services\`
+              used to write, so the two never run at once. An upgrade replaces
+              the app in place and needs nothing further.
 
-            test do
-              assert_match "nikki captures what happens on this Mac", shell_output("#{bin}/nikki --help")
-            end
+              Grant Accessibility to Nikki in System Settings > Privacy &
+              Security, then \`nikki install\` once more - macOS caches the denial
+              for the life of the process. Without it capture continues, but every
+              window title and document path is null and the records carry
+              degraded: true. The grant survives upgrades: the app is identified
+              by its bundle id at a path that does not move.
+
+              The first time it reads a browser tab macOS asks for Automation
+              access to Dia. Declining is permanent for this binary and the only
+              symptom is a -1743 in the log.
+
+              Logs are at ~/Library/Logs/nikki.log and nikki.err.log.
+            CAVEATS
+
+            uninstall quit:      "dev.pkarpovich.nikki",
+                      launchctl: "dev.pkarpovich.nikki"
+
+            zap trash: [
+              "~/.config/nikki",
+              "~/Library/Application Support/nikki",
+              "~/Library/Logs/nikki.log",
+              "~/Library/Logs/nikki.err.log",
+            ]
           end
           EOF
 

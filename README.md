@@ -14,12 +14,31 @@ elsewhere, from the service API.
 ## Install
 
 ```
-brew install pkarpovich/apps/nikki
+brew install --cask pkarpovich/apps/nikki
+nikki install
 ```
 
-Write `~/.config/nikki/config.toml` **before** starting the service - `service_url` and `device` are
-required and the daemon exits without them, which under Homebrew's `keep_alive` is a restart loop.
-Then `nikki --check-config`, `brew services start nikki`, and grant Accessibility when macOS asks.
+Write `~/.config/nikki/config.toml` **before** installing the service - `service_url` and `device`
+are required and the daemon exits without them, which under `keep_alive` is a restart loop. Then
+`nikki --check-config`, `nikki install`, and grant Accessibility to Nikki.
+
+The cask puts `Nikki.app` in `/Applications` and puts `nikki` on `PATH` as a symlink into it, so the
+CLI and the daemon are the same binary. `nikki install` writes the launchd agent
+`dev.pkarpovich.nikki` against that app, logging to `~/Library/Logs/nikki.log`, and unloads and
+removes the agent `brew services` used to write so the two never run at once. `nikki uninstall`
+reverses it and leaves the app and the captured data alone. **An upgrade needs nothing further** -
+Homebrew replaces the app in place and the agent already points at it.
+
+**Why a cask and not a formula.** macOS identifies a bundle by its bundle id at a path that never
+moves, and a loose binary by its absolute path alone. A formula installs into a versioned Cellar
+directory, so `0.2.0` becoming `0.3.0` was a different program to TCC and the Accessibility grant was
+lost - three upgrades in a row. `yabai` lives with the same thing and its upgrade instructions say to
+uninstall the service first "because homebrew changes binary path". The app bundle removes the
+problem rather than working around it.
+
+Migrating from the formula: `brew uninstall nikki`, then install the cask and run `nikki install`.
+The grant resets once more on the move, because the path changes one last time. If `nikki` is in a
+Brewfile, it becomes a `cask` line without `restart_service:`.
 
 Releases are cut by tagging; see `docs/releasing.md`.
 
@@ -61,7 +80,7 @@ environment variable is recorded, logged or shipped, and an argv reaches a recor
 the tree calls active and visible. The call fails for setuid and hardened binaries (`sudo`, `top`), which
 is a normal outcome and never logged per tick.
 
-Run the daemon under launchd (`brew services start nikki`), not from a terminal. macOS attributes a
+Run the daemon under launchd (`nikki install`), not from a terminal. macOS attributes a
 TCC grant to the *responsible* process, and a binary launched from an already-trusted terminal
 inherits that terminal's trust instead of asking for its own - so the grant lands on the terminal,
 and the daemon loses it the moment launchd starts it for real.
@@ -69,9 +88,11 @@ and the daemon loses it the moment launchd starts it for real.
 **Restart the service after granting Accessibility.** No prompt is raised - the daemon asks
 `AXIsProcessTrusted` without the prompting option, because a background agent that pops a dialog on
 every start is worse than one that logs what it is missing - so the checkbox is ticked by hand, and
-macOS caches the denial for the life of the process. Until `brew services restart nikki` the daemon
-keeps running as if nothing was granted, and the only place that says so is the `accessibility=false`
-field on the startup line.
+macOS caches the denial for the life of the process. Until the agent is reloaded - `nikki install`
+runs the whole sequence again and is the simplest way - the daemon keeps running as if nothing was
+granted, and the only place that says so is the `accessibility=false` field on the startup line.
+The grant itself survives upgrades, because the app's identity is its bundle id and its path does
+not move.
 
 **Screen Recording is deliberately never requested.** Holding it triggers a macOS re-consent dialog
 roughly monthly which cannot be disabled, in exchange for `kCGWindowName` - a field this design gets
