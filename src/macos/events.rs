@@ -31,7 +31,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::ax::{MESSAGING_TIMEOUT_SECONDS, accessibility_is_trusted};
 use super::window_list::{
-    RunningApplication, WindowEntry, application_for_pid, running_application, window_list,
+    RunningApplication, WindowEntry, application_for_pid, every_window, is_regular_application,
+    running_application,
 };
 
 pub const SLEEP_FLUSH_BUDGET: Duration = Duration::from_secs(2);
@@ -635,13 +636,19 @@ fn observer_plan(attached: &[i32], refused: &[i32], present: &[i32]) -> Observer
     plan
 }
 
-fn application_pids(windows: &[WindowEntry]) -> Vec<i32> {
+fn application_pids<F>(windows: &[WindowEntry], is_application: F) -> Vec<i32>
+where
+    F: Fn(i32) -> bool,
+{
     let mut pids = Vec::new();
     for window in windows {
         let WindowEntry {
             owner_pid, layer, ..
         } = window;
         if *layer != 0 || pids.contains(owner_pid) {
+            continue;
+        }
+        if !is_application(*owner_pid) {
             continue;
         }
         pids.push(*owner_pid);
@@ -689,7 +696,10 @@ unsafe extern "C-unwind" fn perform_source(info: *mut c_void) {
     if !state.inbox.rescan.swap(false, Ordering::SeqCst) {
         return;
     }
-    rescan_observers(state, &application_pids(&window_list()));
+    rescan_observers(
+        state,
+        &application_pids(&every_window(), is_regular_application),
+    );
 }
 
 fn rescan_observers(state: &mut SourceState, present: &[i32]) {
@@ -1015,6 +1025,10 @@ mod tests {
         }
     }
 
+    fn every_owner_is_an_application(_pid: i32) -> bool {
+        true
+    }
+
     #[test]
     fn the_owners_of_ordinary_windows_are_the_applications_to_observe() {
         let windows = vec![
@@ -1023,12 +1037,21 @@ mod tests {
             owned(20, 0, 2),
             owned(10, 0, 3),
         ];
-        assert_eq!(application_pids(&windows), vec![10, 20]);
+        assert_eq!(
+            application_pids(&windows, every_owner_is_an_application),
+            vec![10, 20]
+        );
+    }
+
+    #[test]
+    fn an_owner_that_is_not_an_application_is_never_observed() {
+        let windows = vec![owned(10, 0, 0), owned(77, 0, 1), owned(20, 0, 2)];
+        assert_eq!(application_pids(&windows, |pid| pid != 77), vec![10, 20]);
     }
 
     #[test]
     fn a_machine_without_windows_has_nothing_to_observe() {
-        assert!(application_pids(&[]).is_empty());
+        assert!(application_pids(&[], every_owner_is_an_application).is_empty());
     }
 
     fn describe_scripted(item: &Injected) -> (&'static str, i32) {

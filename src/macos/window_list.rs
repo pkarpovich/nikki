@@ -1,4 +1,4 @@
-use objc2_app_kit::NSRunningApplication;
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGGetActiveDisplayList,
@@ -76,8 +76,16 @@ pub struct RunningApplication {
 }
 
 pub fn window_list() -> Vec<WindowEntry> {
-    let options =
-        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements;
+    windows_matching(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+    )
+}
+
+pub fn every_window() -> Vec<WindowEntry> {
+    windows_matching(CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements)
+}
+
+fn windows_matching(options: CGWindowListOption) -> Vec<WindowEntry> {
     let Some(entries) = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
         return Vec::new();
     };
@@ -188,6 +196,14 @@ fn is_application(application: &RunningApplication) -> bool {
         Some(bundle_id) => !bundle_id.is_empty(),
         None => false,
     }
+}
+
+pub(super) fn is_regular_application(pid: i32) -> bool {
+    let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+    else {
+        return false;
+    };
+    application.activationPolicy() == NSApplicationActivationPolicy::Regular
 }
 
 pub(super) fn application_for_pid(pid: i32) -> Option<RunningApplication> {

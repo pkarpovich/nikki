@@ -653,7 +653,16 @@ an activation follows, so it produces no event of its own.
 
 **Every tick asks the thread to re-scan the window owners**, which is how an application launched
 after startup gets an observer - without the re-scan a switch to a pid never attached to produces no
-event at all. The same pass detaches and releases the observer of a pid that no longer owns a window,
+event at all. That scan reads the window list **without** `kCGWindowListOptionOnScreenOnly`, unlike
+sample assembly, which wants only what is painted. On-screen alone would attach an observer to what is
+visible on the current Space, so an application that is minimized, hidden or on another Space would
+have its observer detached and the switch back to it - the moment that most needs a `focus` record -
+would deliver nothing, because its window only becomes on-screen after the switch. Measured on this
+machine: 15 applications with an on-screen window against 24 with any window. The full list also
+carries the panels and view services that never hold focus, so the owners are filtered to
+`NSApplicationActivationPolicy.regular` - 63 window owners down to those 24 - which is the same
+question the `app` field asks, "something a person can be in", answered per pid rather than by bundle
+id. The same pass detaches and releases the observer of a pid that no longer owns a window,
 so a daemon running for weeks does not accumulate them. An application that refuses Accessibility -
 two of nineteen on this machine - is warned about once and remembered as refusing, so it is not
 retried on every pass; it is invisible to focus events for as long as it runs, and only the tick,
@@ -700,7 +709,7 @@ delivered in one drain, so it scripts a burst rather than a timeline.
 src/config.rs          config parsing and validation
 src/macos/             every unsafe block in the crate
   ax.rs                Accessibility: the focused application, elements, titles, AXDocument, messaging timeout
-  window_list.rs       CGWindowList, CGDisplayBounds, the focus choice and its filtered fallback, bundle id for pid
+  window_list.rs       CGWindowList on-screen and entire, CGDisplayBounds, the focus choice and its filtered fallback, bundle id and activation policy for pid
   activity.rs          idle seconds, input counters, microphone, cursor display
   screen.rs            the session lock state and per-display sleep
   processes.rs         the process table: argv, environment, controlling tty, cwd, agterm panes
