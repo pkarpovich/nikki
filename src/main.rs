@@ -3,6 +3,7 @@ mod extract;
 mod macos;
 mod providers;
 mod runtime;
+#[allow(dead_code)]
 mod service;
 mod window;
 
@@ -34,39 +35,13 @@ struct Args {
     /// load and validate the configuration, then exit
     #[argh(switch)]
     check_config: bool,
-    #[argh(subcommand)]
-    command: Option<Service>,
 }
-
-#[derive(FromArgs)]
-#[argh(subcommand)]
-enum Service {
-    Install(Install),
-    Uninstall(Uninstall),
-}
-
-/// copy this binary to a stable path and run it as a launchd agent, so macOS permissions survive an upgrade
-#[derive(FromArgs)]
-#[argh(subcommand, name = "install")]
-struct Install {}
-
-/// unload the launchd agent and remove what install wrote, leaving captured data alone
-#[derive(FromArgs)]
-#[argh(subcommand, name = "uninstall")]
-struct Uninstall {}
 
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let Args {
-        check_config,
-        command,
-    } = argh::from_env();
-
-    if let Some(command) = command {
-        return run_service(command);
-    }
+    let Args { check_config } = argh::from_env();
 
     let paths = match Paths::from_env() {
         Ok(paths) => paths,
@@ -125,51 +100,6 @@ async fn main() -> ExitCode {
             tracing::error!(%reason, "nikki stopped");
             ExitCode::FAILURE
         }
-    }
-}
-
-fn run_service(command: Service) -> ExitCode {
-    match command {
-        Service::Install(Install {}) => match service::install() {
-            Ok(installed) => {
-                let service::Installed {
-                    program,
-                    agent,
-                    housing,
-                } = &installed;
-                tracing::info!(
-                    program = %program.display(),
-                    agent = %agent.display(),
-                    "nikki is installed and running"
-                );
-                match housing {
-                    service::Housing::Bundle => tracing::info!(
-                        path = %program.display(),
-                        "grant Accessibility to this application"
-                    ),
-                    service::Housing::Loose => tracing::warn!(
-                        path = %program.display(),
-                        "this binary is not inside an application bundle, so macOS will ask for                          Accessibility again whenever its path changes - install the cask instead"
-                    ),
-                }
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                tracing::error!(%error, "nikki could not be installed");
-                ExitCode::FAILURE
-            }
-        },
-        Service::Uninstall(Uninstall {}) => match service::uninstall() {
-            Ok(layout) => {
-                let service::Layout { agent, .. } = &layout;
-                tracing::info!(agent = %agent.display(), "nikki is uninstalled");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                tracing::error!(%error, "nikki could not be uninstalled");
-                ExitCode::FAILURE
-            }
-        },
     }
 }
 
