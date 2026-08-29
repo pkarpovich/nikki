@@ -1,9 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env::var_os;
 use std::ffi::c_void;
 use std::fs;
 use std::path::Path;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -29,7 +30,9 @@ use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSString
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::ax::MESSAGING_TIMEOUT_SECONDS;
-use super::window_list::{RunningApplication, frontmost_application, running_application};
+use super::window_list::{
+    RunningApplication, WindowEntry, application_for_pid, running_application, window_list,
+};
 
 pub const SLEEP_FLUSH_BUDGET: Duration = Duration::from_secs(2);
 pub const TEST_EVENTS_VAR: &str = "NIKKI_TEST_EVENTS";
@@ -37,7 +40,15 @@ pub const TEST_EVENTS_VAR: &str = "NIKKI_TEST_EVENTS";
 const SCREEN_LOCKED_NOTIFICATION: &str = "com.apple.screenIsLocked";
 const SCREEN_UNLOCKED_NOTIFICATION: &str = "com.apple.screenIsUnlocked";
 
-const AX_NOTIFICATIONS: [(&str, AxNotification); 4] = [
+const AX_NOTIFICATIONS: [(&str, AxNotification); 6] = [
+    (
+        "AXApplicationActivated",
+        AxNotification::ApplicationActivated,
+    ),
+    (
+        "AXApplicationDeactivated",
+        AxNotification::ApplicationDeactivated,
+    ),
     (
         "AXFocusedWindowChanged",
         AxNotification::FocusedWindowChanged,
@@ -49,6 +60,8 @@ const AX_NOTIFICATIONS: [(&str, AxNotification); 4] = [
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AxNotification {
+    ApplicationActivated,
+    ApplicationDeactivated,
     FocusedWindowChanged,
     TitleChanged,
     WindowCreated,
@@ -116,7 +129,7 @@ enum Injected {
 struct Inbox {
     sender: UnboundedSender<MacEvent>,
     injected: Mutex<VecDeque<Injected>>,
-    focus_target: Mutex<Option<i32>>,
+    rescan: AtomicBool,
 }
 
 impl Inbox {
@@ -132,14 +145,32 @@ struct RunLoopRef(CFRetained<CFRunLoop>);
 
 unsafe impl Send for RunLoopRef {}
 
-struct SourceRef(#[cfg_attr(not(test), allow(dead_code))] CFRetained<CFRunLoopSource>);
+struct SourceRef(CFRetained<CFRunLoopSource>);
 
 unsafe impl Send for SourceRef {}
+
+pub struct RescanHandle {
+    inbox: Arc<Inbox>,
+    source: CFRetained<CFRunLoopSource>,
+    run_loop: CFRetained<CFRunLoop>,
+}
+
+unsafe impl Send for RescanHandle {}
+unsafe impl Sync for RescanHandle {}
+
+impl RescanHandle {
+    pub fn request(&self) {
+        self.inbox.rescan.store(true, Ordering::SeqCst);
+        self.source.signal();
+        self.run_loop.wake_up();
+    }
+}
 
 struct SourceState {
     inbox: Arc<Inbox>,
     run_loop: CFRetained<CFRunLoop>,
-    observer: Option<ObserverRegistration>,
+    observers: HashMap<i32, ObserverRegistration>,
+    refused: HashSet<i32>,
 }
 
 struct ObserverRegistration {
@@ -171,9 +202,7 @@ impl Drop for ObserverRegistration {
 
 pub struct EventThread {
     run_loop: RunLoopRef,
-    #[cfg_attr(not(test), allow(dead_code))]
     source: SourceRef,
-    #[cfg_attr(not(test), allow(dead_code))]
     inbox: Arc<Inbox>,
     thread: Option<JoinHandle<()>>,
 }
@@ -208,7 +237,7 @@ impl EventThread {
         let inbox = Arc::new(Inbox {
             sender,
             injected: Mutex::new(scripted),
-            focus_target: Mutex::new(None),
+            rescan: AtomicBool::new(false),
         });
 
         let (ready_sender, ready_receiver) = sync_channel::<Option<(RunLoopRef, SourceRef)>>(1);
@@ -230,6 +259,14 @@ impl EventThread {
             inbox,
             thread: Some(thread),
         })
+    }
+
+    pub fn rescan_handle(&self) -> RescanHandle {
+        RescanHandle {
+            inbox: Arc::clone(&self.inbox),
+            source: self.source.0.clone(),
+            run_loop: self.run_loop.0.clone(),
+        }
     }
 
     #[cfg(test)]
@@ -286,7 +323,8 @@ fn run_event_loop(
     let state = Box::into_raw(Box::new(SourceState {
         inbox: Arc::clone(&inbox),
         run_loop: run_loop.clone(),
-        observer: None,
+        observers: HashMap::new(),
+        refused: HashSet::new(),
     }));
     let source = create_source(state.cast::<c_void>());
     run_loop.add_source(Some(&source), unsafe { kCFRunLoopDefaultMode });
@@ -355,10 +393,7 @@ fn register_system_sources(
         let Some(application) = activated_application(notification) else {
             return;
         };
-        let RunningApplication { pid, .. } = application;
-        if let Ok(mut target) = activation_inbox.focus_target.lock() {
-            *target = Some(pid);
-        }
+        activation_inbox.rescan.store(true, Ordering::SeqCst);
         activation_inbox.emit(MacEvent::ApplicationActivated { application });
         activation_source.signal();
         activation_run_loop.wake_up();
@@ -438,25 +473,8 @@ fn register_system_sources(
         drop(unsafe { Arc::from_raw(user_info.cast::<Inbox>()) });
     }
 
-    seed_focus_target(inbox, source, run_loop);
+    inbox.rescan.store(true, Ordering::SeqCst);
     sources
-}
-
-fn seed_focus_target(
-    inbox: &Arc<Inbox>,
-    source: &CFRetained<CFRunLoopSource>,
-    run_loop: &CFRetained<CFRunLoop>,
-) {
-    let Some(RunningApplication { pid, .. }) = frontmost_application() else {
-        return;
-    };
-    let Ok(mut target) = inbox.focus_target.lock() else {
-        return;
-    };
-    *target = Some(pid);
-    drop(target);
-    source.signal();
-    run_loop.wake_up();
 }
 
 fn activated_application(notification: &NSNotification) -> Option<RunningApplication> {
@@ -560,13 +578,72 @@ fn ax_notification_from_name(name: &str) -> Option<AxNotification> {
     None
 }
 
-fn ax_event(notification: AxNotification, pid: i32) -> MacEvent {
+fn ax_event<F>(notification: AxNotification, pid: i32, application_of: F) -> Option<MacEvent>
+where
+    F: Fn(i32) -> Option<RunningApplication>,
+{
     match notification {
-        AxNotification::FocusedWindowChanged => MacEvent::FocusedWindowChanged { pid },
-        AxNotification::TitleChanged => MacEvent::TitleChanged { pid },
-        AxNotification::WindowCreated => MacEvent::WindowCreated { pid },
-        AxNotification::UiElementDestroyed => MacEvent::WindowDestroyed { pid },
+        AxNotification::ApplicationActivated => {
+            let application = match application_of(pid) {
+                Some(application) => application,
+                None => RunningApplication {
+                    pid,
+                    name: None,
+                    bundle_id: None,
+                },
+            };
+            Some(MacEvent::ApplicationActivated { application })
+        }
+        AxNotification::ApplicationDeactivated => None,
+        AxNotification::FocusedWindowChanged => Some(MacEvent::FocusedWindowChanged { pid }),
+        AxNotification::TitleChanged => Some(MacEvent::TitleChanged { pid }),
+        AxNotification::WindowCreated => Some(MacEvent::WindowCreated { pid }),
+        AxNotification::UiElementDestroyed => Some(MacEvent::WindowDestroyed { pid }),
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ObserverPlan {
+    attach: Vec<i32>,
+    detach: Vec<i32>,
+    forget: Vec<i32>,
+}
+
+fn observer_plan(attached: &[i32], refused: &[i32], present: &[i32]) -> ObserverPlan {
+    let mut plan = ObserverPlan::default();
+    for pid in present {
+        if attached.contains(pid) || refused.contains(pid) || plan.attach.contains(pid) {
+            continue;
+        }
+        plan.attach.push(*pid);
+    }
+    for pid in attached {
+        if present.contains(pid) {
+            continue;
+        }
+        plan.detach.push(*pid);
+    }
+    for pid in refused {
+        if present.contains(pid) {
+            continue;
+        }
+        plan.forget.push(*pid);
+    }
+    plan
+}
+
+fn application_pids(windows: &[WindowEntry]) -> Vec<i32> {
+    let mut pids = Vec::new();
+    for window in windows {
+        let WindowEntry {
+            owner_pid, layer, ..
+        } = window;
+        if *layer != 0 || pids.contains(owner_pid) {
+            continue;
+        }
+        pids.push(*owner_pid);
+    }
+    pids
 }
 
 fn create_source(info: *mut c_void) -> CFRetained<CFRunLoopSource> {
@@ -606,24 +683,47 @@ unsafe extern "C-unwind" fn perform_source(info: *mut c_void) {
         }
     }
 
-    let mut target = None;
-    if let Ok(mut focus_target) = state.inbox.focus_target.lock() {
-        target = focus_target.take();
-    }
-    let Some(pid) = target else {
+    if !state.inbox.rescan.swap(false, Ordering::SeqCst) {
         return;
-    };
-    rebind_observer(state, pid);
+    }
+    rescan_observers(state, &application_pids(&window_list()));
 }
 
-fn rebind_observer(state: &mut SourceState, pid: i32) {
-    state.observer = None;
-    let Some(registration) =
-        ObserverRegistration::create(pid, Arc::clone(&state.inbox), state.run_loop.clone())
-    else {
-        return;
-    };
-    state.observer = Some(registration);
+fn rescan_observers(state: &mut SourceState, present: &[i32]) {
+    let mut attached = Vec::with_capacity(state.observers.len());
+    for pid in state.observers.keys() {
+        attached.push(*pid);
+    }
+    let mut refused = Vec::with_capacity(state.refused.len());
+    for pid in &state.refused {
+        refused.push(*pid);
+    }
+
+    let ObserverPlan {
+        attach,
+        detach,
+        forget,
+    } = observer_plan(&attached, &refused, present);
+
+    for pid in detach {
+        state.observers.remove(&pid);
+    }
+    for pid in forget {
+        state.refused.remove(&pid);
+    }
+    for pid in attach {
+        let Some(registration) =
+            ObserverRegistration::create(pid, Arc::clone(&state.inbox), state.run_loop.clone())
+        else {
+            tracing::warn!(
+                pid,
+                "an application refuses accessibility and is not observed"
+            );
+            state.refused.insert(pid);
+            continue;
+        };
+        state.observers.insert(pid, registration);
+    }
 }
 
 impl ObserverRegistration {
@@ -694,7 +794,10 @@ unsafe extern "C-unwind" fn on_ax_notification(
     if status != AXError::Success {
         return;
     }
-    inbox.emit(ax_event(notification, pid));
+    let Some(event) = ax_event(notification, pid, application_for_pid) else {
+        return;
+    };
+    inbox.emit(event);
 }
 
 unsafe extern "C-unwind" fn on_display_reconfigured(
@@ -717,12 +820,14 @@ mod tests {
     use std::time::Instant;
     use tokio::sync::mpsc::unbounded_channel;
 
+    use crate::macos::window_list::Rect;
+
     fn inbox() -> (Arc<Inbox>, tokio::sync::mpsc::UnboundedReceiver<MacEvent>) {
         let (sender, receiver) = unbounded_channel();
         let inbox = Arc::new(Inbox {
             sender,
             injected: Mutex::new(VecDeque::new()),
-            focus_target: Mutex::new(None),
+            rescan: AtomicBool::new(false),
         });
         (inbox, receiver)
     }
@@ -744,8 +849,20 @@ mod tests {
         }
     }
 
+    fn nobody_is_a_running_application(_pid: i32) -> Option<RunningApplication> {
+        None
+    }
+
     #[test]
     fn accessibility_notification_names_map_to_kinds() {
+        assert_eq!(
+            ax_notification_from_name("AXApplicationActivated"),
+            Some(AxNotification::ApplicationActivated)
+        );
+        assert_eq!(
+            ax_notification_from_name("AXApplicationDeactivated"),
+            Some(AxNotification::ApplicationDeactivated)
+        );
         assert_eq!(
             ax_notification_from_name("AXFocusedWindowChanged"),
             Some(AxNotification::FocusedWindowChanged)
@@ -782,9 +899,128 @@ mod tests {
             (AxNotification::UiElementDestroyed, "window_destroyed"),
         ];
         for (notification, expected) in expectations {
-            let event = ax_event(notification, 4242);
+            let event = ax_event(notification, 4242, nobody_is_a_running_application)
+                .expect("the notification describes an event");
             assert_eq!(describe(&event), (expected, 4242));
         }
+    }
+
+    #[test]
+    fn an_activation_carries_the_application_the_pid_belongs_to() {
+        let event = ax_event(AxNotification::ApplicationActivated, 502, |pid| {
+            Some(RunningApplication {
+                pid,
+                name: Some("Dia".to_string()),
+                bundle_id: Some("company.thebrowser.dia".to_string()),
+            })
+        })
+        .expect("an activation describes an event");
+
+        let MacEvent::ApplicationActivated { application } = event else {
+            panic!("expected an activation");
+        };
+        let RunningApplication {
+            pid,
+            name,
+            bundle_id,
+        } = application;
+        assert_eq!(pid, 502);
+        assert_eq!(name.as_deref(), Some("Dia"));
+        assert_eq!(bundle_id.as_deref(), Some("company.thebrowser.dia"));
+    }
+
+    #[test]
+    fn an_activation_of_a_pid_nobody_names_still_reports_the_pid() {
+        let event = ax_event(
+            AxNotification::ApplicationActivated,
+            502,
+            nobody_is_a_running_application,
+        )
+        .expect("an activation describes an event");
+        assert_eq!(describe(&event), ("application_activated", 502));
+    }
+
+    #[test]
+    fn a_deactivation_is_only_a_hint_and_becomes_no_event() {
+        assert!(
+            ax_event(
+                AxNotification::ApplicationDeactivated,
+                502,
+                nobody_is_a_running_application
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_new_pid_is_attached_and_a_departed_one_is_detached() {
+        let plan = observer_plan(&[10, 20], &[], &[20, 30]);
+        assert_eq!(
+            plan,
+            ObserverPlan {
+                attach: vec![30],
+                detach: vec![10],
+                forget: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_pid_that_is_already_observed_is_left_alone() {
+        let plan = observer_plan(&[10, 20], &[], &[10, 20]);
+        assert_eq!(plan, ObserverPlan::default());
+    }
+
+    #[test]
+    fn a_pid_owning_several_windows_is_attached_once() {
+        let plan = observer_plan(&[], &[], &[10, 10, 10]);
+        assert_eq!(plan.attach, vec![10]);
+    }
+
+    #[test]
+    fn a_refusing_pid_is_not_retried_while_it_is_still_there() {
+        let plan = observer_plan(&[20], &[10], &[10, 20]);
+        assert_eq!(plan, ObserverPlan::default());
+    }
+
+    #[test]
+    fn a_refusing_pid_that_left_is_forgotten_rather_than_refused_forever() {
+        let plan = observer_plan(&[], &[10], &[20]);
+        assert_eq!(
+            plan,
+            ObserverPlan {
+                attach: vec![20],
+                detach: Vec::new(),
+                forget: vec![10],
+            }
+        );
+    }
+
+    fn owned(pid: i32, layer: i32, z: usize) -> WindowEntry {
+        WindowEntry {
+            owner_pid: pid,
+            owner_name: String::new(),
+            window_number: z as u32,
+            bounds: Rect::default(),
+            layer,
+            z,
+        }
+    }
+
+    #[test]
+    fn the_owners_of_ordinary_windows_are_the_applications_to_observe() {
+        let windows = vec![
+            owned(10, 0, 0),
+            owned(99, 25, 1),
+            owned(20, 0, 2),
+            owned(10, 0, 3),
+        ];
+        assert_eq!(application_pids(&windows), vec![10, 20]);
+    }
+
+    #[test]
+    fn a_machine_without_windows_has_nothing_to_observe() {
+        assert!(application_pids(&[]).is_empty());
     }
 
     fn describe_scripted(item: &Injected) -> (&'static str, i32) {

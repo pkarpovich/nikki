@@ -190,7 +190,7 @@ fn is_application(application: &RunningApplication) -> bool {
     }
 }
 
-fn application_for_pid(pid: i32) -> Option<RunningApplication> {
+pub(super) fn application_for_pid(pid: i32) -> Option<RunningApplication> {
     let application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
     Some(running_application(&application))
 }

@@ -117,17 +117,17 @@ knows nothing about the lock screen. The rule is worth copying; the dependency i
 - [x] run `cargo test` - must pass before task 4
 
 ### Task 4: Observe applications from the existing run loop thread
-- [ ] add an observer registry to `src/macos/events.rs`: one `AXObserver` per application pid,
+- [x] add an observer registry to `src/macos/events.rs`: one `AXObserver` per application pid,
       registered on the thread's own run loop, for `AXApplicationActivated`,
       `AXApplicationDeactivated`, `AXFocusedWindowChanged` and `AXTitleChanged`
-- [ ] attach on the pids currently owning windows, and re-scan on each tick so an application launched
+- [x] attach on the pids currently owning windows, and re-scan on each tick so an application launched
       later is picked up - the spike missed a switch to a pid it had never attached to
-- [ ] detach and release when a pid disappears, so a long-running daemon does not accumulate observers
-- [ ] tolerate an application that refuses AX (two of nineteen did): warn once, skip, do not retry in a
+- [x] detach and release when a pid disappears, so a long-running daemon does not accumulate observers
+- [x] tolerate an application that refuses AX (two of nineteen did): warn once, skip, do not retry in a
       tight loop
-- [ ] write tests for the pure registry logic: a new pid is attached, a departed pid is detached, a
+- [x] write tests for the pure registry logic: a new pid is attached, a departed pid is detached, a
       refusing pid is not retried every pass
-- [ ] run `cargo test` - must pass before task 5
+- [x] run `cargo test` - must pass before task 5
 
 ### Task 5: Turn the notifications into records
 - [ ] map the observer callbacks into the existing `MacEvent` channel so they pass through the current

@@ -14,7 +14,7 @@ use crate::macos::activity::{
     input_counters, microphone_active,
 };
 use crate::macos::ax::{AxApplication, accessibility_is_trusted};
-use crate::macos::events::{MacEvent, SLEEP_FLUSH_BUDGET, SleepAcknowledgement};
+use crate::macos::events::{MacEvent, RescanHandle, SLEEP_FLUSH_BUDGET, SleepAcknowledgement};
 use crate::macos::screen::{displays_asleep, screen_locked};
 use crate::macos::window_list::{
     DisplayEntry, RunningApplication, WindowEntry, bundle_id_for_pid, display_list,
@@ -62,10 +62,19 @@ pub trait Sources: Send + Sync + 'static {
     fn focused_window(&self, pid: i32) -> FocusedWindow;
     fn window_title(&self, pid: i32) -> WindowTitle;
     fn activity(&self) -> Activity;
+    fn rescan_observers(&self);
     fn details(&self, bundle_id: &str) -> impl Future<Output = Details> + Send;
 }
 
-pub struct MacSources;
+pub struct MacSources {
+    rescan: RescanHandle,
+}
+
+impl MacSources {
+    pub fn new(rescan: RescanHandle) -> Self {
+        Self { rescan }
+    }
+}
 
 impl Sources for MacSources {
     fn windows(&self) -> Vec<WindowEntry> {
@@ -121,6 +130,10 @@ impl Sources for MacSources {
             screen_locked: screen_locked(),
             display_asleep: displays_asleep(),
         }
+    }
+
+    fn rescan_observers(&self) {
+        self.rescan.request();
     }
 
     async fn details(&self, bundle_id: &str) -> Details {
@@ -185,6 +198,7 @@ impl<S: Sources> Provider for WindowProvider<S> {
                     }
                 }
                 _ = ticker.tick() => {
+                    sources.rescan_observers();
                     let activity = sources.activity();
                     let Some(sample) = assemble(sources, None).await else {
                         continue;
@@ -581,6 +595,7 @@ mod tests {
         details: Details,
         detail_calls: Arc<Mutex<Vec<String>>>,
         title_calls: Arc<AtomicUsize>,
+        rescans: Arc<AtomicUsize>,
     }
 
     impl Sources for FakeSources {
@@ -621,6 +636,10 @@ mod tests {
 
         fn activity(&self) -> Activity {
             *self.activity.lock().expect("the activity is poisoned")
+        }
+
+        fn rescan_observers(&self) {
+            self.rescans.fetch_add(1, Ordering::SeqCst);
         }
 
         async fn details(&self, bundle_id: &str) -> Details {
@@ -713,6 +732,7 @@ mod tests {
             details: Details::new(),
             detail_calls: Arc::new(Mutex::new(Vec::new())),
             title_calls: Arc::new(AtomicUsize::new(0)),
+            rescans: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -769,6 +789,33 @@ mod tests {
             payload["visible"].as_array().expect("a visible set").len(),
             3
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_tick_asks_for_the_observed_applications_to_be_rescanned() {
+        let sources = sources();
+        let rescans = Arc::clone(&sources.rescans);
+        let (_events, mut emissions) = start(sources, 1);
+
+        one_record(&mut emissions).await;
+        assert_eq!(rescans.load(Ordering::SeqCst), 1);
+
+        one_record(&mut emissions).await;
+        assert_eq!(rescans.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_event_alone_never_rescans_the_observed_applications() {
+        let sources = sources();
+        let rescans = Arc::clone(&sources.rescans);
+        let (events, mut emissions) = start(sources, LONG_TICK);
+
+        events
+            .send(MacEvent::TitleChanged { pid: ZED_PID })
+            .expect("the provider is listening");
+
+        one_record(&mut emissions).await;
+        assert_eq!(rescans.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
