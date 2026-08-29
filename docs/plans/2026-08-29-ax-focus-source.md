@@ -151,10 +151,10 @@ knows nothing about the lock screen. The rule is worth copying; the dependency i
 - [x] update the `src/macos/` file table with the new responsibilities
 
 ### Task 7: Verify acceptance criteria
-- [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` green
-- [ ] `scripts/acceptance.sh` passes, extended with a live check that AX names a focused application
-- [ ] grep the crate for `frontmostApplication` and confirm the frozen call is gone
-- [ ] confirm no new dependency was added to `Cargo.toml` beyond features of crates already present
+- [x] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` green
+- [x] `scripts/acceptance.sh` passes, extended with a live check that AX names a focused application
+- [x] grep the crate for `frontmostApplication` and confirm the frozen call is gone
+- [x] confirm no new dependency was added to `Cargo.toml` beyond features of crates already present
 
 ## Technical Details
 

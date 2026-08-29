@@ -65,6 +65,14 @@ if ! echo "$screen" | grep -q 'result: ok\. 1 passed'; then
 	exit 1
 fi
 
+echo "acceptance: the live focused application"
+focus="$(cargo test --bin nikki -- --ignored --nocapture the_live_machine_names_a_focused_application 2>&1 || true)"
+echo "$focus"
+if ! echo "$focus" | grep -q 'result: ok\. 1 passed'; then
+	echo "acceptance: the_live_machine_names_a_focused_application neither ran nor passed, so nothing asserted that Accessibility names who is focused" >&2
+	exit 1
+fi
+
 echo "acceptance: the live agterm tree"
 if command -v agtermctl >/dev/null 2>&1 || [ -x "$AGTERMCTL" ]; then
 	live="$(cargo test --bin nikki -- --ignored --nocapture the_live_tree_names_the_surface_on_screen 2>&1 || true)"
