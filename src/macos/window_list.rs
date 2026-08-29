@@ -142,7 +142,7 @@ fn frontmost_of<F>(
 where
     F: Fn(i32) -> Option<RunningApplication>,
 {
-    if let Some(application) = focused_of(focused_pid, &application_of) {
+    if let Some(application) = focused_of(focused_pid, windows, &application_of) {
         return Some(application);
     }
 
@@ -156,7 +156,7 @@ where
         let Some(application) = application_of(*owner_pid) else {
             continue;
         };
-        if !is_application(&application) {
+        if !is_application(&application) || is_lock_screen(&application) {
             continue;
         }
         return Some(application);
@@ -164,12 +164,19 @@ where
     None
 }
 
-fn focused_of<F>(focused_pid: Option<i32>, application_of: &F) -> Option<RunningApplication>
+fn focused_of<F>(
+    focused_pid: Option<i32>,
+    windows: &[WindowEntry],
+    application_of: &F,
+) -> Option<RunningApplication>
 where
     F: Fn(i32) -> Option<RunningApplication>,
 {
     let pid = focused_pid?;
     let Some(application) = application_of(pid) else {
+        if !owns_ordinary_window(windows, pid) {
+            return None;
+        }
         return Some(RunningApplication {
             pid,
             name: None,
@@ -180,6 +187,18 @@ where
         return None;
     }
     Some(application)
+}
+
+fn owns_ordinary_window(windows: &[WindowEntry], pid: i32) -> bool {
+    for window in windows {
+        let WindowEntry {
+            layer, owner_pid, ..
+        } = window;
+        if *layer == 0 && *owner_pid == pid {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn is_lock_screen(application: &RunningApplication) -> bool {
@@ -394,7 +413,8 @@ mod tests {
 
     #[test]
     fn a_pid_accessibility_names_but_nobody_can_name_is_reported_by_its_pid_alone() {
-        let front = frontmost_of(Some(4321), &[], |_| None);
+        let windows = vec![entry(4321, 0, 0)];
+        let front = frontmost_of(Some(4321), &windows, |_| None);
         assert_eq!(
             front,
             Some(RunningApplication {
@@ -403,6 +423,30 @@ mod tests {
                 bundle_id: None,
             })
         );
+    }
+
+    #[test]
+    fn an_unnameable_pid_owning_no_window_yields_to_the_window_list() {
+        let windows = vec![entry(10, 0, 0)];
+        let known = applications(vec![application(10, Some("dev.pkarpovich.example"))]);
+        let front = frontmost_of(Some(4321), &windows, known);
+        assert_eq!(front.map(|front| front.pid), Some(10));
+    }
+
+    #[test]
+    fn an_unnameable_pid_over_an_empty_window_list_names_nobody() {
+        assert!(frontmost_of(Some(4321), &[], |_| None).is_none());
+    }
+
+    #[test]
+    fn the_lock_screen_never_wins_the_window_list_either() {
+        let windows = vec![entry(500, 0, 0), entry(10, 0, 1)];
+        let known = applications(vec![
+            application(500, Some("com.apple.loginwindow")),
+            application(10, Some("dev.pkarpovich.example")),
+        ]);
+        let front = frontmost_of(None, &windows, known);
+        assert_eq!(front.map(|front| front.pid), Some(10));
     }
 
     #[test]
