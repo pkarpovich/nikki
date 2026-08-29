@@ -55,7 +55,7 @@ if [ -n "$identity" ]; then
 		--sign "$identity" \
 		"$app"
 	codesign --verify --strict --deep --verbose=2 "$app"
-	codesign --display "$app" 2>&1 | grep '^Identifier='
+	codesign --display --verbose=2 "$app" 2>&1 | grep '^Identifier='
 fi
 
 echo "$app"
