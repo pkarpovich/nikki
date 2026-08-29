@@ -9,9 +9,16 @@ pub(super) const ATTRIBUTE_WINDOWS: &str = "AXWindows";
 pub(super) const ATTRIBUTE_TITLE: &str = "AXTitle";
 pub(super) const ATTRIBUTE_FOCUSED_WINDOW: &str = "AXFocusedWindow";
 pub(super) const ATTRIBUTE_DOCUMENT: &str = "AXDocument";
+pub(super) const ATTRIBUTE_FOCUSED_APPLICATION: &str = "AXFocusedApplication";
 
 pub fn accessibility_is_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
+}
+
+pub fn focused_application() -> Option<i32> {
+    let system_wide = unsafe { AXUIElement::new_system_wide() };
+    apply_messaging_timeout(&system_wide);
+    focused_application_of(&system_wide)
 }
 
 pub struct AxApplication {
@@ -70,6 +77,27 @@ fn apply_messaging_timeout(element: &AXUIElement) {
         return;
     }
     tracing::debug!(status = status.0, "could not set the accessibility timeout");
+}
+
+fn focused_application_of(system_wide: &AXUIElement) -> Option<i32> {
+    let element = attribute_element(system_wide, ATTRIBUTE_FOCUSED_APPLICATION)?;
+    element_pid(&element)
+}
+
+fn element_pid(element: &AXUIElement) -> Option<i32> {
+    let mut pid: libc::pid_t = 0;
+    let status = unsafe { element.pid(NonNull::from(&mut pid)) };
+    pid_of(status, pid)
+}
+
+fn pid_of(status: AXError, pid: libc::pid_t) -> Option<i32> {
+    if status != AXError::Success {
+        return None;
+    }
+    if pid <= 0 {
+        return None;
+    }
+    Some(pid)
 }
 
 fn copy_attribute(element: &AXUIElement, attribute: &str) -> Option<CFRetained<CFType>> {
@@ -138,6 +166,51 @@ mod tests {
         assert_eq!(ATTRIBUTE_TITLE, "AXTitle");
         assert_eq!(ATTRIBUTE_FOCUSED_WINDOW, "AXFocusedWindow");
         assert_eq!(ATTRIBUTE_DOCUMENT, "AXDocument");
+        assert_eq!(ATTRIBUTE_FOCUSED_APPLICATION, "AXFocusedApplication");
+    }
+
+    #[test]
+    fn an_accessibility_error_is_no_answer_about_the_focused_application() {
+        assert!(pid_of(AXError::CannotComplete, 4321).is_none());
+        assert!(pid_of(AXError::APIDisabled, 4321).is_none());
+        assert!(pid_of(AXError::InvalidUIElement, 0).is_none());
+    }
+
+    #[test]
+    fn an_element_belonging_to_no_process_is_no_answer_about_the_focused_application() {
+        assert!(pid_of(AXError::Success, 0).is_none());
+        assert!(pid_of(AXError::Success, -1).is_none());
+    }
+
+    #[test]
+    fn a_process_that_answered_is_the_focused_application() {
+        assert_eq!(pid_of(AXError::Success, 4321), Some(4321));
+    }
+
+    #[test]
+    fn an_element_that_names_no_focused_application_is_no_answer() {
+        let application = AxApplication::for_pid(0);
+        assert!(focused_application_of(application.element()).is_none());
+        assert!(element_pid(application.element()).is_none());
+    }
+
+    #[test]
+    #[ignore = "reads the live machine: needs an accessibility grant and an application in front"]
+    fn the_live_machine_names_a_focused_application() {
+        assert!(
+            accessibility_is_trusted(),
+            "accessibility is not granted, so no focus can be read"
+        );
+        let Some(front) = crate::macos::window_list::frontmost_application() else {
+            panic!("no application is in front, so no focus can be read");
+        };
+        AxApplication::for_pid(front.pid).focused_window();
+
+        let pid = focused_application();
+        assert!(
+            pid.is_some_and(|pid| pid > 0),
+            "accessibility named no focused application"
+        );
     }
 
     #[test]

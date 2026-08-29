@@ -145,7 +145,7 @@ async fn run(config: Config) -> Result<(), String> {
 
     let absorbing = tokio::spawn(absorb(records.clone(), ship_now, drafts, listener.clone()));
     let windows = tokio::spawn(supervise(
-        WindowProvider::new(MacSources, inbox),
+        WindowProvider::new(MacSources::new(event_thread.rescan_handle()), inbox),
         ctx.clone(),
         emissions.clone(),
         Backoff::default(),
