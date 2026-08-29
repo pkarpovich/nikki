@@ -427,6 +427,15 @@ daemon started. The polled fields are level rather than edge triggered, so every
 itself regardless of which notifications were delivered. The sibling change in turtle-hub carries this
 identical section.
 
+**`app` is what was in front on screen, not what held the keyboard focus.** The two agree whenever
+somebody is there, and a lock is where they part: Accessibility answers `loginwindow` for the whole
+locked span, which is a fact `screen_locked` already states, and reporting it would blank out the
+application, title, working directory and foreground command the machine kept running the entire time
+- the only evidence there is that work continued while nobody was there. So an Accessibility answer of
+`com.apple.loginwindow` is treated as no answer and falls through to the filtered window list, which
+keeps naming the last real window until the session is unlocked. Nothing else in the record changes
+because the session locked; `screen_locked` remains the sole marker of the lock.
+
 Bodies for the kinds not shown above:
 
 ```json

@@ -106,15 +106,15 @@ knows nothing about the lock screen. The rule is worth copying; the dependency i
 - [x] run `cargo test` - must pass before task 3
 
 ### Task 3: Keep reporting what is running while the screen is locked
-- [ ] treat an AX answer of `loginwindow` as no answer, and fall through to the filtered window list,
+- [x] treat an AX answer of `loginwindow` as no answer, and fall through to the filtered window list,
       which keeps naming the last real window for the whole locked span
-- [ ] leave `screen_locked` as the sole marker of the lock; nothing else in the record changes because
+- [x] leave `screen_locked` as the sole marker of the lock; nothing else in the record changes because
       the session locked
-- [ ] write a test that a `loginwindow` answer yields the window list's application, not `loginwindow`
-- [ ] write a test that a real application from AX is never overridden by the window list
-- [ ] document the rule in `README.md`: `app` means what was in front on screen, not what held the
+- [x] write a test that a `loginwindow` answer yields the window list's application, not `loginwindow`
+- [x] write a test that a real application from AX is never overridden by the window list
+- [x] document the rule in `README.md`: `app` means what was in front on screen, not what held the
       keyboard focus, and during a lock the two differ
-- [ ] run `cargo test` - must pass before task 4
+- [x] run `cargo test` - must pass before task 4
 
 ### Task 4: Observe applications from the existing run loop thread
 - [ ] add an observer registry to `src/macos/events.rs`: one `AXObserver` per application pid,

@@ -9,6 +9,8 @@ use objc2_core_graphics::{
 
 pub(crate) const MAX_DISPLAYS: u32 = 32;
 
+const LOCK_SCREEN_BUNDLE_ID: &str = "com.apple.loginwindow";
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     pub x: f64,
@@ -132,13 +134,8 @@ fn frontmost_of<F>(
 where
     F: Fn(i32) -> Option<RunningApplication>,
 {
-    if let Some(pid) = focused_pid {
-        let application = application_of(pid);
-        return Some(application.unwrap_or(RunningApplication {
-            pid,
-            name: None,
-            bundle_id: None,
-        }));
+    if let Some(application) = focused_of(focused_pid, &application_of) {
+        return Some(application);
     }
 
     for window in windows {
@@ -157,6 +154,32 @@ where
         return Some(application);
     }
     None
+}
+
+fn focused_of<F>(focused_pid: Option<i32>, application_of: &F) -> Option<RunningApplication>
+where
+    F: Fn(i32) -> Option<RunningApplication>,
+{
+    let pid = focused_pid?;
+    let Some(application) = application_of(pid) else {
+        return Some(RunningApplication {
+            pid,
+            name: None,
+            bundle_id: None,
+        });
+    };
+    if is_lock_screen(&application) {
+        return None;
+    }
+    Some(application)
+}
+
+fn is_lock_screen(application: &RunningApplication) -> bool {
+    let RunningApplication { bundle_id, .. } = application;
+    match bundle_id {
+        Some(bundle_id) => bundle_id == LOCK_SCREEN_BUNDLE_ID,
+        None => false,
+    }
 }
 
 fn is_application(application: &RunningApplication) -> bool {
@@ -364,6 +387,34 @@ mod tests {
                 bundle_id: None,
             })
         );
+    }
+
+    #[test]
+    fn a_locked_screen_reports_what_is_still_on_screen_rather_than_the_lock_screen() {
+        let windows = vec![entry(10, 0, 0)];
+        let known = applications(vec![
+            application(500, Some("com.apple.loginwindow")),
+            application(10, Some("dev.pkarpovich.example")),
+        ]);
+        let front = frontmost_of(Some(500), &windows, known);
+        assert_eq!(front.map(|front| front.pid), Some(10));
+    }
+
+    #[test]
+    fn a_locked_screen_over_nothing_real_names_nobody() {
+        let known = applications(vec![application(500, Some("com.apple.loginwindow"))]);
+        assert!(frontmost_of(Some(500), &[], known).is_none());
+    }
+
+    #[test]
+    fn a_real_application_from_accessibility_is_never_overridden_by_the_window_list() {
+        let windows = vec![entry(10, 0, 0), entry(30, 0, 1)];
+        let known = applications(vec![
+            application(10, Some("dev.pkarpovich.other")),
+            application(20, Some("dev.pkarpovich.example")),
+        ]);
+        let front = frontmost_of(Some(20), &windows, known);
+        assert_eq!(front.map(|front| front.pid), Some(20));
     }
 
     #[test]
