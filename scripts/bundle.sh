@@ -26,9 +26,15 @@ if [ -z "$version" ]; then
 	exit 1
 fi
 
+icon="$root/assets/AppIcon.icns"
+if [ ! -f "$icon" ]; then
+	echo "$icon is missing - run scripts/icon.sh" >&2
+	exit 1
+fi
+
 app="$out_dir/$APP"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
 plist="$app/Contents/Info.plist"
 sed "s/__VERSION__/$version/g" "$root/Info.plist.template" > "$plist"
@@ -40,8 +46,10 @@ sed "s/__VERSION__/$version/g" "$root/Info.plist.template" > "$plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string nikki" "$plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$plist"
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$plist"
 plutil -lint "$plist"
 cp "$binary" "$app/Contents/MacOS/nikki"
+cp "$icon" "$app/Contents/Resources/AppIcon.icns"
 
 # The bundle is what makes a macOS permission durable: TCC identifies a bundle by
 # its identifier at a path that does not move, and a loose binary by its path

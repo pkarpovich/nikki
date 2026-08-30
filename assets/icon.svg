@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>nikki</title>
+  <rect x="100.0" y="100.0" width="824.0" height="824.0" rx="185.4" fill="#100f0d" />
+  <g fill="#cecdc3">
+    <rect x="215.36" y="215.36" width="82.4" height="593.28" />
+    <rect x="215.36" y="215.36" width="263.68" height="82.4" />
+    <rect x="215.36" y="726.24" width="263.68" height="82.4" />
+    <rect x="726.24" y="215.36" width="82.4" height="593.28" />
+    <rect x="544.96" y="215.36" width="263.68" height="82.4" />
+    <rect x="544.96" y="726.24" width="263.68" height="82.4" />
+  </g>
+  <rect x="462.56" y="479.04" width="98.88" height="82.4" fill="#d0a215" />
+</svg>
