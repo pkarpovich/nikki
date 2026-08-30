@@ -107,6 +107,13 @@ The crate links Apple frameworks and builds only on macOS. Cross-compiling needs
 `NSAppleEventsUsageDescription` from for a program that is not an app bundle, and the release
 workflow refuses to ship a binary without it.
 
+`scripts/bundle.sh` assembles and signs `Nikki.app` around a built binary, and `assets/AppIcon.icns`
+is the icon it copies in. That icns is committed, so a release needs nothing but the checkout;
+`scripts/icon.sh` rebuilds it from `assets/icon.svg` through a headless browser and `iconutil`, and
+runs only when the artwork changes. A background agent has no Dock tile, but the icon is what
+Privacy & Security, Login Items and Activity Monitor show beside the name - which is exactly where
+you go to grant it the permissions it needs.
+
 ## Permissions
 
 | Permission | What it buys | Indicator / prompts |
