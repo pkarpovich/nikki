@@ -1,15 +1,64 @@
 # nikki
 
 A macOS daemon that records what was on screen and what was being done, and ships it to the nikki
-service. One signed binary per Mac, installed from a Homebrew tap and run by launchd.
+service. One signed application per Mac, installed from a Homebrew tap and run by launchd.
 
 Toggl's Activity view reports only which application was frontmost and never what was being done in
 it. This daemon captures the missing layer: window titles, the open document path, the browser tab
 and profile, the terminal workspace and working directory, plus real activity signals - input
-volume, idle, lock, sleep and microphone.
+volume, idle, lock, screen sleep and microphone. And it never asks you to press start.
 
 The daemon never interprets. It captures faithfully and ships; a summary of the day is produced
 elsewhere, from the service API.
+
+## The name
+
+日記 - *nikki* - is Japanese for a diary. This one keeps itself: you do not start it, stop it, or
+say what you are doing while you are doing it. Naming the day is a separate act, done afterwards
+against a record that was kept for you - which is the whole difference from a timer.
+
+## Status
+
+Personal, single-user, and specific about its machine: Apple Silicon only, one daemon per Mac,
+records shipped to one self-hosted service over the local network. The browser it reads is Dia; the
+terminal it understands in detail is agterm. Everything else is still captured, just with less
+inside `details`.
+
+## What a record looks like
+
+A coalesced interval, as the service returns it:
+
+```json
+{"type":"run","device":"mbp-21","from":"2026-08-29T11:23:04.000Z","to":"2026-08-29T11:41:34.000Z",
+ "duration_sec":1110,"samples":37,"app":"Agterm","bundle_id":"com.umputun.agterm",
+ "title":"nikki","display":1,"degraded":false,
+ "details":{"workspace":"nhop","session":"nikki","surface":"left","foreground":"claude",
+            "cwd":"/Users/pavel.karpovich/Projects/nikki","command":"claude --resume ..."},
+ "keys":412,"mouse":88,"idle_min":0,"idle_max":134,"mic_active":false,
+ "screen_locked":false,"display_asleep":false,
+ "visible":[{"app":"Telegram","display":2,"title":null}]}
+```
+
+Eighteen minutes in one terminal pane, in a named workspace, in a known directory, with an agent
+running in it - rather than eighteen minutes of "Agterm".
+
+## Where the rest lives
+
+- **The service** - storage, coalescing and the read API - is `services/nikki` in the `turtle-hub`
+  repository. The wire contract below is mirrored there, and any change has to land in both.
+- **The day screen** that turns records into a day you can name is a separate piece of work; the
+  service exposes `entries` and `projects` for it.
+
+## Contents
+
+- [Status](#status)
+- [Install](#install) and [Build](#build)
+- [Permissions](#permissions) - what each grant buys and what breaks without it
+- [Configuration](#configuration)
+- [The provider model](#the-provider-model) - how a tick is assembled
+- [The wire contract](#the-wire-contract) - every record the daemon can emit
+- [The buffer](#the-buffer) and [The event thread](#the-event-thread)
+- [Layout](#layout) and [Known limitations](#known-limitations)
 
 ## Install
 
@@ -66,10 +115,14 @@ workflow refuses to ship a binary without it.
 | Automation -> Dia | the active tab's URL, title and profile | one-time prompt on first use |
 | (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state, the process table | none |
 
-Both grants are keyed by the code signature - the Developer ID team plus the `dev.pkarpovich.nikki`
-identifier that `codesign --identifier` pins - so they survive every upgrade that keeps signing with
-the same pair. Changing the identifier loses both grants silently: capture keeps running, titles go
-null and no tab is ever read again.
+Both grants are keyed by **identity and location together**: the Developer ID team plus the
+`dev.pkarpovich.nikki` identifier that `codesign --identifier` pins, and the place the program is
+run from. Signing alone is not enough, which cost three upgrades before this was understood - macOS
+identifies an app bundle by its bundle id at a path that does not move, and a loose binary by its
+absolute path, so a versioned Homebrew Cellar path made every version a new program. Shipping the
+app in `/Applications` is what makes the grants durable; see [Install](#install). Changing the
+identifier still loses both silently: capture keeps running, titles go null and no tab is ever read
+again.
 
 **The process table needs no permission, and only agterm's own variables are consulted.**
 `KERN_PROCARGS2` returns the argv and the environment of a process owned by the same user with no
