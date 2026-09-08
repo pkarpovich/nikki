@@ -2,7 +2,8 @@
 
 A release is a tag. Everything after the tag is CI: `.github/workflows/release.yml`
 builds for `aarch64-apple-darwin`, checks the embedded `Info.plist` survived,
-assembles and signs `Nikki.app` with the Developer ID, publishes a GitHub Release
+assembles and signs `Nikki.app` with the Developer ID, notarizes and staples it,
+refuses to go on unless Gatekeeper calls it notarized, publishes a GitHub Release
 with the zipped app and its checksum, and rewrites `Casks/nikki.rb` in
 `pkarpovich/homebrew-apps`.
 
@@ -46,15 +47,21 @@ The `sha256` in the cask has to match `checksums.txt` on the release. After a
 restart the log carries one `nikki started` line and records resume within a tick.
 
 An upgrade needs no `nikki install`: the cask replaces `/Applications/Nikki.app`
-in place and the agent already points inside it. That is the whole reason the
-release ships an app bundle rather than a bare binary - macOS keys an
-Accessibility grant to a bundle id at a fixed path, and to the absolute path
-alone for a loose binary, which Homebrew changes with every version.
+in place, the running daemon notices its executable was swapped and exits, and
+launchd starts the new one - the agent's `KeepAlive` is a `PathState` on the
+bundle's binary, so it follows the bundle rather than fighting the upgrade.
+`nikki --version` is what says which one is running. Shipping an app bundle
+rather than a bare binary is the other half: macOS keys an Accessibility grant to
+a bundle id at a fixed path, and to the absolute path alone for a loose binary,
+which Homebrew changes with every version.
 
 The release publishes `Nikki-arm64-<version>.zip` and rewrites `Casks/nikki.rb`
 in the tap, deleting `Formula/nikki.rb` if it is still there. The app is signed
-with the Developer ID but not notarized, so a first launch from a quarantined
-download needs one pass through System Settings > Privacy & Security.
+with the Developer ID, notarized and stapled, so a download opens without a
+Gatekeeper prompt and without a pass through System Settings. The workflow takes
+Gatekeeper's own verdict on the bundle it is about to ship - `spctl --assess
+--type exec` has to answer `Notarized Developer ID` - and fails the release
+rather than publishing an app that would be refused on someone's machine.
 
 ## Signing locally
 
@@ -69,7 +76,7 @@ binary and a released one carry the same identity and share the same TCC grants.
 
 ## Secrets
 
-The workflow reads four repository secrets. All four come from the 1Password item
+The workflow reads seven repository secrets. All of them come from the 1Password item
 **`nhop release signing`** (Personal vault) - the same Developer ID certificate and the
 same tap token `nhop` releases with. Nothing new has to be generated for this
 repository; the item feeds both, and its `bundle id` field is the only part that does
@@ -81,6 +88,9 @@ not apply here (it names nhop's identifier, not `dev.pkarpovich.nikki`).
 | `MACOS_CERT_PASSWORD` | the `password` field |
 | `MACOS_TEAM_ID` | the `team id` field - `GGG699AY79` |
 | `HOMEBREW_TAP_TOKEN` | the `tap token` field, write access to `pkarpovich/homebrew-apps` and nothing else |
+| `ASC_KEY_ID` | the `asc key id` field - the App Store Connect API key notarization submits with |
+| `ASC_ISSUER_ID` | the `asc issuer id` field |
+| `ASC_KEY_CONTENT` | the `asc key p8` attachment, verbatim |
 
 Setting them again, without any value passing through a shell argument or the terminal:
 
@@ -90,6 +100,9 @@ op read "$item/p12" | base64 | tr -d '\n' | gh secret set MACOS_CERT_P12_BASE64 
 op read "$item/password" | gh secret set MACOS_CERT_PASSWORD --repo pkarpovich/nikki
 op read "$item/team id" | gh secret set MACOS_TEAM_ID --repo pkarpovich/nikki
 op read "$item/tap token" | gh secret set HOMEBREW_TAP_TOKEN --repo pkarpovich/nikki
+op read "$item/asc key id" | gh secret set ASC_KEY_ID --repo pkarpovich/nikki
+op read "$item/asc issuer id" | gh secret set ASC_ISSUER_ID --repo pkarpovich/nikki
+op read "$item/asc key p8" | gh secret set ASC_KEY_CONTENT --repo pkarpovich/nikki
 ```
 
 This needs the 1Password desktop app unlocked. A secret cannot be read back out of

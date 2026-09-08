@@ -1,4 +1,5 @@
 mod config;
+mod executable;
 mod extract;
 mod macos;
 mod providers;
@@ -31,6 +32,9 @@ const PROVIDERS: &str = "windows, browser_history";
 /// nikki captures what happens on this Mac and ships it to the nikki service.
 #[derive(FromArgs)]
 struct Args {
+    /// print the version and exit
+    #[argh(switch, short = 'V')]
+    version: bool,
     /// load and validate the configuration, then exit
     #[argh(switch)]
     check_config: bool,
@@ -60,9 +64,15 @@ async fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
 
     let Args {
+        version,
         check_config,
         command,
     } = argh::from_env();
+
+    if version {
+        println!("nikki {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
 
     if let Some(command) = command {
         return run_service(command);
@@ -199,7 +209,18 @@ async fn run(config: Config) -> Result<(), String> {
         Err(source) => return Err(format!("the event thread could not start: {source}")),
     };
 
+    let executable = executable::Executable::current();
+    match &executable {
+        Some(executable::Executable { path, .. }) => {
+            tracing::debug!(path = %path.display(), "watching the running binary for a replacement")
+        }
+        None => tracing::warn!(
+            "the running binary could not be located, so an upgrade will not restart the daemon"
+        ),
+    }
+
     tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
         device = %config.device,
         service = %endpoint,
         accessibility = accessibility_is_trusted(),
@@ -232,6 +253,9 @@ async fn run(config: Config) -> Result<(), String> {
 
     tokio::select! {
         _ = terminate() => tracing::info!("a termination signal arrived"),
+        _ = executable::swapped(executable.as_ref()) => tracing::info!(
+            "the binary was replaced; stopping so launchd starts the new version"
+        ),
         _ = pipeline.shipper().run(listener) => {
             tracing::error!("the shipper stopped before the daemon did");
         }

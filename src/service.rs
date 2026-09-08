@@ -1,5 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// How long launchd is given to let go of the agent before it is loaded again.
+const UNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
+const UNLOAD_POLL: Duration = Duration::from_millis(100);
 
 /// The launchd label of the agent `nikki install` writes.
 pub const LABEL: &str = "dev.pkarpovich.nikki";
@@ -78,11 +84,12 @@ pub fn layout(home: &Path) -> Layout {
 pub fn install() -> Result<Installed, ServiceError> {
     let home = home_dir()?;
     let layout = layout(&home);
-    let program = std::env::current_exe().map_err(|source| ServiceError::Executable { source })?;
+    let program = executable()?;
 
     unload(BREW_LABEL)?;
     remove_file(&layout.brew_agent)?;
     unload(LABEL)?;
+    wait_unloaded(LABEL);
 
     let Layout {
         agent, log, errors, ..
@@ -112,6 +119,36 @@ pub fn uninstall() -> Result<Layout, ServiceError> {
     unload(LABEL)?;
     remove_file(&layout.agent)?;
     Ok(layout)
+}
+
+/// The running binary with symlinks resolved, which is the path the agent has to name.
+///
+/// The cask puts `nikki` on PATH as a symlink into the app, and `current_exe` hands back the path
+/// as invoked - so an agent written from it would run the daemon through the symlink, and macOS
+/// would key the Accessibility grant to that path instead of to the bundle.
+fn executable() -> Result<PathBuf, ServiceError> {
+    let program = std::env::current_exe().map_err(|source| ServiceError::Executable { source })?;
+    std::fs::canonicalize(program).map_err(|source| ServiceError::Executable { source })
+}
+
+/// Waits for launchd to finish unloading the agent, which `bootout` returns before doing.
+fn wait_unloaded(label: &str) {
+    let target = format!("gui/{}/{label}", uid());
+    let deadline = Instant::now() + UNLOAD_TIMEOUT;
+    while Instant::now() < deadline {
+        let printed = Command::new("launchctl")
+            .args(["print", &target])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let Ok(status) = printed else {
+            return;
+        };
+        if !status.success() {
+            return;
+        }
+        thread::sleep(UNLOAD_POLL);
+    }
 }
 
 fn housing(program: &Path) -> Housing {
@@ -212,7 +249,13 @@ fn agent_plist(program: &Path, log: &Path, errors: &Path) -> String {
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<true/>
+	<dict>
+		<key>PathState</key>
+		<dict>
+			<key>{program}</key>
+			<true/>
+		</dict>
+	</dict>
 	<key>StandardOutPath</key>
 	<string>{log}</string>
 	<key>StandardErrorPath</key>
@@ -303,6 +346,24 @@ mod tests {
         assert!(plist.contains("<string>/Applications/Nikki.app/Contents/MacOS/nikki</string>"));
         assert!(plist.contains("<string>/Users/tester/Library/Logs/nikki.log</string>"));
         assert!(!plist.contains("Cellar"));
+    }
+
+    #[test]
+    fn the_agent_lives_only_while_the_binary_it_names_is_there() {
+        let plist = agent_plist(
+            Path::new("/Applications/Nikki.app/Contents/MacOS/nikki"),
+            Path::new("/Users/tester/Library/Logs/nikki.log"),
+            Path::new("/Users/tester/Library/Logs/nikki.err.log"),
+        );
+        assert!(plist.contains("<key>PathState</key>"));
+        assert!(
+            plist
+                .contains("<key>/Applications/Nikki.app/Contents/MacOS/nikki</key>\n\t\t\t<true/>")
+        );
+        assert!(
+            !plist.contains("<key>KeepAlive</key>\n\t<true/>"),
+            "a plain KeepAlive restarts the daemon while the upgrade is still swapping the bundle"
+        );
     }
 
     #[test]
