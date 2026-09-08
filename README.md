@@ -802,6 +802,31 @@ will_sleep
 A line that is not understood is logged at warn and skipped. The whole file is read at startup and
 delivered in one drain, so it scripts a burst rather than a timeline.
 
+`NIKKI_TEST_SOURCES=<path>` is the other half of that seam: it replaces everything the window
+provider reads off the screen - the frontmost application, the window list, the displays, the focused
+window, idle seconds and input counters - with a scene from a JSON file. Without it the acceptance
+suite samples whatever the machine happens to be showing, and a host with no window session has no
+frontmost application at all: the provider assembles nothing, emits nothing, and every assertion
+about a window record waits for something that can never arrive. That is what made the suite pass on
+a desk and hang on a CI runner. A file that cannot be read or parsed is fatal, and an unknown field
+is an error rather than a silently ignored typo, because a scene that is not the one a test meant is
+a test that proves nothing.
+
+```json
+{
+  "frontmost": {"pid": 4242, "name": "Acceptance", "bundle_id": "dev.pkarpovich.acceptance"},
+  "displays": [{"index": 0, "x": 0, "y": 0, "width": 1440, "height": 900}],
+  "windows": [{"pid": 4242, "name": "Acceptance", "number": 1, "title": "an acceptance window",
+               "layer": 0, "x": 0, "y": 0, "width": 1440, "height": 900}],
+  "focused": {"window": {"title": "an acceptance window", "path": null}},
+  "activity": {"idle_sec": 0, "keys": 0, "mouse": 0, "mic_active": false,
+               "screen_locked": false, "display_asleep": false}
+}
+```
+
+Every key is optional; `"focused"` is `{"window": {...}}`, `"absent"` or `"unavailable"`, which is
+how a run scripts the degraded path that a machine can only reach by revoking Accessibility.
+
 ## Layout
 
 ```

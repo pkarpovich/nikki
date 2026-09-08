@@ -1,4 +1,5 @@
 pub mod browser_history;
+pub mod scripted;
 pub mod windows;
 
 use std::future::Future;

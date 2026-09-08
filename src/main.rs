@@ -22,6 +22,7 @@ use crate::macos::events::EventThread;
 use crate::providers::browser_history::{
     BrowserHistoryProvider, directory_for, discard_stale_snapshot, user_data_dir,
 };
+use crate::providers::scripted::{ScriptedSources, TEST_SOURCES_VAR};
 use crate::providers::windows::{MacSources, WindowProvider};
 use crate::providers::{Backoff, Ctx, supervise};
 use crate::runtime::ship::endpoint;
@@ -237,12 +238,31 @@ async fn run(config: Config) -> Result<(), String> {
     let (shutdown, listener) = watch::channel(false);
 
     let absorbing = tokio::spawn(absorb(records.clone(), ship_now, drafts, listener.clone()));
-    let windows = tokio::spawn(supervise(
-        WindowProvider::new(MacSources::new(event_thread.rescan_handle()), inbox),
-        ctx.clone(),
-        emissions.clone(),
-        Backoff::default(),
-    ));
+    let windows = match var_os(TEST_SOURCES_VAR) {
+        None => tokio::spawn(supervise(
+            WindowProvider::new(MacSources::new(event_thread.rescan_handle()), inbox),
+            ctx.clone(),
+            emissions.clone(),
+            Backoff::default(),
+        )),
+        Some(scene) => {
+            let scene = PathBuf::from(scene);
+            let sources = match ScriptedSources::load(&scene) {
+                Ok(sources) => sources,
+                Err(error) => return Err(error),
+            };
+            tracing::warn!(
+                path = %scene.display(),
+                "{TEST_SOURCES_VAR} replaces what is on screen with a scripted scene"
+            );
+            tokio::spawn(supervise(
+                WindowProvider::new(sources, inbox),
+                ctx.clone(),
+                emissions.clone(),
+                Backoff::default(),
+            ))
+        }
+    };
     let history = tokio::spawn(supervise(
         BrowserHistoryProvider::new(user_data, records),
         ctx,

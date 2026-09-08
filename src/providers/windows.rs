@@ -176,6 +176,7 @@ impl<S: Sources> Provider for WindowProvider<S> {
         ticker.tick().await;
 
         let mut pending: Option<Pending> = None;
+        let mut sampling = Sampling::Yes;
         loop {
             let deadline = pending.as_ref().map(|Pending { deadline, .. }| *deadline);
 
@@ -203,8 +204,10 @@ impl<S: Sources> Provider for WindowProvider<S> {
                     sources.rescan_observers();
                     let activity = sources.activity();
                     let Some(sample) = assemble(sources, None).await else {
+                        sampling = report(sampling, Sampling::No);
                         continue;
                     };
+                    sampling = report(sampling, Sampling::Yes);
                     let delta = counters.advance(activity.counters);
                     let record = tick_record(sample, tick_interval, activity, delta);
                     if out.send(Emission::new(vec![record])).await.is_err() {
@@ -216,8 +219,10 @@ impl<S: Sources> Provider for WindowProvider<S> {
                         continue;
                     };
                     let Some(sample) = assemble(sources, application).await else {
+                        sampling = report(sampling, Sampling::No);
                         continue;
                     };
+                    sampling = report(sampling, Sampling::Yes);
                     if out.send(Emission::new(vec![sample_record(kind, ts, sample)])).await.is_err() {
                         return Ok(());
                     }
@@ -225,6 +230,27 @@ impl<S: Sources> Provider for WindowProvider<S> {
             }
         }
     }
+}
+
+/// Whether samples are being assembled, so that finding no frontmost application is said once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sampling {
+    Yes,
+    No,
+}
+
+/// Says what changed and answers with the state now, so a silent daemon is not silent in the log.
+fn report(was: Sampling, now: Sampling) -> Sampling {
+    match (was, now) {
+        (Sampling::Yes, Sampling::No) => tracing::warn!(
+            "there is no frontmost application, so nothing is being sampled until one is in front"
+        ),
+        (Sampling::No, Sampling::Yes) => {
+            tracing::info!("an application is in front again, so sampling resumes")
+        }
+        (Sampling::Yes, Sampling::Yes) | (Sampling::No, Sampling::No) => {}
+    }
+    now
 }
 
 struct Pending {
