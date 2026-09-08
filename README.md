@@ -73,10 +73,20 @@ are required and the daemon exits without them, which under `keep_alive` is a re
 
 The cask puts `Nikki.app` in `/Applications` and puts `nikki` on `PATH` as a symlink into it, so the
 CLI and the daemon are the same binary. `nikki install` writes the launchd agent
-`dev.pkarpovich.nikki` against that app, logging to `~/Library/Logs/nikki.log`, and unloads and
-removes the agent `brew services` used to write so the two never run at once. `nikki uninstall`
-reverses it and leaves the app and the captured data alone. **An upgrade needs nothing further** -
-Homebrew replaces the app in place and the agent already points at it.
+`dev.pkarpovich.nikki` against that app - the bundle path, symlinks resolved, never the symlink on
+`PATH`, because that path is what macOS keys the Accessibility grant to - logging to
+`~/Library/Logs/nikki.log`, and unloads and removes the agent `brew services` used to write so the
+two never run at once. `nikki uninstall` reverses it and leaves the app and the captured data alone.
+
+**An upgrade needs nothing further.** `brew upgrade` swaps the bundle; within two seconds the running
+daemon notices that its own executable is no longer the file it started from, flushes what it holds
+and exits, and launchd - which keeps the agent alive only while the bundle's binary exists
+(`KeepAlive` with `PathState`) - starts the new version. `nikki --version` prints what is running,
+which is what tells you whether the upgrade took. The alternative, a cask that unloads and reloads
+the agent, is closed on both sides: an `uninstall launchctl:` stanza runs on every upgrade and takes
+the daemon down for good, and loading it back from `postflight_steps` is impossible - Homebrew 6 runs
+those in a sandbox that cannot talk to launchd, where `launchctl bootstrap` is refused with
+`Bootstrap failed: 5`.
 
 **Why a cask and not a formula.** macOS identifies a bundle by its bundle id at a path that never
 moves, and a loose binary by its absolute path alone. A formula installs into a versioned Cellar
@@ -791,6 +801,31 @@ will_sleep
 
 A line that is not understood is logged at warn and skipped. The whole file is read at startup and
 delivered in one drain, so it scripts a burst rather than a timeline.
+
+`NIKKI_TEST_SOURCES=<path>` is the other half of that seam: it replaces everything the window
+provider reads off the screen - the frontmost application, the window list, the displays, the focused
+window, idle seconds and input counters - with a scene from a JSON file. Without it the acceptance
+suite samples whatever the machine happens to be showing, and a host with no window session has no
+frontmost application at all: the provider assembles nothing, emits nothing, and every assertion
+about a window record waits for something that can never arrive. That is what made the suite pass on
+a desk and hang on a CI runner. A file that cannot be read or parsed is fatal, and an unknown field
+is an error rather than a silently ignored typo, because a scene that is not the one a test meant is
+a test that proves nothing.
+
+```json
+{
+  "frontmost": {"pid": 4242, "name": "Acceptance", "bundle_id": "dev.pkarpovich.acceptance"},
+  "displays": [{"index": 0, "x": 0, "y": 0, "width": 1440, "height": 900}],
+  "windows": [{"pid": 4242, "name": "Acceptance", "number": 1, "title": "an acceptance window",
+               "layer": 0, "x": 0, "y": 0, "width": 1440, "height": 900}],
+  "focused": {"window": {"title": "an acceptance window", "path": null}},
+  "activity": {"idle_sec": 0, "keys": 0, "mouse": 0, "mic_active": false,
+               "screen_locked": false, "display_asleep": false}
+}
+```
+
+Every key is optional; `"focused"` is `{"window": {...}}`, `"absent"` or `"unavailable"`, which is
+how a run scripts the degraded path that a machine can only reach by revoking Accessibility.
 
 ## Layout
 

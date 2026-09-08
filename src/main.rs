@@ -1,4 +1,5 @@
 mod config;
+mod executable;
 mod extract;
 mod macos;
 mod providers;
@@ -21,6 +22,7 @@ use crate::macos::events::EventThread;
 use crate::providers::browser_history::{
     BrowserHistoryProvider, directory_for, discard_stale_snapshot, user_data_dir,
 };
+use crate::providers::scripted::{ScriptedSources, TEST_SOURCES_VAR};
 use crate::providers::windows::{MacSources, WindowProvider};
 use crate::providers::{Backoff, Ctx, supervise};
 use crate::runtime::ship::endpoint;
@@ -31,6 +33,9 @@ const PROVIDERS: &str = "windows, browser_history";
 /// nikki captures what happens on this Mac and ships it to the nikki service.
 #[derive(FromArgs)]
 struct Args {
+    /// print the version and exit
+    #[argh(switch, short = 'V')]
+    version: bool,
     /// load and validate the configuration, then exit
     #[argh(switch)]
     check_config: bool,
@@ -60,9 +65,15 @@ async fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
 
     let Args {
+        version,
         check_config,
         command,
     } = argh::from_env();
+
+    if version {
+        println!("nikki {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
 
     if let Some(command) = command {
         return run_service(command);
@@ -199,7 +210,18 @@ async fn run(config: Config) -> Result<(), String> {
         Err(source) => return Err(format!("the event thread could not start: {source}")),
     };
 
+    let executable = executable::Executable::current();
+    match &executable {
+        Some(executable::Executable { path, .. }) => {
+            tracing::debug!(path = %path.display(), "watching the running binary for a replacement")
+        }
+        None => tracing::warn!(
+            "the running binary could not be located, so an upgrade will not restart the daemon"
+        ),
+    }
+
     tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
         device = %config.device,
         service = %endpoint,
         accessibility = accessibility_is_trusted(),
@@ -216,12 +238,31 @@ async fn run(config: Config) -> Result<(), String> {
     let (shutdown, listener) = watch::channel(false);
 
     let absorbing = tokio::spawn(absorb(records.clone(), ship_now, drafts, listener.clone()));
-    let windows = tokio::spawn(supervise(
-        WindowProvider::new(MacSources::new(event_thread.rescan_handle()), inbox),
-        ctx.clone(),
-        emissions.clone(),
-        Backoff::default(),
-    ));
+    let windows = match var_os(TEST_SOURCES_VAR) {
+        None => tokio::spawn(supervise(
+            WindowProvider::new(MacSources::new(event_thread.rescan_handle()), inbox),
+            ctx.clone(),
+            emissions.clone(),
+            Backoff::default(),
+        )),
+        Some(scene) => {
+            let scene = PathBuf::from(scene);
+            let sources = match ScriptedSources::load(&scene) {
+                Ok(sources) => sources,
+                Err(error) => return Err(error),
+            };
+            tracing::warn!(
+                path = %scene.display(),
+                "{TEST_SOURCES_VAR} replaces what is on screen with a scripted scene"
+            );
+            tokio::spawn(supervise(
+                WindowProvider::new(sources, inbox),
+                ctx.clone(),
+                emissions.clone(),
+                Backoff::default(),
+            ))
+        }
+    };
     let history = tokio::spawn(supervise(
         BrowserHistoryProvider::new(user_data, records),
         ctx,
@@ -232,6 +273,9 @@ async fn run(config: Config) -> Result<(), String> {
 
     tokio::select! {
         _ = terminate() => tracing::info!("a termination signal arrived"),
+        _ = executable::swapped(executable.as_ref()) => tracing::info!(
+            "the binary was replaced; stopping so launchd starts the new version"
+        ),
         _ = pipeline.shipper().run(listener) => {
             tracing::error!("the shipper stopped before the daemon did");
         }

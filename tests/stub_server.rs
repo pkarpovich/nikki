@@ -14,11 +14,37 @@ use serde_json::{Value, json};
 const PATIENCE: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(25);
 const SHUTDOWN_PATIENCE: Duration = Duration::from_secs(15);
+const READ_PATIENCE: Duration = Duration::from_secs(10);
 const RECORDS_PATH: &str = "/api/v1/records";
 const DEVICE: &str = "acceptance-mac";
 const PROFILE: &str = "MBP_21";
 const FIXTURE_VISITS: usize = 6;
 const SQLITE: &str = "/usr/bin/sqlite3";
+
+/// What the daemon is told is on screen. A host with no window session - a CI runner - has no
+/// frontmost application, and without one the window provider assembles nothing at all, so a suite
+/// that sampled the real screen passed or hung depending on the machine it ran on.
+const SCENE: &str = r#"{
+    "frontmost": {"pid": 4242, "name": "Acceptance", "bundle_id": "dev.pkarpovich.acceptance"},
+    "displays": [{"index": 0, "x": 0, "y": 0, "width": 1440, "height": 900}],
+    "windows": [
+        {"pid": 4242, "name": "Acceptance", "number": 1, "title": "an acceptance window",
+         "x": 0, "y": 0, "width": 1440, "height": 900}
+    ],
+    "focused": {"window": {"title": "an acceptance window", "path": null}},
+    "activity": {"idle_sec": 0}
+}"#;
+
+/// The same scene with accessibility answering nothing, which is what a degraded sample is made of.
+const BLIND_SCENE: &str = r#"{
+    "frontmost": {"pid": 4242, "name": "Acceptance", "bundle_id": "dev.pkarpovich.acceptance"},
+    "displays": [{"index": 0, "x": 0, "y": 0, "width": 1440, "height": 900}],
+    "windows": [
+        {"pid": 4242, "name": "Acceptance", "number": 1, "title": "an acceptance window",
+         "x": 0, "y": 0, "width": 1440, "height": 900}
+    ],
+    "focused": "unavailable"
+}"#;
 const KILL: &str = "/bin/kill";
 
 const REDACTED_AWAY: [&str; 5] = [
@@ -183,6 +209,11 @@ fn serve(listener: TcpListener, state: &StubState) {
 }
 
 fn handle(mut stream: TcpStream, state: &StubState) {
+    // The listener polls, so it is non-blocking - and on macOS the accepted socket inherits that.
+    // Every read below treats WouldBlock as the end of the request, so a body that arrives a
+    // moment after the connection would be dropped unanswered and unrecorded.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(READ_PATIENCE));
     let Ok(peer) = stream.try_clone() else {
         return;
     };
@@ -297,6 +328,7 @@ struct Settings {
     max_rows: u64,
     history: History,
     events: Vec<&'static str>,
+    scene: &'static str,
 }
 
 impl Settings {
@@ -307,6 +339,7 @@ impl Settings {
             max_rows: 200_000,
             history: History::Absent,
             events: Vec::new(),
+            scene: SCENE,
         }
     }
 }
@@ -317,6 +350,7 @@ struct Daemon {
     config: PathBuf,
     state_dir: PathBuf,
     events: PathBuf,
+    scene: PathBuf,
     log: PathBuf,
     child: Option<Child>,
 }
@@ -354,6 +388,9 @@ impl Daemon {
         }
         fs::write(&events, script).expect("the harness event script could not be written");
 
+        let scene = root.join("scene.json");
+        fs::write(&scene, settings.scene).expect("the harness scene could not be written");
+
         Daemon {
             state_dir: root.join("state"),
             log: root.join("nikki.log"),
@@ -361,6 +398,7 @@ impl Daemon {
             home,
             config,
             events,
+            scene,
             child: None,
         }
     }
@@ -375,6 +413,7 @@ impl Daemon {
             .env("NIKKI_CONFIG", &self.config)
             .env("NIKKI_STATE_DIR", &self.state_dir)
             .env("NIKKI_TEST_EVENTS", &self.events)
+            .env("NIKKI_TEST_SOURCES", &self.scene)
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("RUST_LOG", "info")
             .stdout(Stdio::from(log))
@@ -486,16 +525,6 @@ fn plain(text: &str) -> String {
         }
     }
     plain
-}
-
-fn accessibility_granted(log: &str) -> bool {
-    for line in log.lines() {
-        let Some((_, tail)) = line.split_once("accessibility=") else {
-            continue;
-        };
-        return tail.starts_with("true");
-    }
-    panic!("the daemon never reported whether accessibility is available:\n{log}");
 }
 
 fn wait_for(daemon: &Daemon, what: &str, mut ready: impl FnMut() -> bool) {
@@ -832,24 +861,46 @@ fn a_capture_run_matches_the_wire_contract() {
         }
     }
 
-    let granted = accessibility_granted(&daemon.log());
     let samples = samples(&envelopes);
     assert!(!samples.is_empty(), "no window sample was recorded");
     for sample in &samples {
         check_degradation(sample);
-    }
-    if granted {
-        eprintln!(
-            "acceptance: accessibility is granted to this process, so the degraded path was not \
-             exercised here; src/providers/windows.rs covers it"
+        assert_eq!(
+            sample["degraded"],
+            Value::Bool(false),
+            "the scene answers with a focused window, so nothing is degraded: {sample}"
         );
-        return;
+        assert_eq!(
+            sample["payload"]["title"], "an acceptance window",
+            "a sample carries the title the scene named: {sample}"
+        );
     }
+}
+
+#[test]
+fn a_scene_without_accessibility_ships_degraded_samples() {
+    let stub = Stub::start(vec![Answer::Accept]);
+    let mut settings = Settings::new();
+    settings.tick_interval = 1;
+    settings.scene = BLIND_SCENE;
+
+    let mut daemon = Daemon::install("blind", &stub.url(), &settings);
+    daemon.start();
+    wait_for(&daemon, "the stub recorded two ticks", || {
+        counted(&distinct(&stub.envelopes()), "windows", "tick") >= 2
+    });
+    daemon.stop();
+
+    let envelopes = distinct(&stub.envelopes());
+    let samples = samples(&envelopes);
+    assert!(!samples.is_empty(), "no window sample was recorded");
     for sample in &samples {
+        check_envelope(sample);
+        check_degradation(sample);
         assert_eq!(
             sample["degraded"],
             Value::Bool(true),
-            "accessibility is unavailable yet a sample is not degraded: {sample}"
+            "accessibility answers nothing, so every sample is degraded: {sample}"
         );
     }
 }

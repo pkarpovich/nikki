@@ -89,6 +89,44 @@ jobs:
           mkdir -p dist
           ./scripts/bundle.sh "target/$TARGET/release/nikki" dist "$identity"
 
+      # Signing alone leaves Gatekeeper asking the user to confirm an unverified
+      # developer on the first launch of every download. Notarization is what
+      # removes that, and stapling is what makes the verdict survive a machine
+      # with no network.
+      - name: Notarize and staple
+        env:
+          KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          KEY_P8: ${{ secrets.ASC_KEY_CONTENT }}
+        run: |
+          key=$(mktemp)
+          printf '%s\n' "$KEY_P8" > "$key"
+          ditto -c -k --keepParent dist/Nikki.app dist/notarize.zip
+          submission=$(xcrun notarytool submit dist/notarize.zip \
+            --key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" \
+            --wait --timeout 30m --output-format json)
+          echo "$submission"
+          id=$(echo "$submission" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          status=$(echo "$submission" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+          if [ "$status" != "Accepted" ]; then
+            xcrun notarytool log "$id" --key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" >&2
+            rm -f "$key"
+            exit 1
+          fi
+          rm -f "$key" dist/notarize.zip
+          xcrun stapler staple dist/Nikki.app
+
+      # The release is what the cask downloads, so the verdict is taken here on
+      # the exact bundle that is about to be zipped, not on a rebuilt one.
+      - name: Gatekeeper accepts the bundle
+        run: |
+          verdict=$(spctl --assess --type exec --verbose=2 dist/Nikki.app 2>&1)
+          echo "$verdict"
+          if ! echo "$verdict" | grep -q "Notarized Developer ID"; then
+            echo "the bundle is not notarized" >&2
+            exit 1
+          fi
+
       - name: Package
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -157,10 +195,16 @@ jobs:
 
             url "https://github.com/pkarpovich/nikki/releases/download/v#{version}/Nikki-arm64-#{version}.zip"
             name "nikki"
-            desc "macOS activity capture daemon"
+            desc "Activity capture daemon"
             homepage "https://github.com/pkarpovich/nikki"
 
+            livecheck do
+              url :url
+              strategy :github_latest
+            end
+
             depends_on arch: :arm64
+            depends_on macos: :sonoma
 
             # The app is what makes the macOS permissions durable. TCC identifies a
             # bundle by its identifier at a path that never moves, and a loose binary
@@ -171,11 +215,27 @@ jobs:
             app "Nikki.app"
             binary "#{appdir}/Nikki.app/Contents/MacOS/nikki"
 
+            # launchd is nikki's business, not the cask's. \`nikki install\` writes the
+            # agent once; on an upgrade the running daemon notices its bundle was
+            # swapped, flushes what it holds and exits, and launchd - keeping the agent
+            # alive only while the bundle's own binary exists - starts the new version.
+            # An uninstall stanza unloading the agent would take it down on every
+            # upgrade and leave it down, and loading it back from postflight_steps is
+            # impossible: the steps sandbox cannot talk to launchd.
+
+            zap trash: [
+              "~/.config/nikki",
+              "~/Library/Application Support/nikki",
+              "~/Library/LaunchAgents/dev.pkarpovich.nikki.plist",
+              "~/Library/Logs/nikki.err.log",
+              "~/Library/Logs/nikki.log",
+            ]
+
             caveats <<~CAVEATS
               Write ~/.config/nikki/config.toml BEFORE installing the service.
               service_url and device are required and the daemon exits without
-              them, which under keep_alive is a restart loop. The full set of
-              keys is in the README; the minimum is:
+              them, which under a launchd agent is a restart loop. The full set
+              of keys is in the README; the minimum is:
 
                 service_url = "https://nikki.example"
                 device = "mbp-21"
@@ -183,15 +243,16 @@ jobs:
                 [browser]
                 profile = "MBP_21"
 
-              Then:
+              Then, once:
 
                 nikki --check-config
                 nikki install
 
-              \`nikki install\` writes the launchd agent dev.pkarpovich.nikki and
-              starts it. It also unloads and removes the agent \`brew services\`
-              used to write, so the two never run at once. An upgrade replaces
-              the app in place and needs nothing further.
+              That writes the launchd agent dev.pkarpovich.nikki and starts it.
+              It also unloads and removes the agent \`brew services\` used to
+              write, so the two never run at once. Upgrades need nothing: the
+              running daemon notices the new bundle, flushes what it holds and
+              restarts itself.
 
               Grant Accessibility to Nikki in System Settings > Privacy &
               Security, then \`nikki install\` once more - macOS caches the denial
@@ -206,16 +267,6 @@ jobs:
 
               Logs are at ~/Library/Logs/nikki.log and nikki.err.log.
             CAVEATS
-
-            uninstall quit:      "dev.pkarpovich.nikki",
-                      launchctl: "dev.pkarpovich.nikki"
-
-            zap trash: [
-              "~/.config/nikki",
-              "~/Library/Application Support/nikki",
-              "~/Library/Logs/nikki.log",
-              "~/Library/Logs/nikki.err.log",
-            ]
           end
           EOF
 
