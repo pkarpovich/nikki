@@ -5,8 +5,9 @@ service. One signed application per Mac, installed from a Homebrew tap and run b
 
 Toggl's Activity view reports only which application was frontmost and never what was being done in
 it. This daemon captures the missing layer: window titles, the open document path, the browser tab
-and profile, the terminal workspace and working directory, plus real activity signals - input
-volume, idle, lock, screen sleep and microphone. And it never asks you to press start.
+and profile, the terminal workspace and working directory, the text of every Claude Code
+conversation, plus real activity signals - input volume, idle, lock, screen sleep and microphone.
+And it never asks you to press start.
 
 The daemon never interprets. It captures faithfully and ships; a summary of the day is produced
 elsewhere, from the service API.
@@ -21,8 +22,8 @@ against a record that was kept for you - which is the whole difference from a ti
 
 Personal, single-user, and specific about its machine: Apple Silicon only, one daemon per Mac,
 records shipped to one self-hosted service over the local network. The browser it reads is Dia; the
-terminal it understands in detail is agterm. Everything else is still captured, just with less
-inside `details`.
+terminal it understands in detail is agterm; the agent transcripts it reads are Claude Code's, under
+`~/.claude` and `~/.claude-work`. Everything else is still captured, just with less inside `details`.
 
 ## What a record looks like
 
@@ -99,6 +100,12 @@ Migrating from the formula: `brew uninstall nikki`, then install the cask and ru
 The grant resets once more on the move, because the path changes one last time. If `nikki` is in a
 Brewfile, it becomes a `cask` line without `restart_service:`.
 
+**A release that adds a `(provider, kind)` pair must not reach a Mac before the service accepts it.**
+The service rejects an unknown pair per record inside a `200`, and the daemon deletes every record of
+a batch it got a 2xx for, so an early upgrade destroys that provider's backfill for good - for
+`claude_code/message` and `claude_code/session`, every existing transcript. Post one hand-made record
+of each new pair to `/api/v1/records` and see `accepted: 1` before upgrading.
+
 Releases are cut by tagging; see `docs/releasing.md`.
 
 ## Build
@@ -130,7 +137,7 @@ you go to grant it the permissions it needs.
 |---|---|---|
 | Accessibility | which application is focused, window titles, the focused window, `AXDocument` paths, activation and title-change events | none |
 | Automation -> Dia | the active tab's URL, title and profile | one-time prompt on first use |
-| (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state, the process table | none |
+| (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state, the process table, Claude Code transcripts under the configured roots | none |
 
 Both grants are keyed by **identity and location together**: the Developer ID team plus the
 `dev.pkarpovich.nikki` identifier that `codesign --identifier` pins, and the place the program is
@@ -305,6 +312,7 @@ pub struct Emission {
     pub records: Vec<RecordDraft>,
     pub cursor: Option<Cursor>,
     pub committed: Option<oneshot::Sender<()>>,
+    pub ships_before_commit: bool,
 }
 ```
 
@@ -315,9 +323,14 @@ commits resumes after `T` and loses those records permanently, silently, with no
 the cursor first loses them the same way.
 
 `Emission::awaiting_commit` returns a receipt the caller can block on, sent only once the transaction
-committed and dropped when it failed. This is how the sleep marker is made durable before macOS
-suspends the machine, and how the browser provider advances its in-memory cursor: visits that never
-reached the buffer leave the cursor where it was and are read again on the next poll.
+committed and dropped when it failed. Before sending it the runtime also asks for a shipment and
+waits up to 2 s for it. This is how the sleep marker is made durable before macOS suspends the
+machine, and how the browser provider advances its in-memory cursor: visits that never reached the
+buffer leave the cursor where it was and are read again on the next poll.
+`Emission::awaiting_buffer` returns the same receipt once the transaction commits, without asking for
+a shipment. `claude_code` uses it because it emits once per changed transcript per poll, and a forced
+shipment on each of them would hold the record writer for 2 s apiece while the service is
+unreachable - hundreds of files on the first backfill.
 
 Each provider runs as one tokio task under `providers::supervise`, which restarts it with
 exponential backoff from 1s to a 5-minute ceiling. A panic is caught and restarted like any other
@@ -431,10 +444,11 @@ application anyway.
 1. Write `src/providers/<name>.rs` and declare it in `src/providers/mod.rs`.
 2. Implement `Provider`. Return `Err(ProviderError)` rather than panicking, and never block the
    runtime - the supervisor can only act on a returned error, not on a hang.
-3. Emit `Emission::new(records)`, or `Emission::awaiting_commit(records, cursor)` when the provider
+3. Emit `Emission::new(records)`, or `Emission::awaiting_buffer(records, cursor)` when the provider
    has durable progress to record - it hands back a receipt that resolves once the records and the
-   cursor are committed together, so a failed commit leaves the cursor where it was. Never persist a
-   cursor yourself.
+   cursor are committed together, so a failed commit leaves the cursor where it was. Use
+   `Emission::awaiting_commit` only when the records must also reach the service before the caller
+   goes on. Never persist a cursor yourself.
 4. Add the `(provider, kind)` pair and its payload contract to the wire contract below **and to the
    service repository in the same pass**. The server validates per pair and *deletes* a record whose
    pair it does not know, so an unannounced kind is destroyed permanently the first time it is sent.
@@ -659,9 +673,9 @@ rather than when it was shipped.
 | `uuid` | string | yes | transcript line `uuid` |
 | `block` | integer | yes | index of the text block within the line, from 0 |
 | `role` | string | yes | `user` or `assistant` |
-| `message_kind` | string | yes | user lines: `prompt` (typed by the user), `command` (a slash or `!` command with its args), `command_output` (a local command's output), `notification` (a harness task notification), `compact_summary` (the model's summary written at context compaction); assistant lines: `text` (a model reply) |
+| `message_kind` | string | yes | user lines: `prompt` (typed by the user), `command` (a slash or `!` command with its args), `command_output` (the output of a slash or `!` command, as written - so a secret a `!` command prints ships with it), `notification` (a harness task notification), `compact_summary` (the model's summary written at context compaction); assistant lines: `text` (a model reply) |
 | `text` | string | yes | the block's text exactly as in the transcript; may be `""` |
-| `cwd` | string | yes | transcript `cwd` |
+| `cwd` | string | yes | transcript `cwd`; `""` when the line has none |
 | `git_branch` | string | no | transcript `gitBranch`, omitted when absent or empty |
 | `profile` | string | yes | the transcript root's profile name, e.g. `claude` or `claude-work` |
 
@@ -671,7 +685,7 @@ the last message line read before it in the file, else the file's modification t
 
 | field | type | required | meaning |
 |---|---|---|---|
-| `session_id` | string | yes | transcript `sessionId` |
+| `session_id` | string | yes | transcript `sessionId` (fallback: file stem) |
 | `field` | string | yes | `custom_title`, `ai_title` or `pr` |
 | `value` | string | yes | the title text, or the PR url |
 
@@ -690,7 +704,8 @@ the last message line read before it in the file, else the file's modification t
 The values of `role`, `message_kind` and `field` are **stored opaquely** by the service and never
 checked against a fixed set, like `transition`. A daemon that adds a new message kind later must not
 have every such record rejected, and so lost for good. An empty `text` is accepted, since a real text
-block can be empty after a model stop; only an absent or `null` `text` is a missing field.
+block can be empty after a model stop, and so is an empty `cwd`, which a line without one ships; only
+an absent or `null` value is a missing field.
 
 ### `details` on a window record
 

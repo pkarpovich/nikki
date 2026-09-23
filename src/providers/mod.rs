@@ -30,6 +30,7 @@ pub struct Emission {
     pub records: Vec<RecordDraft>,
     pub cursor: Option<Cursor>,
     pub committed: Option<oneshot::Sender<()>>,
+    pub ships_before_commit: bool,
 }
 
 impl Emission {
@@ -38,6 +39,7 @@ impl Emission {
             records,
             cursor: None,
             committed: None,
+            ships_before_commit: false,
         }
     }
 
@@ -50,6 +52,21 @@ impl Emission {
             records,
             cursor,
             committed: Some(committed),
+            ships_before_commit: true,
+        };
+        (emission, receipt)
+    }
+
+    pub fn awaiting_buffer(
+        records: Vec<RecordDraft>,
+        cursor: Option<Cursor>,
+    ) -> (Emission, oneshot::Receiver<()>) {
+        let (committed, receipt) = oneshot::channel();
+        let emission = Emission {
+            records,
+            cursor,
+            committed: Some(committed),
+            ships_before_commit: false,
         };
         (emission, receipt)
     }
@@ -346,9 +363,11 @@ pub(crate) mod tests {
             records,
             cursor,
             committed,
+            ships_before_commit,
         } = Emission::new(Vec::new());
         assert!(records.is_empty());
         assert!(cursor.is_none());
         assert!(committed.is_none());
+        assert!(!ships_before_commit);
     }
 }

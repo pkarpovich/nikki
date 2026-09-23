@@ -297,6 +297,7 @@ async fn store(records: &BufferHandle, ship_now: &ShipNow, emission: Emission) {
         records: drafts,
         cursor,
         committed,
+        ships_before_commit,
     } = emission;
     let count = drafts.len();
     let buffered = match records.enqueue(drafts, cursor).await {
@@ -311,6 +312,10 @@ async fn store(records: &BufferHandle, ship_now: &ShipNow, emission: Emission) {
     let Some(committed) = committed else {
         return;
     };
+    if !ships_before_commit {
+        let _ = committed.send(());
+        return;
+    }
     if let Err(error) = records.flush_now().await {
         tracing::error!(%error, "the buffer could not be flushed before the acknowledgement");
     }
@@ -803,6 +808,26 @@ mod tests {
 
         storing.await.expect("the record was stored");
         committed.await.expect("the record was acknowledged");
+        assert_eq!(buffered(&records).await, 1);
+        buffer.close().await.expect("the buffer closes");
+    }
+
+    #[tokio::test]
+    async fn an_emission_awaiting_the_buffer_is_acknowledged_without_asking_for_a_shipment() {
+        let state = TempState::new("commit-buffer-only");
+        let buffer = open_buffer(&state);
+        let records = buffer.handle();
+
+        let (ship_now, mut requests) = ship_now_channel();
+        let (emission, committed) =
+            Emission::awaiting_buffer(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))], None);
+        store(&records, &ship_now, emission).await;
+
+        committed.await.expect("the record was acknowledged");
+        assert!(
+            requests.try_recv().is_err(),
+            "an emission awaiting only the buffer must not force a shipment"
+        );
         assert_eq!(buffered(&records).await, 1);
         buffer.close().await.expect("the buffer closes");
     }

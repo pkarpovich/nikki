@@ -734,6 +734,13 @@ drop = ["title"]
     }
 
     #[test]
+    fn a_claude_code_root_without_a_profile_name_is_rejected() {
+        for roots in ["roots = [\"/\"]", "roots = [\"/Users/..\"]"] {
+            assert_eq!(claude_code_invalid_field(roots), "claude_code.roots");
+        }
+    }
+
+    #[test]
     fn two_roots_with_the_same_profile_name_are_rejected() {
         for roots in [
             "roots = [\"~/.claude\", \"/Volumes/archive/claude\"]",

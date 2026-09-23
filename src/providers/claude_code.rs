@@ -27,7 +27,7 @@ const TRANSCRIPT_EXTENSION: &str = "jsonl";
 pub struct ClaudeCodeProvider {
     cursors: BufferHandle,
     known: HashMap<PathBuf, Option<FileCursor>>,
-    unreadable_roots: HashSet<PathBuf>,
+    unreadable: HashSet<PathBuf>,
 }
 
 enum Flow {
@@ -40,7 +40,7 @@ impl ClaudeCodeProvider {
         ClaudeCodeProvider {
             cursors,
             known: HashMap::new(),
-            unreadable_roots: HashSet::new(),
+            unreadable: HashSet::new(),
         }
     }
 
@@ -64,13 +64,13 @@ impl ClaudeCodeProvider {
     }
 
     fn transcripts_in(&mut self, projects: &Path) -> Option<Vec<PathBuf>> {
-        match transcripts(projects) {
+        match transcripts(projects, &mut self.unreadable) {
             Ok(paths) => {
-                self.unreadable_roots.remove(projects);
+                self.unreadable.remove(projects);
                 Some(paths)
             }
             Err(error) => {
-                if self.unreadable_roots.insert(projects.to_path_buf()) {
+                if self.unreadable.insert(projects.to_path_buf()) {
                     tracing::info!(
                         path = %projects.display(),
                         %error,
@@ -91,28 +91,35 @@ impl ClaudeCodeProvider {
         let mut cursor = self.cursor_for(path).await?;
         loop {
             let increment = match read_increment(path, profile, cursor, READ_BUDGET) {
-                Ok(Some(increment)) => increment,
-                Ok(None) => return Ok(Flow::Continue),
+                Ok(increment) => {
+                    self.unreadable.remove(path);
+                    increment
+                }
                 Err(error) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        %error,
-                        "a transcript could not be read and is tried again on the next poll"
-                    );
+                    if self.unreadable.insert(path.to_path_buf()) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %error,
+                            "a transcript cannot be read and is skipped until it can"
+                        );
+                    }
                     return Ok(Flow::Continue);
                 }
             };
-            let Increment {
+            let Some(Increment {
                 drafts,
                 cursor: advanced,
-            } = increment;
+            }) = increment
+            else {
+                return Ok(Flow::Continue);
+            };
 
             let stored = Cursor {
                 provider: runtime::Provider::ClaudeCode,
                 key: cursor_key(path),
                 value: advanced.encode(),
             };
-            let (emission, committed) = Emission::awaiting_commit(drafts, Some(stored));
+            let (emission, committed) = Emission::awaiting_buffer(drafts, Some(stored));
             if out.send(emission).await.is_err() {
                 return Ok(Flow::RuntimeGone);
             }
@@ -175,7 +182,7 @@ impl Provider for ClaudeCodeProvider {
     }
 }
 
-fn transcripts(projects: &Path) -> io::Result<Vec<PathBuf>> {
+fn transcripts(projects: &Path, unreadable: &mut HashSet<PathBuf>) -> io::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for project in fs::read_dir(projects)? {
         let Ok(project) = project else {
@@ -186,13 +193,18 @@ fn transcripts(projects: &Path) -> io::Result<Vec<PathBuf>> {
             continue;
         }
         let entries = match fs::read_dir(&project) {
-            Ok(entries) => entries,
+            Ok(entries) => {
+                unreadable.remove(&project);
+                entries
+            }
             Err(error) => {
-                tracing::warn!(
-                    path = %project.display(),
-                    %error,
-                    "a Claude Code project directory cannot be read and is skipped"
-                );
+                if unreadable.insert(project.clone()) {
+                    tracing::warn!(
+                        path = %project.display(),
+                        %error,
+                        "a Claude Code project directory cannot be read and is skipped until it can"
+                    );
+                }
                 continue;
             }
         };
@@ -268,27 +280,6 @@ pub struct LineContext<'a> {
 pub struct LineOutcome {
     pub drafts: Vec<RecordDraft>,
     pub message_ts: Option<Timestamp>,
-}
-
-enum LineType {
-    User,
-    Assistant,
-    CustomTitle,
-    AiTitle,
-    PrLink,
-}
-
-impl LineType {
-    fn parse(value: &str) -> Option<LineType> {
-        match value {
-            "user" => Some(LineType::User),
-            "assistant" => Some(LineType::Assistant),
-            "custom-title" => Some(LineType::CustomTitle),
-            "ai-title" => Some(LineType::AiTitle),
-            "pr-link" => Some(LineType::PrLink),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -484,15 +475,13 @@ pub fn drafts_from_line(line: &Value, context: &LineContext) -> LineOutcome {
     let Some(line_type) = line.get("type").and_then(Value::as_str) else {
         return LineOutcome::default();
     };
-    let Some(line_type) = LineType::parse(line_type) else {
-        return LineOutcome::default();
-    };
     match line_type {
-        LineType::User => message_drafts(line, Role::User, context),
-        LineType::Assistant => message_drafts(line, Role::Assistant, context),
-        LineType::CustomTitle => session_drafts(line, "custom_title", "customTitle", context),
-        LineType::AiTitle => session_drafts(line, "ai_title", "aiTitle", context),
-        LineType::PrLink => session_drafts(line, "pr", "prUrl", context),
+        "user" => message_drafts(line, Role::User, context),
+        "assistant" => message_drafts(line, Role::Assistant, context),
+        "custom-title" => session_drafts(line, "custom_title", "customTitle", context),
+        "ai-title" => session_drafts(line, "ai_title", "aiTitle", context),
+        "pr-link" => session_drafts(line, "pr", "prUrl", context),
+        _ => LineOutcome::default(),
     }
 }
 
@@ -656,6 +645,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use tokio::sync::mpsc::{Receiver, channel};
 
@@ -996,7 +986,8 @@ mod tests {
 
     impl TempTranscripts {
         fn new(name: &str) -> TempTranscripts {
-            let path = std::env::temp_dir().join(format!("nikki-claude-test-{name}"));
+            let path = std::env::temp_dir()
+                .join(format!("nikki-claude-test-{}-{name}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             let transcripts = TempTranscripts { path };
             fs::create_dir_all(transcripts.project())
@@ -1008,6 +999,13 @@ mod tests {
             ClaudeRoot {
                 profile: PROFILE.to_string(),
                 projects: self.path.join(".claude").join("projects"),
+            }
+        }
+
+        fn work_root(&self) -> ClaudeRoot {
+            ClaudeRoot {
+                profile: "claude-work".to_string(),
+                projects: self.path.join(".claude-work").join("projects"),
             }
         }
 
@@ -1345,9 +1343,62 @@ mod tests {
     }
 
     #[test]
-    fn the_production_budget_holds_five_hundred_records_or_four_mebibytes() {
-        assert_eq!(READ_BUDGET.max_records, 500);
-        assert_eq!(READ_BUDGET.max_bytes, 4 * 1024 * 1024);
+    fn a_read_file_yields_every_fixture_draft_with_its_mtime_on_the_leading_title() {
+        let transcripts = TempTranscripts::new("mtime");
+        let path = transcripts.write(FIXTURE);
+        File::options()
+            .write(true)
+            .open(&path)
+            .expect("the transcript could not be opened")
+            .set_modified(UNIX_EPOCH + Duration::from_millis(FILE_MODIFIED as u64))
+            .expect("the transcript mtime could not be set");
+
+        let drafts = drafts_in(&read_all(&path, None, UNBOUNDED));
+
+        let mut expected = Vec::new();
+        for outcome in outcomes() {
+            expected.extend(outcome.drafts);
+        }
+        assert_eq!(drafts, expected);
+        assert_eq!(drafts[0].ts, Timestamp::from_millis(FILE_MODIFIED));
+    }
+
+    #[test]
+    fn a_line_without_a_session_id_takes_the_file_stem() {
+        let transcripts = TempTranscripts::new("stem");
+        let path = transcripts.write(concat!(
+            "{\"type\": \"user\", \"uuid\": \"u-1\", \"timestamp\": \"2026-09-14T11:40:00.000Z\", \"cwd\": \"/x\", \"message\": {\"content\": \"hi\"}}\n",
+            "{\"type\": \"ai-title\", \"aiTitle\": \"a title\", \"sessionId\": \"\"}\n",
+        ));
+
+        let drafts = drafts_in(&read_all(&path, None, UNBOUNDED));
+
+        assert_eq!(drafts.len(), 2);
+        for draft in drafts {
+            assert_eq!(draft.payload["session_id"], json!(SESSION));
+        }
+    }
+
+    #[test]
+    fn only_session_files_two_levels_under_projects_are_listed() {
+        let temp = TempTranscripts::new("listing");
+        let session = temp.write(FIXTURE);
+        temp.write_subagent(SUBAGENT_LINE);
+        let ClaudeRoot { projects, .. } = temp.root();
+        fs::write(projects.join("stray.jsonl"), SUBAGENT_LINE)
+            .expect("the stray transcript could not be written");
+        fs::write(temp.project().join("notes.txt"), "not a transcript")
+            .expect("the note could not be written");
+        fs::create_dir_all(temp.project().join("folder.jsonl"))
+            .expect("the directory could not be created");
+        let other_project = projects.join("-Users-u-Projects-nikki");
+        fs::create_dir_all(&other_project).expect("the project could not be created");
+        let other = other_project.join("b-session.jsonl");
+        fs::write(&other, SUBAGENT_LINE).expect("the transcript could not be written");
+
+        let listed = transcripts(&projects, &mut HashSet::new()).expect("the root lists");
+
+        assert_eq!(listed, vec![session, other]);
     }
 
     const SUBAGENT_LINE: &str = "{\"type\": \"user\", \"uuid\": \"subagent-1\", \"sessionId\": \"subagent-session\", \"timestamp\": \"2026-09-14T11:36:00.000Z\", \"cwd\": \"/Users/u/Projects/THE_FEUD_V2\", \"message\": {\"content\": \"a subagent prompt\"}}\n";
@@ -1367,6 +1418,7 @@ mod tests {
             records,
             cursor,
             committed,
+            ..
         }) = inbox.recv().await
         {
             handle
@@ -1475,22 +1527,113 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_root_is_skipped_without_failing_the_provider() {
+    async fn a_missing_root_is_skipped_without_failing_the_provider_and_read_once_it_appears() {
         let transcripts = TempTranscripts::new("provider-missing-root");
         transcripts.write(FIXTURE);
         let buffer = transcripts.buffer();
         let mut provider = ClaudeCodeProvider::new(buffer.handle());
-        let missing = ClaudeRoot {
-            profile: "claude-work".to_string(),
-            projects: transcripts.path.join(".claude-work").join("projects"),
-        };
-        let roots = [missing, transcripts.root()];
+        let work = transcripts.work_root();
+        let roots = [work.clone(), transcripts.root()];
 
         let first = flattened(tick(&mut provider, &roots, &buffer.handle()).await);
         let second = tick(&mut provider, &roots, &buffer.handle()).await;
 
         assert_eq!(first.len(), 14);
         assert!(second.is_empty());
+
+        let project = work.projects.join("-Users-u-Projects-nikki");
+        fs::create_dir_all(&project).expect("the work root could not be created");
+        fs::write(project.join("work-session.jsonl"), prompt_line(1))
+            .expect("the work transcript could not be written");
+        let appeared = flattened(tick(&mut provider, &roots, &buffer.handle()).await);
+
+        assert_eq!(appeared.len(), 1);
+        assert_eq!(appeared[0].payload["profile"], json!("claude-work"));
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn every_transcript_of_every_root_ships_under_its_own_profile_and_cursor() {
+        let transcripts = TempTranscripts::new("provider-two-roots");
+        transcripts.write(&fixture_prefix(12));
+        let second_project = transcripts.root().projects.join("-Users-u-Projects-nikki");
+        fs::create_dir_all(&second_project).expect("the project could not be created");
+        let second_session = second_project.join("second-session.jsonl");
+        fs::write(&second_session, prompt_line(1)).expect("the transcript could not be written");
+        let work = transcripts.work_root();
+        let work_project = work.projects.join("-Users-u-Projects-THE-FEUD-V2");
+        fs::create_dir_all(&work_project).expect("the work project could not be created");
+        fs::write(
+            work_project.join(format!("{SESSION}.jsonl")),
+            prompt_line(2),
+        )
+        .expect("the work transcript could not be written");
+        let buffer = transcripts.buffer();
+        let roots = [transcripts.root(), work];
+
+        let mut before = ClaudeCodeProvider::new(buffer.handle());
+        let first = flattened(tick(&mut before, &roots, &buffer.handle()).await);
+        let mut profiles = Vec::new();
+        for draft in first.iter().filter(|draft| draft.kind == Kind::Message) {
+            profiles.push((
+                draft.payload["uuid"].clone(),
+                draft.payload["profile"].clone(),
+            ));
+        }
+        assert_eq!(first.len(), 10 + 1 + 1);
+        assert!(profiles.contains(&(json!("prompt-1"), json!("claude"))));
+        assert!(profiles.contains(&(json!("prompt-2"), json!("claude-work"))));
+        assert_eq!(
+            profiles
+                .iter()
+                .filter(|(_, profile)| *profile == json!("claude-work"))
+                .count(),
+            1
+        );
+        drop(before);
+
+        let mut after = ClaudeCodeProvider::new(buffer.handle());
+        let unchanged = tick(&mut after, &roots, &buffer.handle()).await;
+        assert!(unchanged.is_empty(), "emitted {unchanged:?}");
+
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&second_session)
+            .expect("the transcript could not be opened");
+        file.write_all(prompt_line(3).as_bytes())
+            .expect("the transcript could not be appended to");
+        let appended = flattened(tick(&mut after, &roots, &buffer.handle()).await);
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].payload["uuid"], json!("prompt-3"));
+        assert_eq!(appended[0].payload["profile"], json!("claude"));
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_transcript_is_skipped_and_the_next_one_still_ships() {
+        let transcripts = TempTranscripts::new("provider-unreadable");
+        let locked = transcripts.project().join("0-locked.jsonl");
+        fs::write(&locked, prompt_line(1)).expect("the transcript could not be written");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000))
+            .expect("the transcript could not be locked");
+        transcripts.write(FIXTURE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let roots = [transcripts.root()];
+
+        let first = flattened(tick(&mut provider, &roots, &buffer.handle()).await);
+        assert_eq!(first.len(), 14);
+        assert!(
+            first
+                .iter()
+                .all(|draft| draft.payload["uuid"] != json!("prompt-1"))
+        );
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o600))
+            .expect("the transcript could not be unlocked");
+        let second = flattened(tick(&mut provider, &roots, &buffer.handle()).await);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].payload["uuid"], json!("prompt-1"));
         buffer.close().await.expect("the buffer did not close");
     }
 
@@ -1596,7 +1739,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_running_provider_ships_on_its_interval_and_stops_once_the_runtime_is_gone() {
+    async fn the_running_provider_ships_at_once_and_stops_once_the_runtime_is_gone() {
         let transcripts = TempTranscripts::new("provider-run");
         transcripts.write(FIXTURE);
         let buffer = transcripts.buffer();
@@ -1615,10 +1758,12 @@ mod tests {
             records,
             cursor,
             committed,
+            ships_before_commit,
         }) = inbox.recv().await
         else {
             panic!("the provider stopped without emitting");
         };
+        assert!(!ships_before_commit);
         assert_eq!(records.len(), 14);
         let Some(Cursor { provider, key, .. }) = &cursor else {
             panic!("the emission carries no cursor");
@@ -1672,8 +1817,9 @@ mod tests {
 
         let mut files = 0;
         let mut records = 0;
+        let mut messages = 0;
         for ClaudeRoot { profile, projects } in &roots {
-            let Ok(paths) = transcripts(projects) else {
+            let Ok(paths) = transcripts(projects, &mut HashSet::new()) else {
                 continue;
             };
             for path in paths {
@@ -1693,6 +1839,7 @@ mod tests {
                         if draft.kind != Kind::Message {
                             continue;
                         }
+                        messages += 1;
                         let Some(uuid) = draft.payload.get("uuid").and_then(Value::as_str) else {
                             panic!("a message carries no uuid in {}", path.display());
                         };
@@ -1725,5 +1872,6 @@ mod tests {
         }
         assert!(files > 0, "no transcript was found under {roots:?}");
         assert!(records > 0, "{files} transcripts yielded no record");
+        assert!(messages > 0, "{files} transcripts yielded no message");
     }
 }
