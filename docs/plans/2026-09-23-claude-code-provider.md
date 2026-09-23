@@ -55,12 +55,12 @@ Transcript facts, measured on the user's real `~/.claude/projects` (396 session 
 - [x] `mise run check` - must pass before task 2 (unsafe grep reports only the pre-existing `src/service.rs` `libc::getuid` from 3b45700, not touched here)
 
 ### Task 2: Configuration
-- [ ] add an optional `[claude_code]` section to `FileConfig` (`deny_unknown_fields`): `roots` (array of strings, default `["~/.claude", "~/.claude-work"]`) and `poll_interval` (seconds, default 60, minimum 1 - reject below with the same reasoning as `history_poll_interval`)
-- [ ] resolve each root: a leading `~/` expands against `HOME` (`Paths` already requires it); an absolute path is taken as is; a relative path without `~/` is a config error; an empty list is valid and disables the provider
-- [ ] each resolved root yields a `ClaudeRoot { profile, projects }`: `projects` = `<root>/projects`, `profile` = the root directory's final component with one leading `.` stripped (`~/.claude` -> `claude`, `~/.claude-work` -> `claude-work`); two roots resolving to the same profile name are a config error
-- [ ] add `claude_code: ClaudeCode { roots: Vec<ClaudeRoot>, poll_interval: u64 }` to `Config`, and to `providers::tests::test_config`
-- [ ] write config tests: section absent -> both defaults; custom roots and interval; `poll_interval = 0` rejected; relative root rejected; duplicate profile rejected; unknown key in the section rejected
-- [ ] `mise run check` - must pass before task 3
+- [x] add an optional `[claude_code]` section to `FileConfig` (`deny_unknown_fields`): `roots` (array of strings, default `["~/.claude", "~/.claude-work"]`) and `poll_interval` (seconds, default 60, minimum 1 - reject below with the same reasoning as `history_poll_interval`)
+- [x] resolve each root: a leading `~/` expands against `HOME` (`Paths` already requires it); an absolute path is taken as is; a relative path without `~/` is a config error; an empty list is valid and disables the provider
+- [x] each resolved root yields a `ClaudeRoot { profile, projects }`: `projects` = `<root>/projects`, `profile` = the root directory's final component with one leading `.` stripped (`~/.claude` -> `claude`, `~/.claude-work` -> `claude-work`); two roots resolving to the same profile name are a config error
+- [x] add `claude_code: ClaudeCode { roots: Vec<ClaudeRoot>, poll_interval: u64 }` to `Config`, and to `providers::tests::test_config`
+- [x] write config tests: section absent -> both defaults; custom roots and interval; `poll_interval = 0` rejected; relative root rejected; duplicate profile rejected; unknown key in the section rejected
+- [x] `mise run check` - must pass before task 3 (unsafe grep again reports only the pre-existing `src/service.rs` `libc::getuid`)
 
 ### Task 3: Classify one transcript line
 - [ ] create `src/providers/claude_code.rs` (declare it in `providers/mod.rs`) with a pure function `drafts_from_line(line: &Value, context: &LineContext) -> LineOutcome` where `LineContext { profile, fallback_session_id, last_message_ts: Option<Timestamp>, file_modified: Timestamp }` and `LineOutcome` carries the drafts plus the message `ts` seen on this line (for the next title)

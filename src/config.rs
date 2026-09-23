@@ -11,6 +11,7 @@ use crate::runtime::buffer::OVERFLOW_HEADROOM_BYTES;
 const TICK_INTERVAL_MIN: i64 = 1;
 const TICK_INTERVAL_MAX: i64 = 3600;
 const HISTORY_POLL_INTERVAL_MIN: u64 = 1;
+const CLAUDE_CODE_POLL_INTERVAL_MIN: u64 = 1;
 
 const DEFAULT_CONFIG_RELATIVE: &str = ".config/nikki/config.toml";
 const DEFAULT_STATE_RELATIVE: &str = "Library/Application Support/nikki";
@@ -39,6 +40,7 @@ pub enum ConfigError {
 pub struct Paths {
     pub config: PathBuf,
     pub state_dir: PathBuf,
+    pub home: Option<PathBuf>,
 }
 
 impl Paths {
@@ -70,7 +72,7 @@ impl Paths {
         let state_dir = match state_dir {
             Some(state_dir) => PathBuf::from(state_dir),
             None => {
-                let Some(home) = home else {
+                let Some(home) = home.clone() else {
                     return Err(ConfigError::NoHome {
                         var: "NIKKI_STATE_DIR",
                         what: "state directory",
@@ -79,7 +81,11 @@ impl Paths {
                 home.join(DEFAULT_STATE_RELATIVE)
             }
         };
-        Ok(Paths { config, state_dir })
+        Ok(Paths {
+            config,
+            state_dir,
+            home,
+        })
     }
 }
 
@@ -94,11 +100,24 @@ pub struct Config {
     pub buffer: Buffer,
     pub redact: Vec<RedactRule>,
     pub state_dir: PathBuf,
+    pub claude_code: ClaudeCode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Browser {
     pub profile: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCode {
+    pub roots: Vec<ClaudeRoot>,
+    pub poll_interval: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeRoot {
+    pub profile: String,
+    pub projects: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -134,7 +153,11 @@ pub enum RedactField {
 }
 
 pub fn load_from(paths: &Paths) -> Result<Config, ConfigError> {
-    let Paths { config, state_dir } = paths;
+    let Paths {
+        config,
+        state_dir,
+        home,
+    } = paths;
     let text = match fs::read_to_string(config) {
         Ok(text) => text,
         Err(source) => {
@@ -144,10 +167,15 @@ pub fn load_from(paths: &Paths) -> Result<Config, ConfigError> {
             });
         }
     };
-    parse(&text, config, state_dir)
+    parse(&text, config, state_dir, home.as_deref())
 }
 
-fn parse(text: &str, path: &Path, state_dir: &Path) -> Result<Config, ConfigError> {
+fn parse(
+    text: &str,
+    path: &Path,
+    state_dir: &Path,
+    home: Option<&Path>,
+) -> Result<Config, ConfigError> {
     let file: FileConfig = match toml::from_str(text) {
         Ok(file) => file,
         Err(source) => {
@@ -166,6 +194,7 @@ fn parse(text: &str, path: &Path, state_dir: &Path) -> Result<Config, ConfigErro
         browser,
         buffer,
         redact,
+        claude_code,
     } = file;
     let FileBrowser { profile } = browser;
 
@@ -211,6 +240,8 @@ fn parse(text: &str, path: &Path, state_dir: &Path) -> Result<Config, ConfigErro
         });
     }
 
+    let claude_code = claude_code_from(claude_code, home)?;
+
     Ok(Config {
         service_url,
         device,
@@ -221,6 +252,89 @@ fn parse(text: &str, path: &Path, state_dir: &Path) -> Result<Config, ConfigErro
         buffer,
         redact,
         state_dir: state_dir.to_path_buf(),
+        claude_code,
+    })
+}
+
+fn claude_code_from(
+    section: FileClaudeCode,
+    home: Option<&Path>,
+) -> Result<ClaudeCode, ConfigError> {
+    let FileClaudeCode {
+        roots,
+        poll_interval,
+    } = section;
+
+    if poll_interval < CLAUDE_CODE_POLL_INTERVAL_MIN {
+        return Err(ConfigError::Invalid {
+            field: "claude_code.poll_interval",
+            reason: format!(
+                "{poll_interval} is below {CLAUDE_CODE_POLL_INTERVAL_MIN} second, and a poll timer of zero panics the claude_code provider on every restart"
+            ),
+        });
+    }
+
+    let mut resolved: Vec<ClaudeRoot> = Vec::new();
+    for root in roots {
+        let root = claude_root_from(&root, home)?;
+        for existing in &resolved {
+            if existing.profile == root.profile {
+                return Err(ConfigError::Invalid {
+                    field: "claude_code.roots",
+                    reason: format!(
+                        "two roots resolve to the profile `{}`, and every record names the profile it was read from, so the two would be indistinguishable",
+                        root.profile
+                    ),
+                });
+            }
+        }
+        resolved.push(root);
+    }
+
+    Ok(ClaudeCode {
+        roots: resolved,
+        poll_interval,
+    })
+}
+
+fn claude_root_from(root: &str, home: Option<&Path>) -> Result<ClaudeRoot, ConfigError> {
+    let field = "claude_code.roots";
+    let path = match root.strip_prefix("~/") {
+        Some(rest) => {
+            let Some(home) = home else {
+                return Err(ConfigError::Invalid {
+                    field,
+                    reason: format!("`{root}` starts with `~/`, and HOME is not set"),
+                });
+            };
+            home.join(rest)
+        }
+        None => PathBuf::from(root),
+    };
+    if !path.is_absolute() {
+        return Err(ConfigError::Invalid {
+            field,
+            reason: format!(
+                "`{root}` is neither absolute nor under `~/`, and a relative root would depend on the directory the daemon was started from"
+            ),
+        });
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Err(ConfigError::Invalid {
+            field,
+            reason: format!("`{root}` has no final directory name to take the profile from"),
+        });
+    };
+    let profile = name.strip_prefix('.').unwrap_or(name);
+    if profile.is_empty() {
+        return Err(ConfigError::Invalid {
+            field,
+            reason: format!("`{root}` yields an empty profile name"),
+        });
+    }
+    Ok(ClaudeRoot {
+        profile: profile.to_string(),
+        projects: path.join("projects"),
     })
 }
 
@@ -315,12 +429,32 @@ struct FileConfig {
     buffer: Buffer,
     #[serde(default = "default_redact")]
     redact: Vec<RedactRule>,
+    #[serde(default)]
+    claude_code: FileClaudeCode,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileBrowser {
     profile: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileClaudeCode {
+    #[serde(default = "default_claude_code_roots")]
+    roots: Vec<String>,
+    #[serde(default = "default_claude_code_poll_interval")]
+    poll_interval: u64,
+}
+
+impl Default for FileClaudeCode {
+    fn default() -> FileClaudeCode {
+        FileClaudeCode {
+            roots: default_claude_code_roots(),
+            poll_interval: default_claude_code_poll_interval(),
+        }
+    }
 }
 
 impl Default for Buffer {
@@ -342,6 +476,14 @@ fn default_history_poll_interval() -> u64 {
 
 fn default_revisit_window() -> u32 {
     500
+}
+
+fn default_claude_code_roots() -> Vec<String> {
+    vec!["~/.claude".to_string(), "~/.claude-work".to_string()]
+}
+
+fn default_claude_code_poll_interval() -> u64 {
+    60
 }
 
 fn default_max_rows() -> u64 {
@@ -373,6 +515,7 @@ mod tests {
             text,
             Path::new("config.toml"),
             Path::new("/tmp/nikki-state"),
+            Some(Path::new("/Users/someone")),
         )
     }
 
@@ -499,6 +642,139 @@ drop = ["title"]
         let lowest =
             parse_text(&with_line("history_poll_interval = 1")).expect("one second is accepted");
         assert_eq!(lowest.history_poll_interval, 1);
+    }
+
+    fn claude_root(profile: &str, projects: &str) -> ClaudeRoot {
+        ClaudeRoot {
+            profile: profile.to_string(),
+            projects: PathBuf::from(projects),
+        }
+    }
+
+    fn with_claude_code(section: &str) -> String {
+        format!("{HEAD}{BROWSER}\n[claude_code]\n{section}\n")
+    }
+
+    fn claude_code_invalid_field(section: &str) -> &'static str {
+        let error = parse_text(&with_claude_code(section))
+            .expect_err("the claude_code section is rejected");
+        match error {
+            ConfigError::Invalid { field, .. } => field,
+            other => panic!("expected an invalid claude_code field, got {other}"),
+        }
+    }
+
+    #[test]
+    fn without_a_claude_code_section_both_default_roots_are_read_every_minute() {
+        let config = parse_text(&minimal()).expect("minimal config parses");
+        assert_eq!(
+            config.claude_code,
+            ClaudeCode {
+                roots: vec![
+                    claude_root("claude", "/Users/someone/.claude/projects"),
+                    claude_root("claude-work", "/Users/someone/.claude-work/projects"),
+                ],
+                poll_interval: 60,
+            }
+        );
+    }
+
+    #[test]
+    fn custom_claude_code_roots_and_interval_are_resolved() {
+        let config = parse_text(&with_claude_code(
+            "roots = [\"~/.claude\", \"/Volumes/archive/claude-old\", \"~/nested/..hidden\"]\npoll_interval = 5",
+        ))
+        .expect("custom claude_code section parses");
+        assert_eq!(
+            config.claude_code,
+            ClaudeCode {
+                roots: vec![
+                    claude_root("claude", "/Users/someone/.claude/projects"),
+                    claude_root("claude-old", "/Volumes/archive/claude-old/projects"),
+                    claude_root(".hidden", "/Users/someone/nested/..hidden/projects"),
+                ],
+                poll_interval: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_claude_code_root_list_disables_the_provider() {
+        let config =
+            parse_text(&with_claude_code("roots = []")).expect("an empty root list is accepted");
+        assert_eq!(config.claude_code.roots, Vec::new());
+        assert_eq!(config.claude_code.poll_interval, 60);
+    }
+
+    #[test]
+    fn a_claude_code_poll_interval_of_zero_names_the_field() {
+        assert_eq!(
+            claude_code_invalid_field("poll_interval = 0"),
+            "claude_code.poll_interval"
+        );
+        let lowest =
+            parse_text(&with_claude_code("poll_interval = 1")).expect("one second is accepted");
+        assert_eq!(lowest.claude_code.poll_interval, 1);
+    }
+
+    #[test]
+    fn a_relative_claude_code_root_is_rejected() {
+        for roots in [
+            "roots = [\".claude\"]",
+            "roots = [\"~\"]",
+            "roots = [\"~user/.claude\"]",
+        ] {
+            assert_eq!(claude_code_invalid_field(roots), "claude_code.roots");
+        }
+    }
+
+    #[test]
+    fn two_roots_with_the_same_profile_name_are_rejected() {
+        for roots in [
+            "roots = [\"~/.claude\", \"/Volumes/archive/claude\"]",
+            "roots = [\"~/.claude\", \"~/.claude\"]",
+        ] {
+            assert_eq!(claude_code_invalid_field(roots), "claude_code.roots");
+        }
+    }
+
+    #[test]
+    fn a_home_relative_root_without_home_is_rejected() {
+        let error = parse(
+            &with_claude_code("roots = [\"~/.claude\"]"),
+            Path::new("config.toml"),
+            Path::new("/tmp/nikki-state"),
+            None,
+        )
+        .expect_err("a ~/ root without HOME is rejected");
+        match error {
+            ConfigError::Invalid { field, .. } => assert_eq!(field, "claude_code.roots"),
+            other => panic!("expected an invalid claude_code.roots, got {other}"),
+        }
+        let config = parse(
+            &with_claude_code("roots = [\"/Users/someone/.claude\"]"),
+            Path::new("config.toml"),
+            Path::new("/tmp/nikki-state"),
+            None,
+        )
+        .expect("an absolute root needs no HOME");
+        assert_eq!(
+            config.claude_code.roots,
+            vec![claude_root("claude", "/Users/someone/.claude/projects")]
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_in_the_claude_code_section_is_rejected() {
+        let error = parse_text(&with_claude_code("poll_intervl = 5"))
+            .expect_err("a typo in the section is rejected");
+        match error {
+            ConfigError::Parse { source, .. } => assert!(
+                source.to_string().contains("poll_intervl"),
+                "message was {source}"
+            ),
+            other => panic!("expected a parse error, got {other}"),
+        }
     }
 
     #[test]
@@ -665,6 +941,7 @@ drop = ["title"]
         let paths = Paths {
             config: PathBuf::from("/nonexistent/nikki/config.toml"),
             state_dir: PathBuf::from("/tmp/nikki-state"),
+            home: None,
         };
         let error = load_from(&paths).expect_err("a missing file is rejected");
         match error {
@@ -683,6 +960,7 @@ drop = ["title"]
         .expect("overrides resolve");
         assert_eq!(paths.config, PathBuf::from("/tmp/harness/config.toml"));
         assert_eq!(paths.state_dir, PathBuf::from("/tmp/harness/state"));
+        assert_eq!(paths.home, Some(PathBuf::from("/Users/someone")));
     }
 
     #[test]

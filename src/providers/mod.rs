@@ -152,7 +152,7 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use url::Url;
 
-    use crate::config::{Browser, Buffer, Keep, RedactRule};
+    use crate::config::{Browser, Buffer, ClaudeCode, Keep, RedactRule};
     use crate::runtime::redact::WILDCARD_HOST;
 
     pub fn test_config(tick_interval: u64) -> Config {
@@ -176,6 +176,10 @@ pub(crate) mod tests {
                 drop: Vec::new(),
             }],
             state_dir: std::env::temp_dir().join("nikki-provider-tests"),
+            claude_code: ClaudeCode {
+                roots: Vec::new(),
+                poll_interval: 60,
+            },
         }
     }
 
