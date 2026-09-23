@@ -97,11 +97,11 @@ Transcript facts, measured on the user's real `~/.claude/projects` (396 session 
 - [x] `mise run check` - must pass before task 7 (unsafe grep again reports only the pre-existing `src/service.rs` `libc::getuid`)
 
 ### Task 7: Document the provider and mirror the contract
-- [ ] `README.md` `## Configuration`: the `[claude_code]` section in the TOML example with both keys and their defaults
-- [ ] `### The two providers` becomes three: what `claude_code` reads (the two-level glob, subagents excluded), what it ships and what it never ships, the per-file cursor (inode, offset, last message ts) and why a partial line waits; remove "agent session transcripts" from the deferred list in `### Adding a provider`
-- [ ] `## The wire contract`: both pairs in the `(provider, kind)` table, the payload tables and captured bodies from Technical Details, the `dedup_key` constructions in `### Identity`, and the note that `role`/`message_kind`/`field` values are stored opaquely by the service - identical in content to the service README section
-- [ ] `## Known limitations`: cursors of deleted transcript files stay in `buffer.db` (a few bytes each, never re-read); a session copied into a fork is shipped once per session by design
-- [ ] `mise run check` - must pass before task 8
+- [x] `README.md` `## Configuration`: the `[claude_code]` section in the TOML example with both keys and their defaults
+- [x] `### The two providers` becomes three: what `claude_code` reads (the two-level glob, subagents excluded), what it ships and what it never ships, the per-file cursor (inode, offset, last message ts) and why a partial line waits; remove "agent session transcripts" from the deferred list in `### Adding a provider`
+- [x] `## The wire contract`: both pairs in the `(provider, kind)` table, the payload tables and captured bodies from Technical Details, the `dedup_key` constructions in `### Identity`, and the note that `role`/`message_kind`/`field` values are stored opaquely by the service - identical in content to the service README section
+- [x] `## Known limitations`: cursors of deleted transcript files stay in `buffer.db` (a few bytes each, never re-read); a session copied into a fork is shipped once per session by design
+- [x] `mise run check` - must pass before task 8 (unsafe grep again reports only the pre-existing `src/service.rs` `libc::getuid`)
 
 ### Task 8: Verify acceptance criteria
 - [ ] `mise run check` green; `! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'` empty

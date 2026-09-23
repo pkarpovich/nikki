@@ -217,6 +217,10 @@ profile = "MBP_21"                  # required, the display name, not the direct
 max_rows = 200000
 max_bytes = 536870912
 
+[claude_code]
+roots = ["~/.claude", "~/.claude-work"]   # Claude Code profile directories, a missing one is skipped
+poll_interval = 60                        # seconds between transcript polls
+
 [[redact]]
 url_host = "*"
 keep = "host"                       # default: host only, path and query dropped
@@ -240,6 +244,8 @@ drop = ["title"]
 | `browser.profile` | none, required | resolved to a directory through `Local State` on every poll; a name absent at startup is fatal and lists the names that do exist. The browser itself is not configurable - the read is always Dia's user data |
 | `buffer.max_rows` | 200000 | roughly seven weeks at the real record rate; at least 1, because a cap of zero evicts every record as it arrives |
 | `buffer.max_bytes` | 536870912 | 500 MB; must exceed the 512 bytes held back for the overflow record, for the same reason |
+| `claude_code.roots` | `["~/.claude", "~/.claude-work"]` | a leading `~/` expands against `HOME`, an absolute path is taken as is, any other relative path is an error. Each root's transcripts are read from `<root>/projects`, and its profile name is the directory's final component with one leading `.` stripped (`claude`, `claude-work`); two roots with the same profile name are an error. An empty list disables the provider |
+| `claude_code.poll_interval` | 60 | at least 1 second, for the same reason as `history_poll_interval` |
 | `[[redact]]` | one `url_host = "*"`, `keep = "host"` rule | replaced wholesale when the key is present |
 
 An unknown key is a startup error rather than silence, and every validation failure names the field
@@ -275,8 +281,10 @@ nothing unredacted is ever written to disk. Three rules that are silent when wro
   unredacted.
 
 A host-only value ships as a scheme-bearing URL with an empty path (`https://host/`), never as a bare
-hostname, and **the port is part of the host** (`http://localhost:3000/`). No URL, path or title ever
-enters a `dedup_key`, so redaction cannot be defeated through it.
+hostname, and **the port is part of the host** (`http://localhost:3000/`). No URL, path or title of a
+window or browser record ever enters a `dedup_key`, so redaction cannot be defeated through it. The
+`claude_code/session` key does hash its title or PR url, which is safe for the same reason: no rule
+rewrites a `claude_code` payload, so the key hides nothing the payload does not already ship.
 
 ## The provider model
 
@@ -317,7 +325,7 @@ failure; **a failing provider restarts alone and never takes the process down.**
 in `src/providers/mod.rs` beside the trait, because it is provider lifecycle rather than a buffer or
 transport concern. Exactly one module owns it.
 
-### The two providers
+### The three providers
 
 **`windows`** (`src/providers/windows.rs`) is event-driven with a heartbeat. Its sources are one
 `AXObserver` per application that owns a window, watching activation, deactivation, focused-window,
@@ -357,6 +365,35 @@ Each poll reads `id > cursor - revisit_window` rather than `id > cursor`, becaus
 `visit_duration` in by updating the row it wrote when the visit began. A re-read row is emitted
 **only when its `title`, `transition` or `visit_duration` changed** since it was last shipped; that is
 the difference between roughly 3 000 records a day and 144 000.
+
+**`claude_code`** (`src/providers/claude_code.rs`) polls on `claude_code.poll_interval` and ships the
+conversation of every Claude Code session on the Mac as text. For each configured root it lists
+`<root>/projects/*/*.jsonl` - exactly two levels, one file per session - sorted by path. Subagent
+transcripts live one level deeper, in `<project>/<session>/subagents/`, and the glob never reaches
+them. A root whose `projects` directory is missing is logged once at info and skipped, so a Mac
+without a work profile keeps the default roots and simply reads the one that exists.
+
+What it ships is every prompt the user typed and every text reply the model wrote, as
+`claude_code/message`, one record per text block with the text unmodified, plus the `custom-title`,
+`ai-title` and `pr-link` lines as `claude_code/session`. What never leaves the Mac: tool calls, tool
+results, thinking blocks, images, `isMeta` user lines - harness injections, almost all of them skill
+bodies - sidechain lines and subagent transcripts. The provider classifies which lines are
+conversation and interprets nothing beyond that: it does not summarise, shorten, redact or merge text.
+None of its payload keys is one the redactor rewrites, so a URL or a token in a reply ships as written.
+
+Each file carries its own cursor under `(claude_code, <absolute path>)`: the file's inode, the byte
+offset read up to, and the `ts` of the last message line before that offset, which is what a title
+line read on a later poll is stamped with. A changed inode or a file shorter than the offset restarts
+the file from 0, and the dedup key absorbs the repeats. **Only a line ending in `\n` is consumed.**
+Claude Code appends to a transcript while the session runs, so the last line may be half-written when
+it is read; parsing it would either drop the message as malformed or ship a fragment, and the offset
+would move past the line for good. A partial line is left where it is and read whole on a later poll.
+A complete line that is not valid JSON is logged at warn and skipped rather than stopping the file.
+
+Reads are bounded at 500 records or 4 MiB of text per emission, so the first backfill of a large
+transcript ships in several emissions, each with the cursor it advances to. The in-memory cursor
+moves only after the commit receipt resolves; an emission that carries no records but moves the
+offset - a stretch of tool lines - is still sent, so such a file is not re-read on every poll.
 
 ### The focus source
 
@@ -405,7 +442,7 @@ application anyway.
 6. Write inline tests in the same file.
 
 Deferred providers the architecture already admits, each roughly one file: shell history from the
-local atuin database, git commits across the projects directory, agent session transcripts.
+local atuin database, git commits across the projects directory.
 
 ### Extractors
 
@@ -510,6 +547,8 @@ retried** - so a kind missing from this table is destroyed permanently the first
 | `windows` | `lock`, `unlock`, `sleep`, `wake` | none | none |
 | `windows` | `buffer_overflow` | `details` carrying `dropped`, `dropped_from`, `dropped_to` | none |
 | `browser_history` | `visit` | `url`, `profile`, `visit_id` | `title`, `transition`, `duration_ms` |
+| `claude_code` | `message` | `session_id`, `uuid`, `block`, `role`, `message_kind`, `text`, `cwd`, `profile` | `git_branch` |
+| `claude_code` | `session` | `session_id`, `field`, `value` | none |
 
 Unknown payload fields are never rejected - the server preserves them in its `raw` column.
 
@@ -597,6 +636,62 @@ Bodies for the kinds not shown above:
  "payload":{"details":{"dropped":20000,"dropped_from":"2026-06-14T08:00:00.000Z","dropped_to":"2026-06-21T19:30:00.000Z"}}}
 ```
 
+### `claude_code`
+
+The conversation text of Claude Code sessions, read from the transcripts under
+`~/.claude/projects/*/*.jsonl` (plus `~/.claude-work/projects` on the MBP). One transcript file is one
+session.
+
+**What is shipped:** every prompt the user typed and every text reply the model wrote, as
+`claude_code/message`, one record per text block of a transcript line, the text unmodified. A line
+with several text blocks under one `uuid` ships one record per block, numbered by `block` from 0.
+Title and PR-link lines ship as `claude_code/session`.
+
+**What is never shipped:** tool calls, tool results, thinking, injected skill bodies and subagent
+transcripts. None of them leave the Mac.
+
+`claude_code/message` - envelope `ts` is the transcript line's own `timestamp`, when it was said
+rather than when it was shipped.
+
+| field | type | required | meaning |
+|---|---|---|---|
+| `session_id` | string | yes | transcript `sessionId` (fallback: file stem) |
+| `uuid` | string | yes | transcript line `uuid` |
+| `block` | integer | yes | index of the text block within the line, from 0 |
+| `role` | string | yes | `user` or `assistant` |
+| `message_kind` | string | yes | user lines: `prompt` (typed by the user), `command` (a slash or `!` command with its args), `command_output` (a local command's output), `notification` (a harness task notification), `compact_summary` (the model's summary written at context compaction); assistant lines: `text` (a model reply) |
+| `text` | string | yes | the block's text exactly as in the transcript; may be `""` |
+| `cwd` | string | yes | transcript `cwd` |
+| `git_branch` | string | no | transcript `gitBranch`, omitted when absent or empty |
+| `profile` | string | yes | the transcript root's profile name, e.g. `claude` or `claude-work` |
+
+`claude_code/session` - emitted when a transcript gains a `custom-title`, `ai-title` or `pr-link`
+line. Envelope `ts` is the line's own `timestamp` if it has one (`pr-link`), else the `timestamp` of
+the last message line read before it in the file, else the file's modification time.
+
+| field | type | required | meaning |
+|---|---|---|---|
+| `session_id` | string | yes | transcript `sessionId` |
+| `field` | string | yes | `custom_title`, `ai_title` or `pr` |
+| `value` | string | yes | the title text, or the PR url |
+
+```json
+{"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:35:12.410Z","seq":90211,
+ "kind":"message","dedup_key":"4c1e9a07b2d85f36","degraded":false,
+ "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","uuid":"d41f0c2a-7e93-4b6d-a8f1-5c2e90b7d316","block":0,
+            "role":"user","message_kind":"prompt","text":"передеплоишь дев через spot?",
+            "cwd":"/Users/pavel.karpovich/Projects/THE_FEUD_V2","git_branch":"main","profile":"claude"}}
+
+{"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:35:12.410Z","seq":90212,
+ "kind":"session","dedup_key":"b07d3e5a91c4f268","degraded":false,
+ "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","field":"ai_title","value":"Redeploy dev via spot"}}
+```
+
+The values of `role`, `message_kind` and `field` are **stored opaquely** by the service and never
+checked against a fixed set, like `transition`. A daemon that adds a new message kind later must not
+have every such record rejected, and so lost for good. An empty `text` is accepted, since a real text
+block can be empty after a model stop; only an absent or `null` `text` is a missing field.
+
 ### `details` on a window record
 
 A free-form object whose keys depend on the focused application's extractor. The server stores it as
@@ -662,7 +757,16 @@ day, and the collisions would be reported as duplicates - which looks like succe
 ```
 windows:  device \x1F "windows" \x1F kind \x1F ts_millis \x1F seq
 browser:  device \x1F "browser_history" \x1F profile \x1F generation \x1F visit_id
+message:  device \x1F "claude_code" \x1F "message" \x1F session_id \x1F uuid \x1F block
+session:  device \x1F "claude_code" \x1F "session" \x1F session_id \x1F field \x1F value
 ```
+
+Neither `claude_code` key hashes `seq` or `ts`, so a transcript re-read from 0 after its cursor was
+lost re-sends the same keys and the server counts them as duplicates. The message key is scoped to
+`session_id` because a resumed or forked session copies earlier history into its new file under the
+same `uuid`s: that message is stored once per session, not once overall and not once per copy. The
+session key carries the value, so a title the transcript repeats verbatim - an `ai-title` line is
+written many times per session - collapses to one row, while a renamed title is a new one.
 
 The browser key deliberately excludes `seq`, so a revision of the same visit carries the same key and
 the server recognises it as a correction. It includes `generation` - a per-profile counter
@@ -840,9 +944,9 @@ src/macos/             every unsafe block in the crate
   events.rs            the CFRunLoop thread, the AXObserver registry and every notification source
 src/window/visibility.rs  the pure visible-set resolver
 src/extract/           the bundle-id-keyed extractor registry
-src/providers/         the Provider trait, the supervisor, and the two providers
+src/providers/         the Provider trait, the supervisor, and the three providers
 src/runtime/           buffer, dedup keys, redaction, shipping
-fixtures/              captured Dia output, agterm JSON, Local State, a small history database
+fixtures/              captured Dia output, agterm JSON, Local State, a small history database, a Claude Code transcript
 ```
 
 ## Known limitations
@@ -869,6 +973,11 @@ fixtures/              captured Dia output, agterm JSON, Local State, a small hi
 - Windows applications running under a virtualiser in coherence mode appear as ordinary host windows
   with their own titles.
 - No third-party window manager is used, so there is no tag or workspace grouping in the window layer.
+- The cursor of a transcript file that Claude Code later deletes stays in `buffer.db` - a few bytes
+  per file, never read again. Nothing prunes them.
+- A session resumed or forked into a new file ships the history it copied once more, under the new
+  `session_id`. That is by design: the message key is per session, so each session reads whole on
+  its own.
 - The service's coalescer ends a broken run at the last tick plus its full interval rather than at the
   event timestamp, and `focus` is not in its breaking set. Emitting `state_change` is this daemon's
   whole responsibility there; the duration only becomes correct once the service closes runs at the
