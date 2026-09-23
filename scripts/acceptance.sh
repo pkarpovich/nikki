@@ -85,4 +85,16 @@ else
 	echo "acceptance: agtermctl is on neither PATH nor $AGTERMCTL, so there is no live tree to read"
 fi
 
+echo "acceptance: the live Claude Code transcripts"
+if [ -d "$HOME/.claude/projects" ] || [ -d "$HOME/.claude-work/projects" ]; then
+	transcripts="$(cargo test --bin nikki -- --ignored --nocapture the_live_transcripts_parse_without_loss 2>&1 || true)"
+	echo "$transcripts"
+	if ! echo "$transcripts" | grep -q 'result: ok\. 1 passed'; then
+		echo "acceptance: the_live_transcripts_parse_without_loss neither ran nor passed, so nothing asserted that the real transcripts are read to their end" >&2
+		exit 1
+	fi
+else
+	echo "acceptance: neither $HOME/.claude/projects nor $HOME/.claude-work/projects exists, so there are no transcripts to read"
+fi
+
 echo "acceptance: every check passed, and $binary is the binary they ran against"

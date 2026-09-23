@@ -659,7 +659,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc::{Receiver, channel};
 
-    use crate::config::default_redact;
+    use crate::config::{ClaudeCode, default_claude_code, default_redact};
     use crate::providers::tests::test_config;
     use crate::runtime::buffer::{Buffer, BufferConfig};
 
@@ -1642,5 +1642,88 @@ mod tests {
             .expect("the provider panicked");
         assert!(stopped.is_ok(), "stopped with {stopped:?}");
         buffer.close().await.expect("the buffer did not close");
+    }
+
+    fn meta_uuids(path: &Path, end: u64) -> HashSet<String> {
+        let text = fs::read(path).expect("the live transcript reads");
+        let consumed = &text[..end as usize];
+        let mut uuids = HashSet::new();
+        for line in consumed.split(|byte| *byte == b'\n') {
+            let Ok(value) = serde_json::from_slice::<Value>(line) else {
+                continue;
+            };
+            if !flag(&value, "isMeta") {
+                continue;
+            }
+            let Some(uuid) = value.get("uuid").and_then(Value::as_str) else {
+                continue;
+            };
+            uuids.insert(uuid.to_string());
+        }
+        uuids
+    }
+
+    #[test]
+    #[ignore = "reads the live machine: the real transcripts under the default ~/.claude roots"]
+    fn the_live_transcripts_parse_without_loss() {
+        let home = std::env::var("HOME").expect("HOME is set");
+        let ClaudeCode { roots, .. } =
+            default_claude_code(Path::new(&home)).expect("the default roots resolve");
+
+        let mut files = 0;
+        let mut records = 0;
+        for ClaudeRoot { profile, projects } in &roots {
+            let Ok(paths) = transcripts(projects) else {
+                continue;
+            };
+            for path in paths {
+                let length = fs::metadata(&path)
+                    .expect("the live transcript has metadata")
+                    .len();
+                let mut cursor = None;
+                let mut shipped = Vec::new();
+                while let Some(Increment {
+                    drafts,
+                    cursor: advanced,
+                }) = read_increment(&path, profile, cursor, READ_BUDGET)
+                    .expect("the live transcript reads")
+                {
+                    records += drafts.len();
+                    for draft in drafts {
+                        if draft.kind != Kind::Message {
+                            continue;
+                        }
+                        let Some(uuid) = draft.payload.get("uuid").and_then(Value::as_str) else {
+                            panic!("a message carries no uuid in {}", path.display());
+                        };
+                        shipped.push(uuid.to_string());
+                    }
+                    cursor = Some(advanced);
+                }
+
+                let offset = cursor.map_or(0, |FileCursor { offset, .. }| offset);
+                if offset < length {
+                    let text = fs::read(&path).expect("the live transcript reads");
+                    let unread = &text[offset as usize..length as usize];
+                    assert!(
+                        !unread.contains(&b'\n'),
+                        "{} stopped at {offset} of {length} with a complete line unread",
+                        path.display()
+                    );
+                }
+
+                let meta = meta_uuids(&path, offset);
+                for uuid in &shipped {
+                    assert!(
+                        !meta.contains(uuid),
+                        "{} shipped the isMeta line {uuid}",
+                        path.display()
+                    );
+                }
+                files += 1;
+            }
+        }
+        assert!(files > 0, "no transcript was found under {roots:?}");
+        assert!(records > 0, "{files} transcripts yielded no record");
     }
 }

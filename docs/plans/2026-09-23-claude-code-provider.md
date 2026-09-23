@@ -91,10 +91,10 @@ Transcript facts, measured on the user's real `~/.claude/projects` (396 session 
 - [x] `mise run check` - must pass before task 6 (unsafe grep again reports only the pre-existing `src/service.rs` `libc::getuid`)
 
 ### Task 6: End-to-end through the stub server
-- [ ] in `tests/stub_server.rs`, a test that installs `fixtures/claude_code_session.jsonl` as `<home>/.claude/projects/-Users-u-Projects-THE-FEUD-V2/<session-id>.jsonl` plus a `subagents/agent-x.jsonl` beside it, writes `[claude_code] poll_interval = 1` into the config, starts the daemon, and asserts that the stub receives exactly the expected `claude_code/message` and `claude_code/session` envelopes (provider, kind, payload fields, 16-hex `dedup_key`), none from the subagent file, and that existing windows/browser behaviour in the same run is unchanged
-- [ ] make `config_text` emit the `[claude_code]` section only when a test asks for it, so every existing test keeps its current config byte-for-byte
-- [ ] add a live test `the_live_transcripts_parse_without_loss` (`#[ignore]`d, reason: reads the real `~/.claude`): runs `read_increment` over every file under the real default roots and asserts it yields records, consumes each file to its end or to a partial last line, and never ships a line with `isMeta: true`; call it from `scripts/acceptance.sh` like the other live cases
-- [ ] `mise run check` - must pass before task 7
+- [x] in `tests/stub_server.rs`, a test that installs `fixtures/claude_code_session.jsonl` as `<home>/.claude/projects/-Users-u-Projects-THE-FEUD-V2/<session-id>.jsonl` plus a `subagents/agent-x.jsonl` beside it, writes `[claude_code] poll_interval = 1` into the config, starts the daemon, and asserts that the stub receives exactly the expected `claude_code/message` and `claude_code/session` envelopes (provider, kind, payload fields, 16-hex `dedup_key`), none from the subagent file, and that existing windows/browser behaviour in the same run is unchanged
+- [x] make `config_text` emit the `[claude_code]` section only when a test asks for it, so every existing test keeps its current config byte-for-byte
+- [x] add a live test `the_live_transcripts_parse_without_loss` (`#[ignore]`d, reason: reads the real `~/.claude`): runs `read_increment` over every file under the real default roots and asserts it yields records, consumes each file to its end or to a partial last line, and never ships a line with `isMeta: true`; call it from `scripts/acceptance.sh` like the other live cases
+- [x] `mise run check` - must pass before task 7 (unsafe grep again reports only the pre-existing `src/service.rs` `libc::getuid`)
 
 ### Task 7: Document the provider and mirror the contract
 - [ ] `README.md` `## Configuration`: the `[claude_code]` section in the TOML example with both keys and their defaults

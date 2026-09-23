@@ -20,6 +20,10 @@ const DEVICE: &str = "acceptance-mac";
 const PROFILE: &str = "MBP_21";
 const FIXTURE_VISITS: usize = 6;
 const SQLITE: &str = "/usr/bin/sqlite3";
+const CLAUDE_SESSION: &str = "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94";
+const CLAUDE_PROJECT: &str = "-Users-u-Projects-THE-FEUD-V2";
+const CLAUDE_CWD: &str = "/Users/u/Projects/THE_FEUD_V2";
+const CLAUDE_SUBAGENT_LINE: &str = "{\"type\": \"user\", \"uuid\": \"subagent-1\", \"sessionId\": \"subagent-session\", \"timestamp\": \"2026-09-14T11:36:00.000Z\", \"cwd\": \"/Users/u/Projects/THE_FEUD_V2\", \"message\": {\"content\": \"a subagent prompt\"}}\n";
 
 /// What the daemon is told is on screen. A host with no window session - a CI runner - has no
 /// frontmost application, and without one the window provider assembles nothing at all, so a suite
@@ -322,11 +326,18 @@ enum History {
     Absent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transcripts {
+    Fixture,
+    Absent,
+}
+
 struct Settings {
     tick_interval: u64,
     history_poll_interval: u64,
     max_rows: u64,
     history: History,
+    transcripts: Transcripts,
     events: Vec<&'static str>,
     scene: &'static str,
 }
@@ -338,6 +349,7 @@ impl Settings {
             history_poll_interval: 3600,
             max_rows: 200_000,
             history: History::Absent,
+            transcripts: Transcripts::Absent,
             events: Vec::new(),
             scene: SCENE,
         }
@@ -374,6 +386,9 @@ impl Daemon {
         if settings.history == History::Fixture {
             fs::copy(fixture("history_sample.db"), profile.join("History"))
                 .expect("the history fixture could not be installed");
+        }
+        if settings.transcripts == Transcripts::Fixture {
+            install_transcripts(&home);
         }
 
         let config = root.join("config.toml");
@@ -488,13 +503,31 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn install_transcripts(home: &Path) {
+    let project = home.join(".claude/projects").join(CLAUDE_PROJECT);
+    let subagents = project.join(CLAUDE_SESSION).join("subagents");
+    fs::create_dir_all(&subagents).expect("the transcript directories could not be created");
+    fs::copy(
+        fixture("claude_code_session.jsonl"),
+        project.join(format!("{CLAUDE_SESSION}.jsonl")),
+    )
+    .expect("the transcript fixture could not be installed");
+    fs::write(subagents.join("agent-x.jsonl"), CLAUDE_SUBAGENT_LINE)
+        .expect("the subagent transcript could not be installed");
+}
+
 fn config_text(service_url: &str, settings: &Settings) -> String {
     let Settings {
         tick_interval,
         history_poll_interval,
         max_rows,
+        transcripts,
         ..
     } = settings;
+    let claude_code = match transcripts {
+        Transcripts::Fixture => "\n[claude_code]\npoll_interval = 1\n",
+        Transcripts::Absent => "",
+    };
     format!(
         "service_url = \"{service_url}\"\n\
          device = \"{DEVICE}\"\n\
@@ -506,7 +539,8 @@ fn config_text(service_url: &str, settings: &Settings) -> String {
          \n\
          [buffer]\n\
          max_rows = {max_rows}\n\
-         max_bytes = 536870912\n"
+         max_bytes = 536870912\n\
+         {claude_code}"
     )
 }
 
@@ -725,6 +759,25 @@ fn check_payload(envelope: &Value) {
         ("browser_history", "visit") => {
             require(payload, &["url", "profile", "visit_id"], envelope);
             assert_eq!(payload["profile"], PROFILE);
+        }
+        ("claude_code", "message") => {
+            require(
+                payload,
+                &[
+                    "session_id",
+                    "uuid",
+                    "block",
+                    "role",
+                    "message_kind",
+                    "text",
+                    "cwd",
+                    "profile",
+                ],
+                envelope,
+            );
+        }
+        ("claude_code", "session") => {
+            require(payload, &["session_id", "field", "value"], envelope);
         }
         _ => panic!("the contract names no `{provider}` `{kind}` pair: {envelope}"),
     }
@@ -1180,4 +1233,185 @@ fn a_full_buffer_drops_its_oldest_records_and_says_so() {
         BTreeSet::from([3, 4, 5, 6, 7]),
         "the buffer did not drop exactly its two oldest records"
     );
+}
+
+fn claude_message(
+    line: u32,
+    block: u32,
+    role: &str,
+    message_kind: &str,
+    text: &str,
+    git_branch: Option<&str>,
+) -> (String, Option<String>, Value) {
+    let mut payload = json!({
+        "session_id": CLAUDE_SESSION,
+        "uuid": format!("00000000-0000-4000-8000-{line:012}"),
+        "block": block,
+        "role": role,
+        "message_kind": message_kind,
+        "text": text,
+        "cwd": CLAUDE_CWD,
+        "profile": "claude",
+    });
+    if let Some(git_branch) = git_branch {
+        payload["git_branch"] = json!(git_branch);
+    }
+    (
+        "message".to_string(),
+        Some(format!("2026-09-14T11:35:{line:02}.000Z")),
+        payload,
+    )
+}
+
+fn claude_session(ts: Option<&str>, field: &str, value: &str) -> (String, Option<String>, Value) {
+    (
+        "session".to_string(),
+        ts.map(String::from),
+        json!({"session_id": CLAUDE_SESSION, "field": field, "value": value}),
+    )
+}
+
+fn claude_code_envelopes(envelopes: &[Value]) -> Vec<&Value> {
+    let mut found = Vec::new();
+    for envelope in envelopes {
+        if envelope["provider"] == "claude_code" {
+            found.push(envelope);
+        }
+    }
+    found
+}
+
+#[test]
+fn the_claude_code_transcripts_ship_their_conversation_and_nothing_else() {
+    let stub = Stub::start(vec![Answer::Accept]);
+    let mut settings = Settings::new();
+    settings.tick_interval = 1;
+    settings.history = History::Fixture;
+    settings.transcripts = Transcripts::Fixture;
+
+    let mut daemon = Daemon::install("claude-code", &stub.url(), &settings);
+    daemon.start();
+    wait_for(
+        &daemon,
+        "the stub recorded the transcript and a capture",
+        || {
+            let envelopes = distinct(&stub.envelopes());
+            counted(&envelopes, "claude_code", "message") >= 10
+                && counted(&envelopes, "claude_code", "session") >= 3
+                && counted(&envelopes, "windows", "tick") >= 2
+                && counted(&envelopes, "browser_history", "visit") == FIXTURE_VISITS
+        },
+    );
+    daemon.stop();
+
+    let envelopes = distinct(&stub.envelopes());
+    for envelope in &envelopes {
+        check_envelope(envelope);
+    }
+
+    let mut shipped = Vec::new();
+    for envelope in claude_code_envelopes(&envelopes) {
+        assert_ne!(
+            envelope["payload"]["session_id"], "subagent-session",
+            "a subagent transcript reached the wire: {envelope}"
+        );
+        let kind = envelope["kind"].as_str().unwrap_or_default().to_string();
+        let ts = envelope["ts"].as_str().unwrap_or_default().to_string();
+        let ts = match envelope["payload"]["field"].as_str() {
+            Some("custom_title") => None,
+            Some(_) | None => Some(ts),
+        };
+        shipped.push((kind, ts, envelope["payload"].clone()));
+    }
+
+    let main = Some("main");
+    let expected = vec![
+        claude_session(None, "custom_title", "feud"),
+        claude_message(2, 0, "user", "prompt", "передеплоишь дев через spot?", main),
+        claude_message(
+            3,
+            0,
+            "assistant",
+            "text",
+            "Checking the template version first.",
+            main,
+        ),
+        claude_message(6, 0, "assistant", "text", "Deployed.", main),
+        claude_message(
+            6,
+            1,
+            "assistant",
+            "text",
+            "URL: https://dev.example.com token=abc123",
+            main,
+        ),
+        claude_message(
+            8,
+            0,
+            "user",
+            "command",
+            "<command-message>brainstorm</command-message>\n<command-name>/brainstorm</command-name>\n<command-args>nikki sessions</command-args>",
+            main,
+        ),
+        claude_message(
+            9,
+            0,
+            "user",
+            "command_output",
+            "<local-command-stdout>Set model to Opus</local-command-stdout>",
+            main,
+        ),
+        claude_message(
+            10,
+            0,
+            "user",
+            "notification",
+            "<task-notification>agent finished</task-notification>",
+            main,
+        ),
+        claude_message(
+            11,
+            0,
+            "user",
+            "prompt",
+            "[Request interrupted by user]",
+            main,
+        ),
+        claude_message(
+            12,
+            0,
+            "user",
+            "compact_summary",
+            "This session is being continued from a previous conversation that ran out of context.",
+            main,
+        ),
+        claude_session(
+            Some("2026-09-14T11:35:12.000Z"),
+            "ai_title",
+            "Redeploy dev via spot",
+        ),
+        claude_session(
+            Some("2026-09-14T11:35:16.000Z"),
+            "pr",
+            "https://github.com/u/THE_FEUD_V2/pull/7",
+        ),
+        claude_message(18, 0, "user", "prompt", "what changed on the branch?", None),
+    ];
+    assert_eq!(shipped, expected);
+
+    let mut urls = BTreeSet::new();
+    for visit in of_kind(&envelopes, "visit") {
+        let Some(url) = visit["payload"]["url"].as_str() else {
+            panic!("a visit carries no url: {visit}");
+        };
+        urls.insert(url.to_string());
+    }
+    assert_eq!(urls, BTreeSet::from(REDACTED_VISITS.map(String::from)));
+
+    let samples = samples(&envelopes);
+    assert!(!samples.is_empty(), "no window sample was recorded");
+    for sample in &samples {
+        assert_eq!(sample["degraded"], Value::Bool(false));
+        assert_eq!(sample["payload"]["title"], "an acceptance window");
+    }
 }

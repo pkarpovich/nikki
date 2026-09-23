@@ -297,6 +297,11 @@ fn claude_code_from(
     })
 }
 
+#[cfg(test)]
+pub fn default_claude_code(home: &Path) -> Result<ClaudeCode, ConfigError> {
+    claude_code_from(FileClaudeCode::default(), Some(home))
+}
+
 fn claude_root_from(root: &str, home: Option<&Path>) -> Result<ClaudeRoot, ConfigError> {
     let field = "claude_code.roots";
     let path = match root.strip_prefix("~/") {
