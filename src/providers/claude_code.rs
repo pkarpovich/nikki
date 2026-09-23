@@ -1,22 +1,223 @@
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tokio::sync::mpsc::Sender;
+use tokio::time::{MissedTickBehavior, interval};
 
-use crate::runtime::{self, KeySource, Kind, RecordDraft, Timestamp};
+use super::{Ctx, Emission, Provider, ProviderError};
+use crate::config::ClaudeRoot;
+use crate::runtime::buffer::BufferHandle;
+use crate::runtime::{self, Cursor, KeySource, Kind, RecordDraft, Timestamp};
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub const READ_BUDGET: ReadBudget = ReadBudget {
     max_records: 500,
     max_bytes: 4 * 1024 * 1024,
 };
 
-#[cfg_attr(not(test), expect(dead_code))]
+const TRANSCRIPT_EXTENSION: &str = "jsonl";
+
+pub struct ClaudeCodeProvider {
+    cursors: BufferHandle,
+    known: HashMap<PathBuf, Option<FileCursor>>,
+    unreadable_roots: HashSet<PathBuf>,
+}
+
+enum Flow {
+    Continue,
+    RuntimeGone,
+}
+
+impl ClaudeCodeProvider {
+    pub fn new(cursors: BufferHandle) -> ClaudeCodeProvider {
+        ClaudeCodeProvider {
+            cursors,
+            known: HashMap::new(),
+            unreadable_roots: HashSet::new(),
+        }
+    }
+
+    async fn tick(
+        &mut self,
+        roots: &[ClaudeRoot],
+        out: &Sender<Emission>,
+    ) -> Result<Flow, ProviderError> {
+        for ClaudeRoot { profile, projects } in roots {
+            let Some(paths) = self.transcripts_in(projects) else {
+                continue;
+            };
+            for path in paths {
+                match self.ship_file(&path, profile, out).await? {
+                    Flow::Continue => {}
+                    Flow::RuntimeGone => return Ok(Flow::RuntimeGone),
+                }
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn transcripts_in(&mut self, projects: &Path) -> Option<Vec<PathBuf>> {
+        match transcripts(projects) {
+            Ok(paths) => {
+                self.unreadable_roots.remove(projects);
+                Some(paths)
+            }
+            Err(error) => {
+                if self.unreadable_roots.insert(projects.to_path_buf()) {
+                    tracing::info!(
+                        path = %projects.display(),
+                        %error,
+                        "the Claude Code projects directory cannot be read and is skipped until it can"
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    async fn ship_file(
+        &mut self,
+        path: &Path,
+        profile: &str,
+        out: &Sender<Emission>,
+    ) -> Result<Flow, ProviderError> {
+        let mut cursor = self.cursor_for(path).await?;
+        loop {
+            let increment = match read_increment(path, profile, cursor, READ_BUDGET) {
+                Ok(Some(increment)) => increment,
+                Ok(None) => return Ok(Flow::Continue),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "a transcript could not be read and is tried again on the next poll"
+                    );
+                    return Ok(Flow::Continue);
+                }
+            };
+            let Increment {
+                drafts,
+                cursor: advanced,
+            } = increment;
+
+            let stored = Cursor {
+                provider: runtime::Provider::ClaudeCode,
+                key: cursor_key(path),
+                value: advanced.encode(),
+            };
+            let (emission, committed) = Emission::awaiting_commit(drafts, Some(stored));
+            if out.send(emission).await.is_err() {
+                return Ok(Flow::RuntimeGone);
+            }
+            if committed.await.is_err() {
+                tracing::error!(
+                    path = %path.display(),
+                    "the transcript records were not buffered, so the file is read again from its stored cursor"
+                );
+                return Ok(Flow::Continue);
+            }
+            self.known.insert(path.to_path_buf(), Some(advanced));
+            cursor = Some(advanced);
+        }
+    }
+
+    async fn cursor_for(&mut self, path: &Path) -> Result<Option<FileCursor>, ProviderError> {
+        if let Some(cursor) = self.known.get(path) {
+            return Ok(*cursor);
+        }
+        let stored = self
+            .cursors
+            .cursor(runtime::Provider::ClaudeCode, cursor_key(path))
+            .await;
+        let stored = match stored {
+            Ok(stored) => stored,
+            Err(error) => {
+                return Err(ProviderError(format!(
+                    "the buffer refused a cursor: {error}"
+                )));
+            }
+        };
+        let cursor = match stored {
+            Some(value) => FileCursor::decode(path, &value),
+            None => None,
+        };
+        self.known.insert(path.to_path_buf(), cursor);
+        Ok(cursor)
+    }
+}
+
+impl Provider for ClaudeCodeProvider {
+    fn name(&self) -> &'static str {
+        runtime::Provider::ClaudeCode.as_str()
+    }
+
+    async fn run(&mut self, ctx: Ctx, out: Sender<Emission>) -> Result<(), ProviderError> {
+        let roots = ctx.config.claude_code.roots.clone();
+        let mut ticker = interval(Duration::from_secs(ctx.config.claude_code.poll_interval));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match self.tick(&roots, &out).await? {
+                Flow::Continue => {}
+                Flow::RuntimeGone => {
+                    tracing::info!("the runtime is gone, so the Claude Code provider stops");
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn transcripts(projects: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for project in fs::read_dir(projects)? {
+        let Ok(project) = project else {
+            continue;
+        };
+        let project = project.path();
+        if !project.is_dir() {
+            continue;
+        }
+        let entries = match fs::read_dir(&project) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    path = %project.display(),
+                    %error,
+                    "a Claude Code project directory cannot be read and is skipped"
+                );
+                continue;
+            }
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            if path.extension() != Some(OsStr::new(TRANSCRIPT_EXTENSION)) {
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn cursor_key(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileCursor {
     pub inode: u64,
@@ -24,7 +225,6 @@ pub struct FileCursor {
     pub last_message_ts: Option<i64>,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 impl FileCursor {
     pub fn encode(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
@@ -51,7 +251,6 @@ pub struct ReadBudget {
     pub max_bytes: usize,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug)]
 pub struct Increment {
     pub drafts: Vec<RecordDraft>,
@@ -178,7 +377,6 @@ impl LeadingTag {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn read_increment(
     path: &Path,
     profile: &str,
@@ -458,7 +656,12 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::mpsc::{Receiver, channel};
+
+    use crate::config::default_redact;
+    use crate::providers::tests::test_config;
+    use crate::runtime::buffer::{Buffer, BufferConfig};
 
     const FIXTURE: &str = include_str!("../../fixtures/claude_code_session.jsonl");
     const SESSION: &str = "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94";
@@ -795,12 +998,44 @@ mod tests {
         fn new(name: &str) -> TempTranscripts {
             let path = std::env::temp_dir().join(format!("nikki-claude-test-{name}"));
             let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("the temporary directory could not be created");
-            TempTranscripts { path }
+            let transcripts = TempTranscripts { path };
+            fs::create_dir_all(transcripts.project())
+                .expect("the temporary directory could not be created");
+            transcripts
+        }
+
+        fn root(&self) -> ClaudeRoot {
+            ClaudeRoot {
+                profile: PROFILE.to_string(),
+                projects: self.path.join(".claude").join("projects"),
+            }
+        }
+
+        fn project(&self) -> PathBuf {
+            let ClaudeRoot { projects, .. } = self.root();
+            projects.join("-Users-u-Projects-THE-FEUD-V2")
         }
 
         fn session(&self) -> PathBuf {
-            self.path.join(format!("{SESSION}.jsonl"))
+            self.project().join(format!("{SESSION}.jsonl"))
+        }
+
+        fn write_subagent(&self, text: &str) {
+            let subagents = self.project().join(SESSION).join("subagents");
+            fs::create_dir_all(&subagents).expect("the subagents directory could not be created");
+            fs::write(subagents.join("agent-x.jsonl"), text)
+                .expect("the subagent transcript could not be written");
+        }
+
+        fn buffer(&self) -> Buffer {
+            Buffer::open(BufferConfig {
+                state_dir: self.path.join("state"),
+                device: "mbp-21".to_string(),
+                max_rows: 1_000_000,
+                max_bytes: 1_000_000_000,
+                redact: default_redact(),
+            })
+            .expect("the buffer could not be opened")
         }
 
         fn write(&self, text: &str) -> PathBuf {
@@ -819,7 +1054,7 @@ mod tests {
         }
 
         fn replace(&self, text: &str) {
-            let staged = self.path.join("staged.jsonl");
+            let staged = self.path.join("staged.jsonl.tmp");
             fs::write(&staged, text).expect("the replacement could not be written");
             fs::rename(&staged, self.session()).expect("the replacement could not be moved");
         }
@@ -1113,5 +1348,299 @@ mod tests {
     fn the_production_budget_holds_five_hundred_records_or_four_mebibytes() {
         assert_eq!(READ_BUDGET.max_records, 500);
         assert_eq!(READ_BUDGET.max_bytes, 4 * 1024 * 1024);
+    }
+
+    const SUBAGENT_LINE: &str = "{\"type\": \"user\", \"uuid\": \"subagent-1\", \"sessionId\": \"subagent-session\", \"timestamp\": \"2026-09-14T11:36:00.000Z\", \"cwd\": \"/Users/u/Projects/THE_FEUD_V2\", \"message\": {\"content\": \"a subagent prompt\"}}\n";
+
+    fn prompt_line(index: usize) -> String {
+        format!(
+            "{{\"type\": \"user\", \"uuid\": \"prompt-{index}\", \"sessionId\": \"{SESSION}\", \"timestamp\": \"2026-09-14T11:40:00.000Z\", \"cwd\": \"{CWD}\", \"message\": {{\"content\": \"prompt {index}\"}}}}\n"
+        )
+    }
+
+    async fn commit_into(
+        handle: BufferHandle,
+        mut inbox: Receiver<Emission>,
+    ) -> Vec<Vec<RecordDraft>> {
+        let mut emitted = Vec::new();
+        while let Some(Emission {
+            records,
+            cursor,
+            committed,
+        }) = inbox.recv().await
+        {
+            handle
+                .enqueue(records.clone(), cursor)
+                .await
+                .expect("the emission could not be buffered");
+            emitted.push(records);
+            let Some(committed) = committed else {
+                continue;
+            };
+            let _ = committed.send(());
+        }
+        emitted
+    }
+
+    async fn drop_uncommitted(mut inbox: Receiver<Emission>) -> usize {
+        let mut dropped = 0;
+        while inbox.recv().await.is_some() {
+            dropped += 1;
+        }
+        dropped
+    }
+
+    async fn tick(
+        provider: &mut ClaudeCodeProvider,
+        roots: &[ClaudeRoot],
+        handle: &BufferHandle,
+    ) -> Vec<Vec<RecordDraft>> {
+        let (out, inbox) = channel(4);
+        let committer = tokio::spawn(commit_into(handle.clone(), inbox));
+        let flow = provider.tick(roots, &out).await.expect("the tick failed");
+        match flow {
+            Flow::Continue => {}
+            Flow::RuntimeGone => panic!("the runtime is still there"),
+        }
+        drop(out);
+        committer.await.expect("the committer panicked")
+    }
+
+    fn flattened(emitted: Vec<Vec<RecordDraft>>) -> Vec<RecordDraft> {
+        let mut drafts = Vec::new();
+        for records in emitted {
+            drafts.extend(records);
+        }
+        drafts
+    }
+
+    #[tokio::test]
+    async fn a_first_tick_ships_every_record_of_the_fixture_once_and_nothing_from_subagents() {
+        let transcripts = TempTranscripts::new("provider-first");
+        let path = transcripts.write(FIXTURE);
+        transcripts.write_subagent(SUBAGENT_LINE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let shipped = flattened(tick(&mut provider, &[transcripts.root()], &buffer.handle()).await);
+
+        assert_eq!(shipped.len(), 14);
+        assert_eq!(shipped, drafts_in(&read_all(&path, None, UNBOUNDED)));
+        assert!(
+            shipped
+                .iter()
+                .all(|draft| draft.payload["session_id"] == json!(SESSION)),
+            "a subagent transcript must never be read"
+        );
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_transcript_ships_nothing_on_the_next_tick() {
+        let transcripts = TempTranscripts::new("provider-unchanged");
+        transcripts.write(FIXTURE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let roots = [transcripts.root()];
+
+        tick(&mut provider, &roots, &buffer.handle()).await;
+        let emitted = tick(&mut provider, &roots, &buffer.handle()).await;
+
+        assert!(emitted.is_empty(), "emitted {emitted:?}");
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn appended_lines_ship_on_the_next_tick() {
+        let transcripts = TempTranscripts::new("provider-appended");
+        transcripts.write(&fixture_prefix(12));
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let roots = [transcripts.root()];
+
+        let first = flattened(tick(&mut provider, &roots, &buffer.handle()).await);
+        assert_eq!(messages(first), fixture_messages(0..12));
+
+        let mut rest = String::new();
+        for line in FIXTURE.lines().skip(12) {
+            rest.push_str(line);
+            rest.push('\n');
+        }
+        transcripts.append(&rest);
+        let second = flattened(tick(&mut provider, &roots, &buffer.handle()).await);
+
+        assert_eq!(messages(second.clone()), fixture_messages(12..18));
+        assert_eq!(second.len(), 4);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_missing_root_is_skipped_without_failing_the_provider() {
+        let transcripts = TempTranscripts::new("provider-missing-root");
+        transcripts.write(FIXTURE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let missing = ClaudeRoot {
+            profile: "claude-work".to_string(),
+            projects: transcripts.path.join(".claude-work").join("projects"),
+        };
+        let roots = [missing, transcripts.root()];
+
+        let first = flattened(tick(&mut provider, &roots, &buffer.handle()).await);
+        let second = tick(&mut provider, &roots, &buffer.handle()).await;
+
+        assert_eq!(first.len(), 14);
+        assert!(second.is_empty());
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_restarted_provider_resumes_from_the_committed_cursor() {
+        let transcripts = TempTranscripts::new("provider-restart");
+        transcripts.write(&fixture_prefix(12));
+        let buffer = transcripts.buffer();
+        let roots = [transcripts.root()];
+
+        let mut before = ClaudeCodeProvider::new(buffer.handle());
+        tick(&mut before, &roots, &buffer.handle()).await;
+        drop(before);
+
+        let mut after = ClaudeCodeProvider::new(buffer.handle());
+        let unchanged = tick(&mut after, &roots, &buffer.handle()).await;
+        assert!(unchanged.is_empty(), "emitted {unchanged:?}");
+
+        transcripts.append(&prompt_line(1));
+        let appended = flattened(tick(&mut after, &roots, &buffer.handle()).await);
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].payload["uuid"], json!("prompt-1"));
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn records_that_were_never_buffered_are_read_again_on_the_next_tick() {
+        let transcripts = TempTranscripts::new("provider-uncommitted");
+        transcripts.write(FIXTURE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let roots = [transcripts.root()];
+
+        let (out, inbox) = channel(4);
+        let dropping = tokio::spawn(drop_uncommitted(inbox));
+        provider
+            .tick(&roots, &out)
+            .await
+            .expect("an unbuffered emission is not a provider failure");
+        drop(out);
+        assert_eq!(dropping.await.expect("the dropper panicked"), 1);
+
+        let again = flattened(tick(&mut provider, &roots, &buffer.handle()).await);
+        assert_eq!(again.len(), 14);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_transcript_of_only_tool_lines_advances_its_cursor_without_records() {
+        let transcripts = TempTranscripts::new("provider-tool-lines");
+        let mut text = String::new();
+        for line in FIXTURE.lines().skip(3).take(2) {
+            text.push_str(line);
+            text.push('\n');
+        }
+        transcripts.write(&text);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let roots = [transcripts.root()];
+
+        let first = tick(&mut provider, &roots, &buffer.handle()).await;
+        let second = tick(&mut provider, &roots, &buffer.handle()).await;
+
+        assert_eq!(first, vec![Vec::new()]);
+        assert!(second.is_empty(), "the tool lines were read again");
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_transcript_past_the_budget_ships_in_several_emissions() {
+        let transcripts = TempTranscripts::new("provider-budget");
+        let mut text = String::new();
+        for index in 0..READ_BUDGET.max_records + 100 {
+            text.push_str(&prompt_line(index));
+        }
+        transcripts.write(&text);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let emitted = tick(&mut provider, &[transcripts.root()], &buffer.handle()).await;
+
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted[0].len(), READ_BUDGET.max_records);
+        assert_eq!(flattened(emitted).len(), READ_BUDGET.max_records + 100);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_buffer_that_refuses_cursor_reads_fails_the_provider() {
+        let transcripts = TempTranscripts::new("provider-closed-buffer");
+        transcripts.write(FIXTURE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        buffer.close().await.expect("the buffer did not close");
+
+        let (out, _inbox) = channel(4);
+        let outcome = provider.tick(&[transcripts.root()], &out).await;
+
+        let Err(ProviderError(reason)) = outcome else {
+            panic!("a refused cursor read must fail the provider");
+        };
+        assert!(reason.contains("cursor"), "reason was {reason}");
+    }
+
+    #[tokio::test]
+    async fn the_running_provider_ships_on_its_interval_and_stops_once_the_runtime_is_gone() {
+        let transcripts = TempTranscripts::new("provider-run");
+        transcripts.write(FIXTURE);
+        let buffer = transcripts.buffer();
+        let handle = buffer.handle();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let mut config = test_config(30);
+        config.claude_code.roots = vec![transcripts.root()];
+        config.claude_code.poll_interval = 1;
+        let ctx = Ctx {
+            config: Arc::new(config),
+        };
+        let (out, mut inbox) = channel(4);
+        let running = tokio::spawn(async move { provider.run(ctx, out).await });
+
+        let Some(Emission {
+            records,
+            cursor,
+            committed,
+        }) = inbox.recv().await
+        else {
+            panic!("the provider stopped without emitting");
+        };
+        assert_eq!(records.len(), 14);
+        let Some(Cursor { provider, key, .. }) = &cursor else {
+            panic!("the emission carries no cursor");
+        };
+        assert_eq!(*provider, runtime::Provider::ClaudeCode);
+        assert_eq!(*key, transcripts.session().to_string_lossy());
+        handle
+            .enqueue(records, cursor)
+            .await
+            .expect("the emission could not be buffered");
+        let Some(committed) = committed else {
+            panic!("the emission awaits no commit");
+        };
+        let _ = committed.send(());
+
+        drop(inbox);
+        transcripts.append(&prompt_line(1));
+        let stopped = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("the provider did not notice the runtime was gone")
+            .expect("the provider panicked");
+        assert!(stopped.is_ok(), "stopped with {stopped:?}");
+        buffer.close().await.expect("the buffer did not close");
     }
 }

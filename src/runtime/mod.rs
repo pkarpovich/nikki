@@ -134,13 +134,11 @@ pub enum KeySource {
         generation: u64,
         visit_id: i64,
     },
-    #[cfg_attr(not(test), expect(dead_code))]
     ClaudeMessage {
         session_id: String,
         uuid: String,
         block: u32,
     },
-    #[cfg_attr(not(test), expect(dead_code))]
     ClaudeSession {
         session_id: String,
         field: String,
