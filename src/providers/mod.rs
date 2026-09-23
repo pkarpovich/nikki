@@ -1,4 +1,5 @@
 pub mod browser_history;
+pub mod claude_code;
 pub mod scripted;
 pub mod windows;
 
