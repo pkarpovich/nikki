@@ -48,11 +48,11 @@ Transcript facts, measured on the user's real `~/.claude/projects` (396 session 
 ## Implementation Steps
 
 ### Task 1: Wire names and identity
-- [ ] add `Provider::ClaudeCode` (`"claude_code"`) and `Kind::Message` (`"message"`), `Kind::Session` (`"session"`) in `src/runtime/mod.rs`; extend `every_provider_and_kind_carries_its_wire_name`
-- [ ] add `KeySource::ClaudeMessage { session_id: String, uuid: String, block: u32 }` and `KeySource::ClaudeSession { session_id: String, field: String, value: String }`, mapped in `into_envelope` to new `dedup::claude_message_key` / `dedup::claude_session_key`
-- [ ] in `src/runtime/dedup.rs`: `claude_message_key(device, session_id, uuid, block)` = `key([device, "claude_code", "message", session_id, uuid, block])` and `claude_session_key(device, session_id, field, value)` = `key([device, "claude_code", "session", session_id, field, value])`
-- [ ] write dedup tests in the style of the existing ones: exact hash of the joined fields; every field changes the key; the key ignores `seq` (the same message enqueued twice gets the same key)
-- [ ] `mise run check` - must pass before task 2
+- [x] add `Provider::ClaudeCode` (`"claude_code"`) and `Kind::Message` (`"message"`), `Kind::Session` (`"session"`) in `src/runtime/mod.rs`; extend `every_provider_and_kind_carries_its_wire_name`
+- [x] add `KeySource::ClaudeMessage { session_id: String, uuid: String, block: u32 }` and `KeySource::ClaudeSession { session_id: String, field: String, value: String }`, mapped in `into_envelope` to new `dedup::claude_message_key` / `dedup::claude_session_key`
+- [x] in `src/runtime/dedup.rs`: `claude_message_key(device, session_id, uuid, block)` = `key([device, "claude_code", "message", session_id, uuid, block])` and `claude_session_key(device, session_id, field, value)` = `key([device, "claude_code", "session", session_id, field, value])`
+- [x] write dedup tests in the style of the existing ones: exact hash of the joined fields; every field changes the key; the key ignores `seq` (the same message enqueued twice gets the same key)
+- [x] `mise run check` - must pass before task 2 (unsafe grep reports only the pre-existing `src/service.rs` `libc::getuid` from 3b45700, not touched here)
 
 ### Task 2: Configuration
 - [ ] add an optional `[claude_code]` section to `FileConfig` (`deny_unknown_fields`): `roots` (array of strings, default `["~/.claude", "~/.claude-work"]`) and `poll_interval` (seconds, default 60, minimum 1 - reject below with the same reasoning as `history_poll_interval`)

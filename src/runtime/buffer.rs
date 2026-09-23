@@ -725,6 +725,21 @@ mod tests {
         }
     }
 
+    fn message(index: i64) -> RecordDraft {
+        RecordDraft {
+            provider: Provider::ClaudeCode,
+            kind: Kind::Message,
+            ts: Timestamp::from_millis(1_787_666_157_000),
+            degraded: false,
+            payload: json!({"text": "Deployed.", "block": 0}),
+            key: KeySource::ClaudeMessage {
+                session_id: "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94".to_string(),
+                uuid: index.to_string(),
+                block: 0,
+            },
+        }
+    }
+
     fn browser_cursor(value: &str) -> Cursor {
         Cursor {
             provider: Provider::BrowserHistory,
@@ -1089,19 +1104,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn both_providers_enqueue_while_the_shipper_drains() {
+    async fn every_provider_enqueues_while_the_shipper_drains() {
         let state = TempState::new("concurrency");
         let buffer = open(&state, 1_000_000, 1_000_000_000);
 
         let per_provider = 100;
         let mut providers = Vec::new();
-        for provider in [Provider::Windows, Provider::BrowserHistory] {
+        for provider in [
+            Provider::Windows,
+            Provider::BrowserHistory,
+            Provider::ClaudeCode,
+        ] {
             let handle = buffer.handle();
             providers.push(tokio::spawn(async move {
                 for index in 0..per_provider {
                     let draft = match provider {
                         Provider::Windows => tick(index),
                         Provider::BrowserHistory => visit(index),
+                        Provider::ClaudeCode => message(index),
                     };
                     handle
                         .enqueue(vec![draft], None)
@@ -1114,7 +1134,7 @@ mod tests {
         let handle = buffer.handle();
         let shipper = tokio::spawn(async move {
             let mut shipped = 0;
-            while shipped < per_provider * 2 {
+            while shipped < per_provider * 3 {
                 let batch = handle
                     .take_batch(37)
                     .await
@@ -1141,7 +1161,7 @@ mod tests {
         }
         let shipped = shipper.await.expect("the shipper task panicked");
 
-        assert_eq!(shipped, per_provider * 2);
+        assert_eq!(shipped, per_provider * 3);
         assert_eq!(state.totals("pending").0, 0);
 
         buffer.close().await.expect("the buffer did not close");

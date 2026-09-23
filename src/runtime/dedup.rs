@@ -27,6 +27,28 @@ pub fn browser_key(device: &str, profile: &str, generation: u64, visit_id: i64) 
     ])
 }
 
+pub fn claude_message_key(device: &str, session_id: &str, uuid: &str, block: u32) -> String {
+    key(&[
+        device,
+        Provider::ClaudeCode.as_str(),
+        Kind::Message.as_str(),
+        session_id,
+        uuid,
+        &block.to_string(),
+    ])
+}
+
+pub fn claude_session_key(device: &str, session_id: &str, field: &str, value: &str) -> String {
+    key(&[
+        device,
+        Provider::ClaudeCode.as_str(),
+        Kind::Session.as_str(),
+        session_id,
+        field,
+        value,
+    ])
+}
+
 pub fn key(fields: &[&str]) -> String {
     let digest = Sha256::digest(fields.join(UNIT_SEPARATOR).as_bytes());
     let mut hex = String::with_capacity(KEY_HEX_CHARS);
@@ -63,6 +85,62 @@ mod tests {
             browser_key("mbp-21", "MBP_21", 1, 929_269),
             expected("mbp-21\u{1f}browser_history\u{1f}MBP_21\u{1f}1\u{1f}929269")
         );
+    }
+
+    const SESSION: &str = "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94";
+    const UUID: &str = "d41f0c2a-7e93-4b6d-a8f1-5c2e90b7d316";
+
+    #[test]
+    fn the_claude_message_key_hashes_the_unit_separator_joined_fields() {
+        assert_eq!(
+            claude_message_key("mbp-21", SESSION, UUID, 0),
+            expected(&format!(
+                "mbp-21\u{1f}claude_code\u{1f}message\u{1f}{SESSION}\u{1f}{UUID}\u{1f}0"
+            ))
+        );
+    }
+
+    #[test]
+    fn the_claude_session_key_hashes_the_unit_separator_joined_fields() {
+        assert_eq!(
+            claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy dev via spot"),
+            expected(&format!(
+                "mbp-21\u{1f}claude_code\u{1f}session\u{1f}{SESSION}\u{1f}ai_title\u{1f}Redeploy dev via spot"
+            ))
+        );
+    }
+
+    #[test]
+    fn every_claude_message_field_changes_the_key() {
+        let base = claude_message_key("mbp-21", SESSION, UUID, 0);
+        let variants = [
+            claude_message_key("mba-22", SESSION, UUID, 0),
+            claude_message_key("mbp-21", "0b9e4c71-2d6a-4f38-8e15-7a3c9d0f6b24", UUID, 0),
+            claude_message_key("mbp-21", SESSION, "5a7e2b91-c04d-4e63-9f18-2d6b0a8c4e75", 0),
+            claude_message_key("mbp-21", SESSION, UUID, 1),
+        ];
+        for variant in variants {
+            assert_ne!(base, variant);
+        }
+    }
+
+    #[test]
+    fn every_claude_session_field_changes_the_key() {
+        let base = claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy dev via spot");
+        let variants = [
+            claude_session_key("mba-22", SESSION, "ai_title", "Redeploy dev via spot"),
+            claude_session_key(
+                "mbp-21",
+                "0b9e4c71-2d6a-4f38-8e15-7a3c9d0f6b24",
+                "ai_title",
+                "Redeploy dev via spot",
+            ),
+            claude_session_key("mbp-21", SESSION, "custom_title", "Redeploy dev via spot"),
+            claude_session_key("mbp-21", SESSION, "ai_title", "feud"),
+        ];
+        for variant in variants {
+            assert_ne!(base, variant);
+        }
     }
 
     #[test]
