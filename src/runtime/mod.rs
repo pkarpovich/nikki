@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::macos::events::SLEEP_FLUSH_BUDGET;
 use crate::providers::Emission;
 use crate::runtime::buffer::{Buffer, BufferConfig, BufferError, BufferHandle};
-use crate::runtime::dedup::{browser_key, windows_key};
+use crate::runtime::dedup::{browser_key, claude_message_key, claude_session_key, windows_key};
 use crate::runtime::ship::{HttpTransport, ShipError, ShipNow, Shipper};
 
 const RFC3339_MILLIS: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
@@ -31,6 +31,7 @@ const PRIVATE_DIR_MODE: u32 = 0o700;
 pub enum Provider {
     Windows,
     BrowserHistory,
+    ClaudeCode,
 }
 
 impl Provider {
@@ -38,6 +39,7 @@ impl Provider {
         match self {
             Provider::Windows => "windows",
             Provider::BrowserHistory => "browser_history",
+            Provider::ClaudeCode => "claude_code",
         }
     }
 }
@@ -59,6 +61,8 @@ pub enum Kind {
     Wake,
     BufferOverflow,
     Visit,
+    Message,
+    Session,
 }
 
 impl Kind {
@@ -73,6 +77,8 @@ impl Kind {
             Kind::Wake => "wake",
             Kind::BufferOverflow => "buffer_overflow",
             Kind::Visit => "visit",
+            Kind::Message => "message",
+            Kind::Session => "session",
         }
     }
 }
@@ -128,6 +134,16 @@ pub enum KeySource {
         generation: u64,
         visit_id: i64,
     },
+    ClaudeMessage {
+        session_id: String,
+        uuid: String,
+        block: u32,
+    },
+    ClaudeSession {
+        session_id: String,
+        field: String,
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +173,16 @@ impl RecordDraft {
                 generation,
                 visit_id,
             } => browser_key(device, &profile, generation, visit_id),
+            KeySource::ClaudeMessage {
+                session_id,
+                uuid,
+                block,
+            } => claude_message_key(device, &session_id, &uuid, block),
+            KeySource::ClaudeSession {
+                session_id,
+                field,
+                value,
+            } => claude_session_key(device, &session_id, &field, &value),
         };
         Envelope {
             provider,
@@ -271,6 +297,7 @@ async fn store(records: &BufferHandle, ship_now: &ShipNow, emission: Emission) {
         records: drafts,
         cursor,
         committed,
+        ships_before_commit,
     } = emission;
     let count = drafts.len();
     let buffered = match records.enqueue(drafts, cursor).await {
@@ -285,6 +312,10 @@ async fn store(records: &BufferHandle, ship_now: &ShipNow, emission: Emission) {
     let Some(committed) = committed else {
         return;
     };
+    if !ships_before_commit {
+        let _ = committed.send(());
+        return;
+    }
     if let Err(error) = records.flush_now().await {
         tracing::error!(%error, "the buffer could not be flushed before the acknowledgement");
     }
@@ -346,6 +377,36 @@ mod tests {
         }
     }
 
+    fn claude_message_draft(block: u32) -> RecordDraft {
+        RecordDraft {
+            provider: Provider::ClaudeCode,
+            kind: Kind::Message,
+            ts: Timestamp::from_millis(1_789_386_912_410),
+            degraded: false,
+            payload: json!({"text": "передеплоишь дев через spot?"}),
+            key: KeySource::ClaudeMessage {
+                session_id: "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94".to_string(),
+                uuid: "d41f0c2a-7e93-4b6d-a8f1-5c2e90b7d316".to_string(),
+                block,
+            },
+        }
+    }
+
+    fn claude_session_draft(value: &str) -> RecordDraft {
+        RecordDraft {
+            provider: Provider::ClaudeCode,
+            kind: Kind::Session,
+            ts: Timestamp::from_millis(1_789_386_912_410),
+            degraded: false,
+            payload: json!({"field": "ai_title", "value": value}),
+            key: KeySource::ClaudeSession {
+                session_id: "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94".to_string(),
+                field: "ai_title".to_string(),
+                value: value.to_string(),
+            },
+        }
+    }
+
     const TICK_MILLIS: i64 = 1_787_666_152_481;
     const TICK_RFC3339: &str = "2026-08-25T13:55:52.481Z";
 
@@ -353,6 +414,7 @@ mod tests {
     fn every_provider_and_kind_carries_its_wire_name() {
         assert_eq!(Provider::Windows.as_str(), "windows");
         assert_eq!(Provider::BrowserHistory.as_str(), "browser_history");
+        assert_eq!(Provider::ClaudeCode.as_str(), "claude_code");
 
         let kinds = [
             (Kind::Tick, "tick"),
@@ -364,6 +426,8 @@ mod tests {
             (Kind::Wake, "wake"),
             (Kind::BufferOverflow, "buffer_overflow"),
             (Kind::Visit, "visit"),
+            (Kind::Message, "message"),
+            (Kind::Session, "session"),
         ];
         for (kind, name) in kinds {
             assert_eq!(kind.as_str(), name);
@@ -426,6 +490,44 @@ mod tests {
 
         let regenerated = visit_draft(929_269, 2).into_envelope("mbp-21", 1);
         assert_ne!(first.dedup_key, regenerated.dedup_key);
+    }
+
+    #[test]
+    fn the_claude_message_key_ignores_the_sequence_number_and_follows_the_block() {
+        let first = claude_message_draft(0).into_envelope("mbp-21", 1);
+        let second = claude_message_draft(0).into_envelope("mbp-21", 9_999);
+        assert_eq!(first.dedup_key, second.dedup_key);
+        assert_eq!(
+            first.dedup_key,
+            claude_message_key(
+                "mbp-21",
+                "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94",
+                "d41f0c2a-7e93-4b6d-a8f1-5c2e90b7d316",
+                0
+            )
+        );
+
+        let next_block = claude_message_draft(1).into_envelope("mbp-21", 1);
+        assert_ne!(first.dedup_key, next_block.dedup_key);
+    }
+
+    #[test]
+    fn the_claude_session_key_ignores_the_sequence_number_and_follows_the_value() {
+        let first = claude_session_draft("Redeploy dev via spot").into_envelope("mbp-21", 1);
+        let repeated = claude_session_draft("Redeploy dev via spot").into_envelope("mbp-21", 9_999);
+        assert_eq!(first.dedup_key, repeated.dedup_key);
+        assert_eq!(
+            first.dedup_key,
+            claude_session_key(
+                "mbp-21",
+                "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94",
+                "ai_title",
+                "Redeploy dev via spot"
+            )
+        );
+
+        let retitled = claude_session_draft("feud").into_envelope("mbp-21", 1);
+        assert_ne!(first.dedup_key, retitled.dedup_key);
     }
 
     struct TempState {
@@ -706,6 +808,26 @@ mod tests {
 
         storing.await.expect("the record was stored");
         committed.await.expect("the record was acknowledged");
+        assert_eq!(buffered(&records).await, 1);
+        buffer.close().await.expect("the buffer closes");
+    }
+
+    #[tokio::test]
+    async fn an_emission_awaiting_the_buffer_is_acknowledged_without_asking_for_a_shipment() {
+        let state = TempState::new("commit-buffer-only");
+        let buffer = open_buffer(&state);
+        let records = buffer.handle();
+
+        let (ship_now, mut requests) = ship_now_channel();
+        let (emission, committed) =
+            Emission::awaiting_buffer(vec![tick_draft(Timestamp::from_millis(TICK_MILLIS))], None);
+        store(&records, &ship_now, emission).await;
+
+        committed.await.expect("the record was acknowledged");
+        assert!(
+            requests.try_recv().is_err(),
+            "an emission awaiting only the buffer must not force a shipment"
+        );
         assert_eq!(buffered(&records).await, 1);
         buffer.close().await.expect("the buffer closes");
     }

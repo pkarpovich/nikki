@@ -1,4 +1,5 @@
 pub mod browser_history;
+pub mod claude_code;
 pub mod scripted;
 pub mod windows;
 
@@ -29,6 +30,7 @@ pub struct Emission {
     pub records: Vec<RecordDraft>,
     pub cursor: Option<Cursor>,
     pub committed: Option<oneshot::Sender<()>>,
+    pub ships_before_commit: bool,
 }
 
 impl Emission {
@@ -37,6 +39,7 @@ impl Emission {
             records,
             cursor: None,
             committed: None,
+            ships_before_commit: false,
         }
     }
 
@@ -49,6 +52,21 @@ impl Emission {
             records,
             cursor,
             committed: Some(committed),
+            ships_before_commit: true,
+        };
+        (emission, receipt)
+    }
+
+    pub fn awaiting_buffer(
+        records: Vec<RecordDraft>,
+        cursor: Option<Cursor>,
+    ) -> (Emission, oneshot::Receiver<()>) {
+        let (committed, receipt) = oneshot::channel();
+        let emission = Emission {
+            records,
+            cursor,
+            committed: Some(committed),
+            ships_before_commit: false,
         };
         (emission, receipt)
     }
@@ -152,7 +170,7 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use url::Url;
 
-    use crate::config::{Browser, Buffer, Keep, RedactRule};
+    use crate::config::{Browser, Buffer, ClaudeCode, Keep, RedactRule};
     use crate::runtime::redact::WILDCARD_HOST;
 
     pub fn test_config(tick_interval: u64) -> Config {
@@ -176,6 +194,10 @@ pub(crate) mod tests {
                 drop: Vec::new(),
             }],
             state_dir: std::env::temp_dir().join("nikki-provider-tests"),
+            claude_code: ClaudeCode {
+                roots: Vec::new(),
+                poll_interval: 60,
+            },
         }
     }
 
@@ -341,9 +363,11 @@ pub(crate) mod tests {
             records,
             cursor,
             committed,
+            ships_before_commit,
         } = Emission::new(Vec::new());
         assert!(records.is_empty());
         assert!(cursor.is_none());
         assert!(committed.is_none());
+        assert!(!ships_before_commit);
     }
 }

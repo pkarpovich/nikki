@@ -22,13 +22,14 @@ use crate::macos::events::EventThread;
 use crate::providers::browser_history::{
     BrowserHistoryProvider, directory_for, discard_stale_snapshot, user_data_dir,
 };
+use crate::providers::claude_code::ClaudeCodeProvider;
 use crate::providers::scripted::{ScriptedSources, TEST_SOURCES_VAR};
 use crate::providers::windows::{MacSources, WindowProvider};
 use crate::providers::{Backoff, Ctx, supervise};
 use crate::runtime::ship::endpoint;
 use crate::runtime::{EMISSION_QUEUE, Pipeline, absorb, private_dir};
 
-const PROVIDERS: &str = "windows, browser_history";
+const PROVIDERS: &str = "windows, browser_history, claude_code";
 
 /// nikki captures what happens on this Mac and ships it to the nikki service.
 #[derive(FromArgs)]
@@ -264,7 +265,13 @@ async fn run(config: Config) -> Result<(), String> {
         }
     };
     let history = tokio::spawn(supervise(
-        BrowserHistoryProvider::new(user_data, records),
+        BrowserHistoryProvider::new(user_data, records.clone()),
+        ctx.clone(),
+        emissions.clone(),
+        Backoff::default(),
+    ));
+    let claude_code = tokio::spawn(supervise(
+        ClaudeCodeProvider::new(records),
         ctx,
         emissions.clone(),
         Backoff::default(),
@@ -283,8 +290,10 @@ async fn run(config: Config) -> Result<(), String> {
 
     windows.abort();
     history.abort();
+    claude_code.abort();
     let _ = windows.await;
     let _ = history.await;
+    let _ = claude_code.await;
     event_thread.stop();
 
     let _ = shutdown.send(true);

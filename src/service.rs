@@ -3,6 +3,8 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::macos::processes::current_uid;
+
 /// How long launchd is given to let go of the agent before it is loaded again.
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const UNLOAD_POLL: Duration = Duration::from_millis(100);
@@ -133,7 +135,7 @@ fn executable() -> Result<PathBuf, ServiceError> {
 
 /// Waits for launchd to finish unloading the agent, which `bootout` returns before doing.
 fn wait_unloaded(label: &str) {
-    let target = format!("gui/{}/{label}", uid());
+    let target = format!("gui/{}/{label}", current_uid());
     let deadline = Instant::now() + UNLOAD_TIMEOUT;
     while Instant::now() < deadline {
         let printed = Command::new("launchctl")
@@ -202,7 +204,7 @@ fn remove_file(path: &Path) -> Result<(), ServiceError> {
 }
 
 fn unload(label: &str) -> Result<(), ServiceError> {
-    let target = format!("gui/{}/{label}", uid());
+    let target = format!("gui/{}/{label}", current_uid());
     let status = Command::new("launchctl")
         .args(["bootout", &target])
         .status()
@@ -212,7 +214,7 @@ fn unload(label: &str) -> Result<(), ServiceError> {
 }
 
 fn bootstrap(agent: &Path) -> Result<(), ServiceError> {
-    let target = format!("gui/{}", uid());
+    let target = format!("gui/{}", current_uid());
     let Some(agent_arg) = agent.to_str() else {
         return Err(ServiceError::Bootstrap {
             path: agent.to_path_buf(),
@@ -228,10 +230,6 @@ fn bootstrap(agent: &Path) -> Result<(), ServiceError> {
     Err(ServiceError::Bootstrap {
         path: agent.to_path_buf(),
     })
-}
-
-fn uid() -> u32 {
-    unsafe { libc::getuid() }
 }
 
 fn agent_plist(program: &Path, log: &Path, errors: &Path) -> String {

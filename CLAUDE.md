@@ -82,6 +82,11 @@ A change to `src/extract/agterm.rs` or `src/macos/processes.rs` also requires
 table still names a real surface, and it skips itself when `agtermctl` is on neither `PATH` nor
 `/Applications/agterm.app/Contents/MacOS/agtermctl`.
 
+A change to `src/providers/claude_code.rs` also requires `./scripts/acceptance.sh`. Its live
+transcript case is the only assertion that the real transcripts under the default roots still yield
+messages, read to their end or to a partial last line, and never ship an `isMeta` line - the fixture
+cannot notice Claude Code changing its transcript format.
+
 ## Style
 
 - No comments; clear names instead.
