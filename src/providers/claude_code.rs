@@ -1,9 +1,63 @@
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use chrono::DateTime;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::runtime::{self, KeySource, Kind, RecordDraft, Timestamp};
 
 #[cfg_attr(not(test), expect(dead_code))]
+pub const READ_BUDGET: ReadBudget = ReadBudget {
+    max_records: 500,
+    max_bytes: 4 * 1024 * 1024,
+};
+
+#[cfg_attr(not(test), expect(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileCursor {
+    pub inode: u64,
+    pub offset: u64,
+    pub last_message_ts: Option<i64>,
+}
+
+#[cfg_attr(not(test), expect(dead_code))]
+impl FileCursor {
+    pub fn encode(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    pub fn decode(path: &Path, value: &str) -> Option<FileCursor> {
+        match serde_json::from_str(value) {
+            Ok(cursor) => Some(cursor),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "the stored transcript cursor does not parse and the file is read from the start"
+                );
+                None
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReadBudget {
+    pub max_records: usize,
+    pub max_bytes: usize,
+}
+
+#[cfg_attr(not(test), expect(dead_code))]
+#[derive(Debug)]
+pub struct Increment {
+    pub drafts: Vec<RecordDraft>,
+    pub cursor: FileCursor,
+}
+
 pub struct LineContext<'a> {
     pub profile: &'a str,
     pub fallback_session_id: &'a str,
@@ -11,7 +65,6 @@ pub struct LineContext<'a> {
     pub file_modified: Timestamp,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Default)]
 pub struct LineOutcome {
     pub drafts: Vec<RecordDraft>,
@@ -126,6 +179,109 @@ impl LeadingTag {
 }
 
 #[cfg_attr(not(test), expect(dead_code))]
+pub fn read_increment(
+    path: &Path,
+    profile: &str,
+    cursor: Option<FileCursor>,
+    budget: ReadBudget,
+) -> io::Result<Option<Increment>> {
+    let metadata = fs::metadata(path)?;
+    let inode = metadata.ino();
+    let length = metadata.len();
+    let start = match cursor {
+        Some(cursor) if cursor.inode == inode && cursor.offset <= length => cursor,
+        Some(_) | None => FileCursor {
+            inode,
+            offset: 0,
+            last_message_ts: None,
+        },
+    };
+    if length == start.offset {
+        return Ok(None);
+    }
+
+    let file_modified = modified_millis(metadata.modified());
+    let fallback_session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(start.offset))?;
+    let mut reader = BufReader::new(file);
+
+    let mut offset = start.offset;
+    let mut last_message_ts = start.last_message_ts;
+    let mut drafts = Vec::new();
+    let mut text_bytes = 0;
+    let mut line = Vec::new();
+    while drafts.len() < budget.max_records && text_bytes < budget.max_bytes {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        let line_start = offset;
+        offset += read as u64;
+
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    offset = line_start,
+                    %error,
+                    "a transcript line is not JSON and is skipped"
+                );
+                continue;
+            }
+        };
+        let context = LineContext {
+            profile,
+            fallback_session_id,
+            last_message_ts: last_message_ts.map(Timestamp::from_millis),
+            file_modified,
+        };
+        let LineOutcome {
+            drafts: line_drafts,
+            message_ts,
+        } = drafts_from_line(&value, &context);
+        if let Some(ts) = message_ts {
+            last_message_ts = Some(ts.millis());
+        }
+        for draft in line_drafts {
+            text_bytes += draft
+                .payload
+                .get("text")
+                .and_then(Value::as_str)
+                .map_or(0, str::len);
+            drafts.push(draft);
+        }
+    }
+
+    if offset == start.offset {
+        return Ok(None);
+    }
+    Ok(Some(Increment {
+        drafts,
+        cursor: FileCursor {
+            inode,
+            offset,
+            last_message_ts,
+        },
+    }))
+}
+
+fn modified_millis(modified: io::Result<SystemTime>) -> Timestamp {
+    let Ok(modified) = modified else {
+        return Timestamp::now();
+    };
+    let Ok(since_epoch) = modified.duration_since(UNIX_EPOCH) else {
+        return Timestamp::now();
+    };
+    Timestamp::from_millis(since_epoch.as_millis() as i64)
+}
+
 pub fn drafts_from_line(line: &Value, context: &LineContext) -> LineOutcome {
     let Some(line_type) = line.get("type").and_then(Value::as_str) else {
         return LineOutcome::default();
@@ -301,6 +457,8 @@ fn flag(line: &Value, key: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
+    use std::path::PathBuf;
 
     const FIXTURE: &str = include_str!("../../fixtures/claude_code_session.jsonl");
     const SESSION: &str = "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94";
@@ -622,5 +780,338 @@ mod tests {
         };
         assert!(!payload.contains_key("git_branch"));
         assert_eq!(payload["cwd"], json!(CWD));
+    }
+
+    const UNBOUNDED: ReadBudget = ReadBudget {
+        max_records: usize::MAX,
+        max_bytes: usize::MAX,
+    };
+
+    struct TempTranscripts {
+        path: PathBuf,
+    }
+
+    impl TempTranscripts {
+        fn new(name: &str) -> TempTranscripts {
+            let path = std::env::temp_dir().join(format!("nikki-claude-test-{name}"));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("the temporary directory could not be created");
+            TempTranscripts { path }
+        }
+
+        fn session(&self) -> PathBuf {
+            self.path.join(format!("{SESSION}.jsonl"))
+        }
+
+        fn write(&self, text: &str) -> PathBuf {
+            let path = self.session();
+            fs::write(&path, text).expect("the transcript could not be written");
+            path
+        }
+
+        fn append(&self, text: &str) {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(self.session())
+                .expect("the transcript could not be opened");
+            file.write_all(text.as_bytes())
+                .expect("the transcript could not be appended to");
+        }
+
+        fn replace(&self, text: &str) {
+            let staged = self.path.join("staged.jsonl");
+            fs::write(&staged, text).expect("the replacement could not be written");
+            fs::rename(&staged, self.session()).expect("the replacement could not be moved");
+        }
+    }
+
+    impl Drop for TempTranscripts {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn fixture_prefix(lines: usize) -> String {
+        let mut text = String::new();
+        for line in FIXTURE.lines().take(lines) {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text
+    }
+
+    fn read_all(path: &Path, cursor: Option<FileCursor>, budget: ReadBudget) -> Vec<Increment> {
+        let mut cursor = cursor;
+        let mut increments = Vec::new();
+        while let Some(increment) =
+            read_increment(path, PROFILE, cursor, budget).expect("the transcript reads")
+        {
+            cursor = Some(increment.cursor);
+            increments.push(increment);
+        }
+        increments
+    }
+
+    fn drafts_in(increments: &[Increment]) -> Vec<RecordDraft> {
+        let mut drafts = Vec::new();
+        for increment in increments {
+            drafts.extend(increment.drafts.iter().cloned());
+        }
+        drafts
+    }
+
+    fn fixture_messages(lines: std::ops::Range<usize>) -> Vec<RecordDraft> {
+        let mut drafts = Vec::new();
+        for outcome in &outcomes()[lines] {
+            for draft in &outcome.drafts {
+                if draft.kind == Kind::Message {
+                    drafts.push(draft.clone());
+                }
+            }
+        }
+        drafts
+    }
+
+    fn messages(drafts: Vec<RecordDraft>) -> Vec<RecordDraft> {
+        drafts
+            .into_iter()
+            .filter(|draft| draft.kind == Kind::Message)
+            .collect()
+    }
+
+    fn inode(path: &Path) -> u64 {
+        fs::metadata(path)
+            .expect("the transcript has metadata")
+            .ino()
+    }
+
+    #[test]
+    fn a_file_cursor_survives_a_round_trip_and_garbage_restarts() {
+        let cursor = FileCursor {
+            inode: 42,
+            offset: 9_000,
+            last_message_ts: Some(1_789_000_000_000),
+        };
+        let path = Path::new("/tmp/session.jsonl");
+        assert_eq!(FileCursor::decode(path, &cursor.encode()), Some(cursor));
+        assert_eq!(FileCursor::decode(path, "not a cursor"), None);
+        assert_eq!(FileCursor::decode(path, "{\"offset\": 3}"), None);
+    }
+
+    #[test]
+    fn a_fresh_file_reads_fully_in_one_increment() {
+        let transcripts = TempTranscripts::new("fresh");
+        let path = transcripts.write(FIXTURE);
+
+        let increments = read_all(&path, None, UNBOUNDED);
+
+        assert_eq!(increments.len(), 1);
+        let Increment { drafts, cursor } = &increments[0];
+        assert_eq!(drafts.len(), 14);
+        assert_eq!(
+            messages(drafts.clone()),
+            fixture_messages(0..18),
+            "the messages equal the line-by-line classification"
+        );
+        assert_eq!(cursor.inode, inode(&path));
+        assert_eq!(cursor.offset, FIXTURE.len() as u64);
+        assert_eq!(cursor.last_message_ts, Some(ts(18).millis()));
+        assert!(
+            drafts
+                .iter()
+                .all(|draft| draft.payload["session_id"] == json!(SESSION))
+        );
+    }
+
+    #[test]
+    fn an_unchanged_file_yields_nothing() {
+        let transcripts = TempTranscripts::new("unchanged");
+        let path = transcripts.write(FIXTURE);
+        let first = read_all(&path, None, UNBOUNDED);
+
+        let again = read_increment(&path, PROFILE, Some(first[0].cursor), UNBOUNDED)
+            .expect("the transcript reads");
+
+        assert!(again.is_none());
+    }
+
+    #[test]
+    fn appended_lines_are_the_only_ones_read_again() {
+        let transcripts = TempTranscripts::new("appended");
+        let path = transcripts.write(&fixture_prefix(6));
+        let first = read_all(&path, None, UNBOUNDED);
+        assert_eq!(messages(drafts_in(&first)), fixture_messages(0..6));
+
+        transcripts.append(&FIXTURE[fixture_prefix(6).len()..]);
+        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+
+        assert_eq!(messages(drafts_in(&second)), fixture_messages(6..18));
+        let titles: Vec<RecordDraft> = drafts_in(&second)
+            .into_iter()
+            .filter(|draft| draft.kind == Kind::Session)
+            .collect();
+        assert_eq!(titles[0].ts, ts(12));
+        assert_eq!(second[0].cursor.offset, FIXTURE.len() as u64);
+    }
+
+    #[test]
+    fn a_title_after_a_split_takes_the_message_ts_carried_in_the_cursor() {
+        let transcripts = TempTranscripts::new("title-after-split");
+        let path = transcripts.write(&fixture_prefix(12));
+        let first = read_all(&path, None, UNBOUNDED);
+        assert_eq!(first[0].cursor.last_message_ts, Some(ts(12).millis()));
+
+        transcripts.append(
+            &FIXTURE
+                .lines()
+                .nth(13)
+                .map(|line| format!("{line}\n"))
+                .unwrap_or_default(),
+        );
+        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+
+        let drafts = drafts_in(&second);
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].kind, Kind::Session);
+        assert_eq!(drafts[0].ts, ts(12));
+    }
+
+    #[test]
+    fn a_partial_last_line_waits_for_its_newline() {
+        let transcripts = TempTranscripts::new("partial");
+        let complete = fixture_prefix(2);
+        let third = FIXTURE.lines().nth(2).unwrap_or_default();
+        let (head, tail) = third.split_at(third.len() / 2);
+        let path = transcripts.write(&format!("{complete}{head}"));
+
+        let first = read_all(&path, None, UNBOUNDED);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].cursor.offset, complete.len() as u64);
+        assert_eq!(messages(drafts_in(&first)), fixture_messages(0..2));
+
+        let waiting = read_increment(&path, PROFILE, Some(first[0].cursor), UNBOUNDED)
+            .expect("the transcript reads");
+        assert!(waiting.is_none(), "a partial line alone is not consumed");
+
+        transcripts.append(tail);
+        let still_waiting = read_increment(&path, PROFILE, Some(first[0].cursor), UNBOUNDED)
+            .expect("the transcript reads");
+        assert!(
+            still_waiting.is_none(),
+            "a line without its newline is not consumed"
+        );
+
+        transcripts.append("\n");
+        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+        assert_eq!(messages(drafts_in(&second)), fixture_messages(2..3));
+        assert_eq!(
+            second[0].cursor.offset,
+            (complete.len() + third.len() + 1) as u64
+        );
+    }
+
+    #[test]
+    fn a_replaced_file_restarts_from_the_start() {
+        let transcripts = TempTranscripts::new("replaced");
+        let path = transcripts.write(FIXTURE);
+        let first = read_all(&path, None, UNBOUNDED);
+
+        let longer = format!("{FIXTURE}{FIXTURE}");
+        transcripts.replace(&longer);
+        assert_ne!(inode(&path), first[0].cursor.inode);
+        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+
+        assert_eq!(second[0].cursor.inode, inode(&path));
+        assert_eq!(second[0].cursor.offset, longer.len() as u64);
+        assert_eq!(drafts_in(&second).len(), 28);
+    }
+
+    #[test]
+    fn a_truncated_file_restarts_from_the_start() {
+        let transcripts = TempTranscripts::new("truncated");
+        let path = transcripts.write(FIXTURE);
+        let first = read_all(&path, None, UNBOUNDED);
+
+        let shorter = fixture_prefix(3);
+        fs::write(&path, &shorter).expect("the transcript could not be truncated");
+        assert_eq!(inode(&path), first[0].cursor.inode);
+        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+
+        assert_eq!(second[0].cursor.offset, shorter.len() as u64);
+        assert_eq!(messages(drafts_in(&second)), fixture_messages(0..3));
+    }
+
+    #[test]
+    fn a_malformed_line_is_skipped_and_later_lines_still_read() {
+        let transcripts = TempTranscripts::new("malformed");
+        let text = format!(
+            "{}{{\"type\": \"user\", broken\n{}",
+            fixture_prefix(2),
+            &FIXTURE[fixture_prefix(2).len()..]
+        );
+        let path = transcripts.write(&text);
+
+        let increments = read_all(&path, None, UNBOUNDED);
+
+        assert_eq!(messages(drafts_in(&increments)), fixture_messages(0..18));
+        assert_eq!(
+            increments.last().map(|increment| increment.cursor.offset),
+            Some(text.len() as u64)
+        );
+    }
+
+    #[test]
+    fn a_record_budget_splits_a_file_into_increments_that_equal_one_read() {
+        let transcripts = TempTranscripts::new("record-budget");
+        let path = transcripts.write(FIXTURE);
+        let whole = read_all(&path, None, UNBOUNDED);
+        let budget = ReadBudget {
+            max_records: 2,
+            max_bytes: usize::MAX,
+        };
+
+        let split = read_all(&path, None, budget);
+
+        assert!(split.len() > 1, "the budget split the file");
+        let (last, full) = split.split_last().expect("at least one increment");
+        for increment in full {
+            let count = increment.drafts.len();
+            assert!(
+                (2..=3).contains(&count),
+                "an increment stops at the line that reaches the budget: {count}"
+            );
+        }
+        assert!(last.drafts.len() <= 3);
+        assert_eq!(drafts_in(&split), drafts_in(&whole));
+        assert_eq!(
+            split.last().map(|increment| increment.cursor),
+            Some(whole[0].cursor)
+        );
+    }
+
+    #[test]
+    fn a_byte_budget_splits_a_file_into_increments_that_equal_one_read() {
+        let transcripts = TempTranscripts::new("byte-budget");
+        let path = transcripts.write(FIXTURE);
+        let whole = read_all(&path, None, UNBOUNDED);
+        let budget = ReadBudget {
+            max_records: usize::MAX,
+            max_bytes: 1,
+        };
+
+        let split = read_all(&path, None, budget);
+
+        assert!(split.len() > 1, "the budget split the file");
+        assert_eq!(drafts_in(&split), drafts_in(&whole));
+        assert_eq!(
+            split.last().map(|increment| increment.cursor),
+            Some(whole[0].cursor)
+        );
+    }
+
+    #[test]
+    fn the_production_budget_holds_five_hundred_records_or_four_mebibytes() {
+        assert_eq!(READ_BUDGET.max_records, 500);
+        assert_eq!(READ_BUDGET.max_bytes, 4 * 1024 * 1024);
     }
 }

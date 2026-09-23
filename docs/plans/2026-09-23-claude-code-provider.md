@@ -73,13 +73,13 @@ Transcript facts, measured on the user's real `~/.claude/projects` (396 session 
 - [x] `mise run check` - must pass before task 4 (unsafe grep again reports only the pre-existing `src/service.rs` `libc::getuid`)
 
 ### Task 4: Read a file incrementally with a durable cursor
-- [ ] `FileCursor { inode: u64, offset: u64, last_message_ts: Option<i64> }`, JSON-encoded as the cursor value under `Cursor { provider: ClaudeCode, key: <absolute file path> }`; an undecodable value restarts the file from 0 with a warn (dedup absorbs the repeats)
-- [ ] `read_increment(path, profile, cursor: Option<FileCursor>, budget: ReadBudget) -> io::Result<Option<Increment>>` where `Increment { drafts, cursor: FileCursor }`: stat the file; a changed inode or a length below `offset` restarts from 0; length equal to `offset` returns `None`; otherwise open, seek to `offset`, and read line by line with `BufRead::read_until(b'\n')`
-- [ ] only a line ending in `\n` is consumed - a trailing partial line is left for the next poll and `offset` stops before it
-- [ ] a line that is not valid JSON is logged at warn with the path and offset and skipped (its bytes are consumed), never aborting the file
-- [ ] stop the increment once it holds `ReadBudget.max_records` (500) drafts or `max_bytes` (4 MiB) of text, so a first read of a large file ships in bounded emissions; the returned `offset` is the end of the last consumed line
-- [ ] write tests on temp files: a fresh file reads fully; appending lines and reading again yields only the new ones; a partial last line is not consumed until its `\n` arrives; a replaced file (new inode) and a truncated file restart from 0; malformed line skipped and later lines still read; the budget splits a long file into several increments that together equal one unbounded read
-- [ ] `mise run check` - must pass before task 5
+- [x] `FileCursor { inode: u64, offset: u64, last_message_ts: Option<i64> }`, JSON-encoded as the cursor value under `Cursor { provider: ClaudeCode, key: <absolute file path> }`; an undecodable value restarts the file from 0 with a warn (dedup absorbs the repeats)
+- [x] `read_increment(path, profile, cursor: Option<FileCursor>, budget: ReadBudget) -> io::Result<Option<Increment>>` where `Increment { drafts, cursor: FileCursor }`: stat the file; a changed inode or a length below `offset` restarts from 0; length equal to `offset` returns `None`; otherwise open, seek to `offset`, and read line by line with `BufRead::read_until(b'\n')`
+- [x] only a line ending in `\n` is consumed - a trailing partial line is left for the next poll and `offset` stops before it
+- [x] a line that is not valid JSON is logged at warn with the path and offset and skipped (its bytes are consumed), never aborting the file
+- [x] stop the increment once it holds `ReadBudget.max_records` (500) drafts or `max_bytes` (4 MiB) of text, so a first read of a large file ships in bounded emissions; the returned `offset` is the end of the last consumed line
+- [x] write tests on temp files: a fresh file reads fully; appending lines and reading again yields only the new ones; a partial last line is not consumed until its `\n` arrives; a replaced file (new inode) and a truncated file restart from 0; malformed line skipped and later lines still read; the budget splits a long file into several increments that together equal one unbounded read
+- [x] `mise run check` - must pass before task 5 (unsafe grep again reports only the pre-existing `src/service.rs` `libc::getuid`)
 
 ### Task 5: The provider loop
 - [ ] `ClaudeCodeProvider::new(cursors: BufferHandle)` implementing `Provider` with `name()` = `"claude_code"`; `run` ticks every `config.claude_code.poll_interval` seconds (`MissedTickBehavior::Delay`)
