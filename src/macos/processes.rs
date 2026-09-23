@@ -136,6 +136,10 @@ fn describe(pid: i32) -> Option<Process> {
     })
 }
 
+pub fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
 pub fn cwd(pid: i32) -> Option<String> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
     let size = size_of::<libc::proc_vnodepathinfo>() as i32;

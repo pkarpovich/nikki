@@ -104,10 +104,10 @@ Transcript facts, measured on the user's real `~/.claude/projects` (396 session 
 - [x] `mise run check` - must pass before task 8 (unsafe grep again reports only the pre-existing `src/service.rs` `libc::getuid`)
 
 ### Task 8: Verify acceptance criteria
-- [ ] `mise run check` green; `! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'` empty
-- [ ] `cargo test --test stub_server` green
-- [ ] `./scripts/acceptance.sh` runs, including the new live transcript case, on this Mac
-- [ ] no `#[allow(dead_code)]` added; every new module declared; no `_ =>` arm on `Provider`, `Kind`, `KeySource` or the tag enum
+- [x] `mise run check` green; `! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'` empty (the pre-existing `src/service.rs` `libc::getuid` moved behind a safe `macos::processes::current_uid`)
+- [x] `cargo test --test stub_server` green
+- [x] `./scripts/acceptance.sh` runs, including the new live transcript case, on this Mac (the script stops at `the_live_machine_names_a_focused_application` because the agent's process holds no Accessibility grant - not automatable here; every later live case, `the_live_tree_names_the_surface_on_screen` and `the_live_transcripts_parse_without_loss`, was run directly and passed)
+- [x] no `#[allow(dead_code)]` added; every new module declared; no `_ =>` arm on `Provider`, `Kind`, `KeySource` or the tag enum
 
 ## Technical Details
 
