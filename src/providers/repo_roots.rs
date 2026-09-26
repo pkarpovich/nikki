@@ -127,30 +127,30 @@ mod tests {
     #[test]
     fn a_file_inside_a_repository_resolves_to_the_repository_root() {
         let tree = TempTree::new("root");
-        tree.dir("home/Projects/nhop/.git");
-        tree.dir("home/Projects/nhop/src/app");
+        tree.dir("home/Projects/alpha/.git");
+        tree.dir("home/Projects/alpha/src/app");
         let roots = GitRoots::new(Some(tree.root.join("home")));
 
         assert_eq!(
-            roots.repo_of(&tree.text("home/Projects/nhop/src/app/main.rs")),
-            Some(tree.text("home/Projects/nhop"))
+            roots.repo_of(&tree.text("home/Projects/alpha/src/app/main.rs")),
+            Some(tree.text("home/Projects/alpha"))
         );
     }
 
     #[test]
     fn a_worktree_whose_git_is_a_file_is_its_own_root() {
         let tree = TempTree::new("worktree");
-        tree.dir("home/Projects/mimi");
+        tree.dir("home/Projects/gamma");
         fs::write(
-            tree.root.join("home/Projects/mimi/.git"),
+            tree.root.join("home/Projects/gamma/.git"),
             "gitdir: /elsewhere",
         )
         .expect("the .git file could not be written");
         let roots = GitRoots::new(Some(tree.root.join("home")));
 
         assert_eq!(
-            roots.repo_of(&tree.text("home/Projects/mimi/README.md")),
-            Some(tree.text("home/Projects/mimi"))
+            roots.repo_of(&tree.text("home/Projects/gamma/README.md")),
+            Some(tree.text("home/Projects/gamma"))
         );
     }
 
@@ -169,13 +169,13 @@ mod tests {
     #[test]
     fn home_relative_paths_expand_against_home() {
         let tree = TempTree::new("home-relative");
-        tree.dir("home/Projects/nhop/.git");
+        tree.dir("home/Projects/alpha/.git");
         let roots = GitRoots::new(Some(tree.root.join("home")));
 
-        for path in ["~/Projects/nhop/go.mod", "$HOME/Projects/nhop/go.mod"] {
+        for path in ["~/Projects/alpha/go.mod", "$HOME/Projects/alpha/go.mod"] {
             assert_eq!(
                 roots.repo_of(path),
-                Some(tree.text("home/Projects/nhop")),
+                Some(tree.text("home/Projects/alpha")),
                 "{path}"
             );
         }
@@ -204,19 +204,19 @@ mod tests {
     #[test]
     fn a_cached_answer_is_reused_for_siblings() {
         let tree = TempTree::new("cache");
-        tree.dir("home/Projects/nhop/.git");
-        tree.dir("home/Projects/nhop/src");
+        tree.dir("home/Projects/alpha/.git");
+        tree.dir("home/Projects/alpha/src");
         let roots = GitRoots::new(Some(tree.root.join("home")));
 
         assert_eq!(
-            roots.repo_of(&tree.text("home/Projects/nhop/src/a.rs")),
-            Some(tree.text("home/Projects/nhop"))
+            roots.repo_of(&tree.text("home/Projects/alpha/src/a.rs")),
+            Some(tree.text("home/Projects/alpha"))
         );
-        fs::remove_dir_all(tree.root.join("home/Projects/nhop/.git"))
+        fs::remove_dir_all(tree.root.join("home/Projects/alpha/.git"))
             .expect("the .git directory could not be removed");
         assert_eq!(
-            roots.repo_of(&tree.text("home/Projects/nhop/src/b.rs")),
-            Some(tree.text("home/Projects/nhop"))
+            roots.repo_of(&tree.text("home/Projects/alpha/src/b.rs")),
+            Some(tree.text("home/Projects/alpha"))
         );
     }
 }

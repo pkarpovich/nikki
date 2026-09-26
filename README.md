@@ -33,8 +33,8 @@ A coalesced interval, as the service returns it:
 {"type":"run","device":"mbp-21","from":"2026-08-29T11:23:04.000Z","to":"2026-08-29T11:41:34.000Z",
  "duration_sec":1110,"samples":37,"app":"Agterm","bundle_id":"com.umputun.agterm",
  "title":"nikki","display":1,"degraded":false,
- "details":{"workspace":"nhop","session":"nikki","surface":"left","foreground":"claude",
-            "cwd":"/Users/pavel.karpovich/Projects/nikki","command":"claude --resume ..."},
+ "details":{"workspace":"alpha","session":"nikki","surface":"left","foreground":"claude",
+            "cwd":"/Users/u/Projects/nikki","command":"claude --resume ..."},
  "keys":412,"mouse":88,"idle_min":0,"idle_max":134,"mic_active":false,
  "screen_locked":false,"display_asleep":false,
  "visible":[{"app":"Telegram","display":2,"title":null}]}
@@ -411,7 +411,7 @@ offset - a stretch of tool lines - is still sent, so such a file is not re-read 
 Tool calls are not shipped, but where they worked is: an assistant line whose tool calls name a path
 inside a git repository also ships `claude_code/touch` records, one per repository and action on that
 line. A session's `cwd` is only the directory Claude Code was started from - a session started in
-`~/Projects/tuclaw` routinely spends the day editing `nhop` or `mimi` - so the repositories its tool
+one repository routinely spends the day editing others - so the repositories its tool
 calls touched are what says which project it worked on. `Edit`, `Write`, `MultiEdit` and
 `NotebookEdit` paths count as `edit`, `Read`, `Glob` and `Grep` paths as `read`, and every absolute,
 `~/` or `$HOME/` token in a `Bash` command as `run`; relative paths and any other tool count as
@@ -518,7 +518,7 @@ section, and any change here must be mirrored there in the same pass.**
         "app": "Zed",
         "bundle_id": "dev.zed.Zed",
         "title": "environment, home-environment, workspaces — settings.json",
-        "path": "file:///Users/pavel.karpovich/Projects/environment/dotfiles/mise/config.toml",
+        "path": "file:///Users/u/Projects/environment/dotfiles/mise/config.toml",
         "details": {"workspace": null},
         "display": 1,
         "tick_interval_sec": 30,
@@ -711,17 +711,17 @@ the last message line read before it in the file, else the file's modification t
 {"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:35:12.410Z","seq":90211,
  "kind":"message","dedup_key":"4c1e9a07b2d85f36","degraded":false,
  "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","uuid":"d41f0c2a-7e93-4b6d-a8f1-5c2e90b7d316","block":0,
-            "role":"user","message_kind":"prompt","text":"передеплоишь дев через spot?",
-            "cwd":"/Users/pavel.karpovich/Projects/THE_FEUD_V2","git_branch":"main","profile":"claude"}}
+            "role":"user","message_kind":"prompt","text":"redeploy staging with spot?",
+            "cwd":"/Users/u/Projects/app","git_branch":"main","profile":"claude"}}
 
 {"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:35:12.410Z","seq":90212,
  "kind":"session","dedup_key":"b07d3e5a91c4f268","degraded":false,
- "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","field":"ai_title","value":"Redeploy dev via spot"}}
+ "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","field":"ai_title","value":"Redeploy staging via spot"}}
 
 {"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:45:43.000Z","seq":90213,
  "kind":"touch","dedup_key":"9e4d2c7a1b0f6e38","degraded":false,
  "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","uuid":"a1c0e3f2-9b7d-4e21-8f0a-6d2c4b1e9f37",
-            "repo":"/Users/pavel.karpovich/Projects/runaway-games/launchpad","action":"run"}}
+            "repo":"/Users/u/Projects/beta","action":"run"}}
 ```
 
 `claude_code/touch` - one record per assistant line, repository and action. Envelope `ts` is the
@@ -754,7 +754,7 @@ repository in the same pass.
 
 ```json
 {"workspace":"nikki","session":"nikki daemon","surface":"scratch",
- "command":"rx docs/plans/2026-08-27-agterm-panes.md","cwd":"/Users/pavel.karpovich/Projects/nikki/docs"}
+ "command":"rx docs/plans/2026-08-27-agterm-panes.md","cwd":"/Users/u/Projects/nikki/docs"}
 ```
 
 - `session` is the session name with its animated status glyph stripped, so an auto-named session is

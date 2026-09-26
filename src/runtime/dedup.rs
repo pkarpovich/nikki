@@ -121,14 +121,14 @@ mod tests {
     #[test]
     fn the_claude_session_key_hashes_the_unit_separator_joined_fields() {
         assert_eq!(
-            claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy dev via spot"),
+            claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy staging via spot"),
             expected(&format!(
-                "mbp-21\u{1f}claude_code\u{1f}session\u{1f}{SESSION}\u{1f}ai_title\u{1f}Redeploy dev via spot"
+                "mbp-21\u{1f}claude_code\u{1f}session\u{1f}{SESSION}\u{1f}ai_title\u{1f}Redeploy staging via spot"
             ))
         );
     }
 
-    const REPO: &str = "/Users/u/Projects/launchpad";
+    const REPO: &str = "/Users/u/Projects/beta";
 
     #[test]
     fn the_claude_touch_key_hashes_the_unit_separator_joined_fields() {
@@ -159,7 +159,7 @@ mod tests {
                 REPO,
                 "edit",
             ),
-            claude_touch_key("mbp-21", SESSION, UUID, "/Users/u/Projects/nhop", "edit"),
+            claude_touch_key("mbp-21", SESSION, UUID, "/Users/u/Projects/alpha", "edit"),
             claude_touch_key("mbp-21", SESSION, UUID, REPO, "run"),
         ];
         for variant in variants {
@@ -183,16 +183,21 @@ mod tests {
 
     #[test]
     fn every_claude_session_field_changes_the_key() {
-        let base = claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy dev via spot");
+        let base = claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy staging via spot");
         let variants = [
-            claude_session_key("mba-22", SESSION, "ai_title", "Redeploy dev via spot"),
+            claude_session_key("mba-22", SESSION, "ai_title", "Redeploy staging via spot"),
             claude_session_key(
                 "mbp-21",
                 "0b9e4c71-2d6a-4f38-8e15-7a3c9d0f6b24",
                 "ai_title",
-                "Redeploy dev via spot",
+                "Redeploy staging via spot",
             ),
-            claude_session_key("mbp-21", SESSION, "custom_title", "Redeploy dev via spot"),
+            claude_session_key(
+                "mbp-21",
+                SESSION,
+                "custom_title",
+                "Redeploy staging via spot",
+            ),
             claude_session_key("mbp-21", SESSION, "ai_title", "feud"),
         ];
         for variant in variants {

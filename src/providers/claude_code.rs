@@ -811,7 +811,7 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../../fixtures/claude_code_session.jsonl");
     const SESSION: &str = "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94";
-    const CWD: &str = "/Users/u/Projects/THE_FEUD_V2";
+    const CWD: &str = "/Users/u/Projects/app";
     const PROFILE: &str = "claude";
     const FILE_MODIFIED: i64 = 1_789_000_000_000;
 
@@ -921,7 +921,7 @@ mod tests {
                 "custom_title",
                 "feud",
             ),
-            message(2, 0, "user", "prompt", "передеплоишь дев через spot?"),
+            message(2, 0, "user", "prompt", "redeploy staging with spot?"),
             message(
                 3,
                 0,
@@ -966,9 +966,9 @@ mod tests {
                 "compact_summary",
                 "This session is being continued from a previous conversation that ran out of context.",
             ),
-            session(ts(12), "ai_title", "Redeploy dev via spot"),
-            session(ts(12), "ai_title", "Redeploy dev via spot"),
-            session(ts(16), "pr", "https://github.com/u/THE_FEUD_V2/pull/7"),
+            session(ts(12), "ai_title", "Redeploy staging via spot"),
+            session(ts(12), "ai_title", "Redeploy staging via spot"),
+            session(ts(16), "pr", "https://github.com/u/app/pull/7"),
             last_branchless,
         ];
 
@@ -1297,9 +1297,9 @@ mod tests {
     }
 
     const REPOS: PrefixRepos = PrefixRepos(&[
-        ("/Users/u/Projects/nhop", "/Users/u/Projects/nhop"),
-        ("~/Projects/nhop", "/Users/u/Projects/nhop"),
-        ("/Users/u/Projects/launchpad", "/Users/u/Projects/launchpad"),
+        ("/Users/u/Projects/alpha", "/Users/u/Projects/alpha"),
+        ("~/Projects/alpha", "/Users/u/Projects/alpha"),
+        ("/Users/u/Projects/beta", "/Users/u/Projects/beta"),
     ]);
 
     fn tool_line(content: Value, sidechain: bool) -> Value {
@@ -1309,7 +1309,7 @@ mod tests {
             "uuid": "00000000-0000-4000-8000-0000000000aa",
             "sessionId": SESSION,
             "timestamp": "2026-09-14T11:45:43.000Z",
-            "cwd": "/Users/u/Projects/tuclaw",
+            "cwd": "/Users/u/Projects/home",
             "message": {"role": "assistant", "content": content},
         })
     }
@@ -1347,15 +1347,15 @@ mod tests {
         let line = tool_line(
             json!([
                 {"type": "tool_use", "id": "t1", "name": "Edit",
-                 "input": {"file_path": "/Users/u/Projects/nhop/src/main.go", "old_string": "a", "new_string": "b"}},
+                 "input": {"file_path": "/Users/u/Projects/alpha/src/main.go", "old_string": "a", "new_string": "b"}},
                 {"type": "tool_use", "id": "t2", "name": "Write",
-                 "input": {"file_path": "/Users/u/Projects/nhop/go.mod", "content": "module x"}},
+                 "input": {"file_path": "/Users/u/Projects/alpha/go.mod", "content": "module x"}},
                 {"type": "tool_use", "id": "t3", "name": "Read",
-                 "input": {"file_path": "/Users/u/Projects/launchpad/spot.yml"}},
+                 "input": {"file_path": "/Users/u/Projects/beta/spot.yml"}},
                 {"type": "tool_use", "id": "t4", "name": "Grep",
-                 "input": {"pattern": "minio", "path": "/Users/u/Projects/launchpad"}},
+                 "input": {"pattern": "cache", "path": "/Users/u/Projects/beta"}},
                 {"type": "tool_use", "id": "t5", "name": "Bash",
-                 "input": {"command": "cd ~/Projects/nhop && go test ./... > /tmp/out.txt"}},
+                 "input": {"command": "cd ~/Projects/alpha && go test ./... > /tmp/out.txt"}},
             ]),
             false,
         );
@@ -1363,12 +1363,9 @@ mod tests {
         assert_eq!(
             touches_of(&line),
             vec![
-                ("/Users/u/Projects/nhop".to_string(), "edit".to_string()),
-                (
-                    "/Users/u/Projects/launchpad".to_string(),
-                    "read".to_string()
-                ),
-                ("/Users/u/Projects/nhop".to_string(), "run".to_string()),
+                ("/Users/u/Projects/alpha".to_string(), "edit".to_string()),
+                ("/Users/u/Projects/beta".to_string(), "read".to_string()),
+                ("/Users/u/Projects/alpha".to_string(), "run".to_string()),
             ]
         );
     }
@@ -1377,7 +1374,7 @@ mod tests {
     fn a_touch_carries_its_identity_and_nothing_of_the_call() {
         let line = tool_line(
             json!([{"type": "tool_use", "id": "t1", "name": "Edit",
-                    "input": {"file_path": "/Users/u/Projects/nhop/secret.env", "new_string": "TOKEN=abc"}}]),
+                    "input": {"file_path": "/Users/u/Projects/alpha/secret.env", "new_string": "TOKEN=abc"}}]),
             false,
         );
         let context = LineContext {
@@ -1406,14 +1403,14 @@ mod tests {
         assert_eq!(
             *payload,
             json!({"session_id": SESSION, "uuid": "00000000-0000-4000-8000-0000000000aa",
-                   "repo": "/Users/u/Projects/nhop", "action": "edit"})
+                   "repo": "/Users/u/Projects/alpha", "action": "edit"})
         );
         assert_eq!(
             *key,
             KeySource::ClaudeTouch {
                 session_id: SESSION.to_string(),
                 uuid: "00000000-0000-4000-8000-0000000000aa".to_string(),
-                repo: "/Users/u/Projects/nhop".to_string(),
+                repo: "/Users/u/Projects/alpha".to_string(),
                 action: "edit".to_string(),
             }
         );
@@ -1425,7 +1422,7 @@ mod tests {
             json!([
                 {"type": "text", "text": "Checking the deploy key."},
                 {"type": "tool_use", "id": "t1", "name": "Bash",
-                 "input": {"command": "ls /Users/u/Projects/launchpad/keys"}},
+                 "input": {"command": "ls /Users/u/Projects/beta/keys"}},
             ]),
             false,
         );
@@ -1453,14 +1450,14 @@ mod tests {
                 {"type": "tool_use", "id": "t1", "name": "Write", "input": {"file_path": "/tmp/scratch.md"}},
                 {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "go test ./..."}},
                 {"type": "tool_use", "id": "t3", "name": "WebFetch",
-                 "input": {"url": "https://x", "file_path": "/Users/u/Projects/nhop/a"}},
-                {"type": "tool_use", "id": "t4", "name": "Read", "input": {"file_path": "relative/nhop.go"}},
+                 "input": {"url": "https://x", "file_path": "/Users/u/Projects/alpha/a"}},
+                {"type": "tool_use", "id": "t4", "name": "Read", "input": {"file_path": "relative/alpha.go"}},
             ]),
             false,
         );
         let sidechain = tool_line(
             json!([{"type": "tool_use", "id": "t1", "name": "Edit",
-                    "input": {"file_path": "/Users/u/Projects/nhop/a.go"}}]),
+                    "input": {"file_path": "/Users/u/Projects/alpha/a.go"}}]),
             true,
         );
 
@@ -1471,7 +1468,10 @@ mod tests {
     #[test]
     fn command_paths_are_the_absolute_and_home_relative_tokens() {
         let cases: [(&str, &[&str]); 6] = [
-            ("cd ~/Projects/nhop && go test ./...", &["~/Projects/nhop"]),
+            (
+                "cd ~/Projects/alpha && go test ./...",
+                &["~/Projects/alpha"],
+            ),
             (
                 "git -C /Users/u/Projects/nikki log --oneline",
                 &["/Users/u/Projects/nikki"],
@@ -1783,7 +1783,7 @@ mod tests {
         assert_eq!(listed, vec![session, other]);
     }
 
-    const SUBAGENT_LINE: &str = "{\"type\": \"user\", \"uuid\": \"subagent-1\", \"sessionId\": \"subagent-session\", \"timestamp\": \"2026-09-14T11:36:00.000Z\", \"cwd\": \"/Users/u/Projects/THE_FEUD_V2\", \"message\": {\"content\": \"a subagent prompt\"}}\n";
+    const SUBAGENT_LINE: &str = "{\"type\": \"user\", \"uuid\": \"subagent-1\", \"sessionId\": \"subagent-session\", \"timestamp\": \"2026-09-14T11:36:00.000Z\", \"cwd\": \"/Users/u/Projects/app\", \"message\": {\"content\": \"a subagent prompt\"}}\n";
 
     fn prompt_line(index: usize) -> String {
         format!(

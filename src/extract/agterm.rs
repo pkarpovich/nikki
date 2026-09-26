@@ -371,7 +371,7 @@ mod tests {
         let details = parse_tree(CAPTURED, &[]);
         assert_eq!(details["workspace"], "nikki");
         assert_eq!(details["session"], "nikki daemon");
-        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki");
+        assert_eq!(details["cwd"], "/Users/u/Projects/nikki");
         assert_eq!(details["surface"], "left");
         assert_eq!(details["foreground"], "claude");
         assert_eq!(details.len(), 5);
@@ -388,7 +388,7 @@ mod tests {
         }
         let details = parse_tree(&tree.to_string(), &[]);
         assert_eq!(details["session"], "notes");
-        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Obsidian");
+        assert_eq!(details["cwd"], "/Users/u/Obsidian");
         assert!(!details.contains_key("foreground"));
     }
 
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn the_stored_foreground_is_the_file_name_of_the_first_argument() {
         assert_eq!(
-            file_name("/Users/pavel.karpovich/.local/bin/claude"),
+            file_name("/Users/u/.local/bin/claude"),
             Some("claude".to_string())
         );
         assert_eq!(file_name("tail"), Some("tail".to_string()));
@@ -503,7 +503,7 @@ mod tests {
             "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
             "left",
             &["claude", "--resume"],
-            Some("/Users/pavel.karpovich/Projects/nikki/src"),
+            Some("/Users/u/Projects/nikki/src"),
         )];
 
         let details = parse_tree(&tree.to_string(), &panes);
@@ -526,7 +526,7 @@ mod tests {
             "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
             "left",
             &["claude", "--resume"],
-            Some("/Users/pavel.karpovich/Projects/nikki/src"),
+            Some("/Users/u/Projects/nikki/src"),
         )];
 
         let details = parse_tree(&tree.to_string(), &panes);
@@ -559,13 +559,13 @@ mod tests {
                 "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
                 "left",
                 &["claude", "--resume"],
-                Some("/Users/pavel.karpovich/Projects/nikki/src"),
+                Some("/Users/u/Projects/nikki/src"),
             ),
             pane(
                 "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
                 "scratch",
                 &["rx", "plan.md"],
-                Some("/Users/pavel.karpovich/Projects/nikki/docs"),
+                Some("/Users/u/Projects/nikki/docs"),
             ),
         ];
 
@@ -573,7 +573,7 @@ mod tests {
 
         assert_eq!(details["surface"], "scratch");
         assert_eq!(details["command"], "rx plan.md");
-        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki/docs");
+        assert_eq!(details["cwd"], "/Users/u/Projects/nikki/docs");
         assert!(!details.contains_key("foreground"));
     }
 
@@ -586,7 +586,7 @@ mod tests {
             "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
             "left",
             &["claude", "--resume"],
-            Some("/Users/pavel.karpovich/Projects/nikki/src"),
+            Some("/Users/u/Projects/nikki/src"),
         )];
 
         let details = parse_tree(&tree.to_string(), &panes);
@@ -637,10 +637,7 @@ mod tests {
         assert_eq!(session_identity("✳ План создания"), "План создания");
         assert_eq!(session_identity("◑ План создания"), "План создания");
         assert_eq!(session_identity("◐ План создания"), "План создания");
-        assert_eq!(
-            session_identity("●ask-dealcloud: done"),
-            "ask-dealcloud: done"
-        );
+        assert_eq!(session_identity("●work-app: done"), "work-app: done");
     }
 
     #[test]
@@ -650,13 +647,13 @@ mod tests {
                 "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
                 "left",
                 &["claude", "--resume"],
-                Some("/Users/pavel.karpovich/Projects/nikki"),
+                Some("/Users/u/Projects/nikki"),
             ),
             pane(
                 "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
                 "scratch",
                 &["rx", "docs/plans/2026-08-27-agterm-panes.md"],
-                Some("/Users/pavel.karpovich/Projects/nikki/docs"),
+                Some("/Users/u/Projects/nikki/docs"),
             ),
         ];
 
@@ -669,7 +666,7 @@ mod tests {
             details["command"],
             "rx docs/plans/2026-08-27-agterm-panes.md"
         );
-        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki/docs");
+        assert_eq!(details["cwd"], "/Users/u/Projects/nikki/docs");
         assert!(!details.contains_key("foreground"));
     }
 
@@ -679,7 +676,7 @@ mod tests {
             "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
             "left",
             &["claude", "--resume"],
-            Some("/Users/pavel.karpovich/Projects/nikki/src"),
+            Some("/Users/u/Projects/nikki/src"),
         )];
 
         let details = parse_tree(CAPTURED, &panes);
@@ -687,7 +684,7 @@ mod tests {
         assert_eq!(details["surface"], "left");
         assert_eq!(details["foreground"], "claude");
         assert_eq!(details["command"], "claude --resume");
-        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki/src");
+        assert_eq!(details["cwd"], "/Users/u/Projects/nikki/src");
     }
 
     #[test]
@@ -734,7 +731,7 @@ mod tests {
         let details = parse_tree(CAPTURED, &panes);
 
         assert_eq!(details["command"], "claude");
-        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki");
+        assert_eq!(details["cwd"], "/Users/u/Projects/nikki");
     }
 
     #[test]
@@ -744,7 +741,7 @@ mod tests {
                 "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
                 "left",
                 &["tmux", "attach"],
-                Some("/Users/pavel.karpovich/Projects/nikki"),
+                Some("/Users/u/Projects/nikki"),
             ),
             pane(
                 "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
@@ -758,7 +755,7 @@ mod tests {
 
         assert_eq!(details["surface"], "left");
         assert!(!details.contains_key("command"));
-        assert_eq!(details["cwd"], "/Users/pavel.karpovich/Projects/nikki");
+        assert_eq!(details["cwd"], "/Users/u/Projects/nikki");
     }
 
     #[test]
