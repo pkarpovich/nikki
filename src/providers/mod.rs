@@ -1,5 +1,6 @@
 pub mod browser_history;
 pub mod claude_code;
+pub mod repo_roots;
 pub mod scripted;
 pub mod windows;
 

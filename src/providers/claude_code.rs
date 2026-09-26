@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{MissedTickBehavior, interval};
 
+use super::repo_roots::{GitRoots, RepoLookup};
 use super::{Ctx, Emission, Provider, ProviderError};
 use crate::config::ClaudeRoot;
 use crate::runtime::buffer::BufferHandle;
@@ -23,11 +24,15 @@ pub const READ_BUDGET: ReadBudget = ReadBudget {
 };
 
 const TRANSCRIPT_EXTENSION: &str = "jsonl";
+const CURSOR_VERSION: u32 = 1;
+const COMMAND_SEPARATORS: &str = "\"'`;|&()<>=,";
+const PATH_TRAILERS: &[char] = &[':', ',', '.'];
 
 pub struct ClaudeCodeProvider {
     cursors: BufferHandle,
     known: HashMap<PathBuf, Option<FileCursor>>,
     unreadable: HashSet<PathBuf>,
+    repos: GitRoots,
 }
 
 enum Flow {
@@ -41,6 +46,7 @@ impl ClaudeCodeProvider {
             cursors,
             known: HashMap::new(),
             unreadable: HashSet::new(),
+            repos: GitRoots::from_env(),
         }
     }
 
@@ -90,7 +96,11 @@ impl ClaudeCodeProvider {
     ) -> Result<Flow, ProviderError> {
         let mut cursor = self.cursor_for(path).await?;
         loop {
-            let increment = match read_increment(path, profile, cursor, READ_BUDGET) {
+            let source = Source {
+                profile,
+                repos: &self.repos,
+            };
+            let increment = match read_increment(path, source, cursor, READ_BUDGET) {
                 Ok(increment) => {
                     self.unreadable.remove(path);
                     increment
@@ -235,6 +245,8 @@ pub struct FileCursor {
     pub inode: u64,
     pub offset: u64,
     pub last_message_ts: Option<i64>,
+    #[serde(default)]
+    pub version: u32,
 }
 
 impl FileCursor {
@@ -243,7 +255,15 @@ impl FileCursor {
     }
 
     pub fn decode(path: &Path, value: &str) -> Option<FileCursor> {
-        match serde_json::from_str(value) {
+        match serde_json::from_str::<FileCursor>(value) {
+            Ok(cursor) if cursor.version < CURSOR_VERSION => {
+                tracing::info!(
+                    path = %path.display(),
+                    version = cursor.version,
+                    "the stored transcript cursor predates what is read now, so the file is read again from the start"
+                );
+                None
+            }
             Ok(cursor) => Some(cursor),
             Err(error) => {
                 tracing::warn!(
@@ -269,8 +289,15 @@ pub struct Increment {
     pub cursor: FileCursor,
 }
 
+#[derive(Clone, Copy)]
+pub struct Source<'a> {
+    pub profile: &'a str,
+    pub repos: &'a dyn RepoLookup,
+}
+
 pub struct LineContext<'a> {
     pub profile: &'a str,
+    pub repos: &'a dyn RepoLookup,
     pub fallback_session_id: &'a str,
     pub last_message_ts: Option<Timestamp>,
     pub file_modified: Timestamp,
@@ -370,10 +397,11 @@ impl LeadingTag {
 
 pub fn read_increment(
     path: &Path,
-    profile: &str,
+    source: Source,
     cursor: Option<FileCursor>,
     budget: ReadBudget,
 ) -> io::Result<Option<Increment>> {
+    let Source { profile, repos } = source;
     let metadata = fs::metadata(path)?;
     let inode = metadata.ino();
     let length = metadata.len();
@@ -383,6 +411,7 @@ pub fn read_increment(
             inode,
             offset: 0,
             last_message_ts: None,
+            version: CURSOR_VERSION,
         },
     };
     if length == start.offset {
@@ -427,6 +456,7 @@ pub fn read_increment(
         };
         let context = LineContext {
             profile,
+            repos,
             fallback_session_id,
             last_message_ts: last_message_ts.map(Timestamp::from_millis),
             file_modified,
@@ -457,6 +487,7 @@ pub fn read_increment(
             inode,
             offset,
             last_message_ts,
+            version: CURSOR_VERSION,
         },
     }))
 }
@@ -477,12 +508,136 @@ pub fn drafts_from_line(line: &Value, context: &LineContext) -> LineOutcome {
     };
     match line_type {
         "user" => message_drafts(line, Role::User, context),
-        "assistant" => message_drafts(line, Role::Assistant, context),
+        "assistant" => {
+            let mut outcome = message_drafts(line, Role::Assistant, context);
+            for draft in touch_drafts(line, context) {
+                outcome.drafts.push(draft);
+            }
+            outcome
+        }
         "custom-title" => session_drafts(line, "custom_title", "customTitle", context),
         "ai-title" => session_drafts(line, "ai_title", "aiTitle", context),
         "pr-link" => session_drafts(line, "pr", "prUrl", context),
         _ => LineOutcome::default(),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    Edit,
+    Read,
+    Run,
+}
+
+impl Action {
+    fn as_str(self) -> &'static str {
+        match self {
+            Action::Edit => "edit",
+            Action::Read => "read",
+            Action::Run => "run",
+        }
+    }
+}
+
+fn touch_drafts(line: &Value, context: &LineContext) -> Vec<RecordDraft> {
+    let mut drafts = Vec::new();
+    if flag(line, "isSidechain") {
+        return drafts;
+    }
+    let Some(uuid) = line.get("uuid").and_then(Value::as_str) else {
+        return drafts;
+    };
+    let Some(ts) = line_timestamp(line) else {
+        return drafts;
+    };
+    let Some(blocks) = line.pointer("/message/content").and_then(Value::as_array) else {
+        return drafts;
+    };
+
+    let mut touched: Vec<(String, Action)> = Vec::new();
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            continue;
+        }
+        let Some(name) = block.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(input) = block.get("input").and_then(Value::as_object) else {
+            continue;
+        };
+        for (path, action) in tool_paths(name, input) {
+            let Some(repo) = context.repos.repo_of(path) else {
+                continue;
+            };
+            let entry = (repo, action);
+            if touched.contains(&entry) {
+                continue;
+            }
+            touched.push(entry);
+        }
+    }
+
+    let session_id = session_id(line, context);
+    for (repo, action) in touched {
+        let mut payload = Map::new();
+        payload.insert("session_id".to_string(), Value::from(session_id));
+        payload.insert("uuid".to_string(), Value::from(uuid));
+        payload.insert("repo".to_string(), Value::from(repo.as_str()));
+        payload.insert("action".to_string(), Value::from(action.as_str()));
+        drafts.push(RecordDraft {
+            provider: runtime::Provider::ClaudeCode,
+            kind: Kind::Touch,
+            ts,
+            degraded: false,
+            payload: Value::Object(payload),
+            key: KeySource::ClaudeTouch {
+                session_id: session_id.to_string(),
+                uuid: uuid.to_string(),
+                repo,
+                action: action.as_str().to_string(),
+            },
+        });
+    }
+    drafts
+}
+
+fn tool_paths<'a>(name: &str, input: &'a Map<String, Value>) -> Vec<(&'a str, Action)> {
+    let mut paths = Vec::new();
+    let (field, action) = match name {
+        "Edit" | "Write" | "MultiEdit" => ("file_path", Action::Edit),
+        "NotebookEdit" => ("notebook_path", Action::Edit),
+        "Read" => ("file_path", Action::Read),
+        "Glob" | "Grep" => ("path", Action::Read),
+        "Bash" => {
+            let Some(command) = input.get("command").and_then(Value::as_str) else {
+                return paths;
+            };
+            for path in command_paths(command) {
+                paths.push((path, Action::Run));
+            }
+            return paths;
+        }
+        _ => return paths,
+    };
+    let Some(path) = input.get(field).and_then(Value::as_str) else {
+        return paths;
+    };
+    paths.push((path, action));
+    paths
+}
+
+fn command_paths(command: &str) -> Vec<&str> {
+    let mut paths = Vec::new();
+    for token in command.split(|c: char| c.is_whitespace() || COMMAND_SEPARATORS.contains(c)) {
+        let token = token.trim_end_matches(PATH_TRAILERS);
+        let looks_like_path = token.len() > 1
+            && (token.starts_with('/') || token.starts_with("~/") || token.starts_with("$HOME/"));
+        if !looks_like_path {
+            continue;
+        }
+        paths.push(token);
+    }
+    paths
 }
 
 fn message_drafts(line: &Value, role: Role, context: &LineContext) -> LineOutcome {
@@ -643,6 +798,7 @@ fn flag(line: &Value, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::repo_roots::NoRepos;
     use serde_json::json;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -667,9 +823,17 @@ mod tests {
         lines
     }
 
+    fn source() -> Source<'static> {
+        Source {
+            profile: PROFILE,
+            repos: &NoRepos,
+        }
+    }
+
     fn context(last_message_ts: Option<Timestamp>) -> LineContext<'static> {
         LineContext {
             profile: PROFILE,
+            repos: &NoRepos,
             fallback_session_id: "file-stem",
             last_message_ts,
             file_modified: Timestamp::from_millis(FILE_MODIFIED),
@@ -1077,7 +1241,7 @@ mod tests {
         let mut cursor = cursor;
         let mut increments = Vec::new();
         while let Some(increment) =
-            read_increment(path, PROFILE, cursor, budget).expect("the transcript reads")
+            read_increment(path, source(), cursor, budget).expect("the transcript reads")
         {
             cursor = Some(increment.cursor);
             increments.push(increment);
@@ -1118,12 +1282,230 @@ mod tests {
             .ino()
     }
 
+    struct PrefixRepos(&'static [(&'static str, &'static str)]);
+
+    impl RepoLookup for PrefixRepos {
+        fn repo_of(&self, path: &str) -> Option<String> {
+            let PrefixRepos(repos) = self;
+            for (prefix, repo) in *repos {
+                if path.starts_with(prefix) {
+                    return Some(repo.to_string());
+                }
+            }
+            None
+        }
+    }
+
+    const REPOS: PrefixRepos = PrefixRepos(&[
+        ("/Users/u/Projects/nhop", "/Users/u/Projects/nhop"),
+        ("~/Projects/nhop", "/Users/u/Projects/nhop"),
+        ("/Users/u/Projects/launchpad", "/Users/u/Projects/launchpad"),
+    ]);
+
+    fn tool_line(content: Value, sidechain: bool) -> Value {
+        json!({
+            "type": "assistant",
+            "isSidechain": sidechain,
+            "uuid": "00000000-0000-4000-8000-0000000000aa",
+            "sessionId": SESSION,
+            "timestamp": "2026-09-14T11:45:43.000Z",
+            "cwd": "/Users/u/Projects/tuclaw",
+            "message": {"role": "assistant", "content": content},
+        })
+    }
+
+    fn touches_of(line: &Value) -> Vec<(String, String)> {
+        let context = LineContext {
+            profile: PROFILE,
+            repos: &REPOS,
+            fallback_session_id: "file-stem",
+            last_message_ts: None,
+            file_modified: Timestamp::from_millis(FILE_MODIFIED),
+        };
+        let LineOutcome { drafts, .. } = drafts_from_line(line, &context);
+        let mut touches = Vec::new();
+        for RecordDraft { kind, payload, .. } in drafts {
+            if kind != Kind::Touch {
+                continue;
+            }
+            touches.push((
+                payload["repo"]
+                    .as_str()
+                    .expect("a touch has a repo")
+                    .to_string(),
+                payload["action"]
+                    .as_str()
+                    .expect("a touch has an action")
+                    .to_string(),
+            ));
+        }
+        touches
+    }
+
+    #[test]
+    fn tool_calls_become_one_touch_per_repository_and_action() {
+        let line = tool_line(
+            json!([
+                {"type": "tool_use", "id": "t1", "name": "Edit",
+                 "input": {"file_path": "/Users/u/Projects/nhop/src/main.go", "old_string": "a", "new_string": "b"}},
+                {"type": "tool_use", "id": "t2", "name": "Write",
+                 "input": {"file_path": "/Users/u/Projects/nhop/go.mod", "content": "module x"}},
+                {"type": "tool_use", "id": "t3", "name": "Read",
+                 "input": {"file_path": "/Users/u/Projects/launchpad/spot.yml"}},
+                {"type": "tool_use", "id": "t4", "name": "Grep",
+                 "input": {"pattern": "minio", "path": "/Users/u/Projects/launchpad"}},
+                {"type": "tool_use", "id": "t5", "name": "Bash",
+                 "input": {"command": "cd ~/Projects/nhop && go test ./... > /tmp/out.txt"}},
+            ]),
+            false,
+        );
+
+        assert_eq!(
+            touches_of(&line),
+            vec![
+                ("/Users/u/Projects/nhop".to_string(), "edit".to_string()),
+                (
+                    "/Users/u/Projects/launchpad".to_string(),
+                    "read".to_string()
+                ),
+                ("/Users/u/Projects/nhop".to_string(), "run".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_touch_carries_its_identity_and_nothing_of_the_call() {
+        let line = tool_line(
+            json!([{"type": "tool_use", "id": "t1", "name": "Edit",
+                    "input": {"file_path": "/Users/u/Projects/nhop/secret.env", "new_string": "TOKEN=abc"}}]),
+            false,
+        );
+        let context = LineContext {
+            profile: PROFILE,
+            repos: &REPOS,
+            fallback_session_id: "file-stem",
+            last_message_ts: None,
+            file_modified: Timestamp::from_millis(FILE_MODIFIED),
+        };
+
+        let LineOutcome { drafts, message_ts } = drafts_from_line(&line, &context);
+
+        assert_eq!(message_ts, None);
+        assert_eq!(drafts.len(), 1);
+        let RecordDraft {
+            provider,
+            kind,
+            ts,
+            payload,
+            key,
+            ..
+        } = &drafts[0];
+        assert_eq!(*provider, runtime::Provider::ClaudeCode);
+        assert_eq!(*kind, Kind::Touch);
+        assert_eq!(ts.to_rfc3339(), "2026-09-14T11:45:43.000Z");
+        assert_eq!(
+            *payload,
+            json!({"session_id": SESSION, "uuid": "00000000-0000-4000-8000-0000000000aa",
+                   "repo": "/Users/u/Projects/nhop", "action": "edit"})
+        );
+        assert_eq!(
+            *key,
+            KeySource::ClaudeTouch {
+                session_id: SESSION.to_string(),
+                uuid: "00000000-0000-4000-8000-0000000000aa".to_string(),
+                repo: "/Users/u/Projects/nhop".to_string(),
+                action: "edit".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_line_with_text_and_tool_calls_ships_both() {
+        let line = tool_line(
+            json!([
+                {"type": "text", "text": "Checking the deploy key."},
+                {"type": "tool_use", "id": "t1", "name": "Bash",
+                 "input": {"command": "ls /Users/u/Projects/launchpad/keys"}},
+            ]),
+            false,
+        );
+        let context = LineContext {
+            profile: PROFILE,
+            repos: &REPOS,
+            fallback_session_id: "file-stem",
+            last_message_ts: None,
+            file_modified: Timestamp::from_millis(FILE_MODIFIED),
+        };
+
+        let LineOutcome { drafts, .. } = drafts_from_line(&line, &context);
+
+        let mut kinds = Vec::new();
+        for RecordDraft { kind, .. } in drafts {
+            kinds.push(kind);
+        }
+        assert_eq!(kinds, vec![Kind::Message, Kind::Touch]);
+    }
+
+    #[test]
+    fn paths_outside_repositories_unknown_tools_and_sidechains_touch_nothing() {
+        let outside = tool_line(
+            json!([
+                {"type": "tool_use", "id": "t1", "name": "Write", "input": {"file_path": "/tmp/scratch.md"}},
+                {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "go test ./..."}},
+                {"type": "tool_use", "id": "t3", "name": "WebFetch",
+                 "input": {"url": "https://x", "file_path": "/Users/u/Projects/nhop/a"}},
+                {"type": "tool_use", "id": "t4", "name": "Read", "input": {"file_path": "relative/nhop.go"}},
+            ]),
+            false,
+        );
+        let sidechain = tool_line(
+            json!([{"type": "tool_use", "id": "t1", "name": "Edit",
+                    "input": {"file_path": "/Users/u/Projects/nhop/a.go"}}]),
+            true,
+        );
+
+        assert_eq!(touches_of(&outside), Vec::new());
+        assert_eq!(touches_of(&sidechain), Vec::new());
+    }
+
+    #[test]
+    fn command_paths_are_the_absolute_and_home_relative_tokens() {
+        let cases: [(&str, &[&str]); 6] = [
+            ("cd ~/Projects/nhop && go test ./...", &["~/Projects/nhop"]),
+            (
+                "git -C /Users/u/Projects/nikki log --oneline",
+                &["/Users/u/Projects/nikki"],
+            ),
+            (
+                "mise run --dir=/Users/u/Projects/nikki check",
+                &["/Users/u/Projects/nikki"],
+            ),
+            (
+                "cat \"/Users/u/a.txt\"; echo $HOME/Projects/x.",
+                &["/Users/u/a.txt", "$HOME/Projects/x"],
+            ),
+            ("grep -n x /Users/u/b.rs: && ls /", &["/Users/u/b.rs"]),
+            ("echo done", &[]),
+        ];
+        for (command, expected) in cases {
+            assert_eq!(command_paths(command), expected.to_vec(), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_cursor_from_before_touches_restarts_the_file() {
+        let path = Path::new("/tmp/session.jsonl");
+        let stored = r#"{"inode":42,"offset":9000,"last_message_ts":1789000000000}"#;
+        assert_eq!(FileCursor::decode(path, stored), None);
+    }
+
     #[test]
     fn a_file_cursor_survives_a_round_trip_and_garbage_restarts() {
         let cursor = FileCursor {
             inode: 42,
             offset: 9_000,
             last_message_ts: Some(1_789_000_000_000),
+            version: CURSOR_VERSION,
         };
         let path = Path::new("/tmp/session.jsonl");
         assert_eq!(FileCursor::decode(path, &cursor.encode()), Some(cursor));
@@ -1162,7 +1544,7 @@ mod tests {
         let path = transcripts.write(FIXTURE);
         let first = read_all(&path, None, UNBOUNDED);
 
-        let again = read_increment(&path, PROFILE, Some(first[0].cursor), UNBOUNDED)
+        let again = read_increment(&path, source(), Some(first[0].cursor), UNBOUNDED)
             .expect("the transcript reads");
 
         assert!(again.is_none());
@@ -1222,12 +1604,12 @@ mod tests {
         assert_eq!(first[0].cursor.offset, complete.len() as u64);
         assert_eq!(messages(drafts_in(&first)), fixture_messages(0..2));
 
-        let waiting = read_increment(&path, PROFILE, Some(first[0].cursor), UNBOUNDED)
+        let waiting = read_increment(&path, source(), Some(first[0].cursor), UNBOUNDED)
             .expect("the transcript reads");
         assert!(waiting.is_none(), "a partial line alone is not consumed");
 
         transcripts.append(tail);
-        let still_waiting = read_increment(&path, PROFILE, Some(first[0].cursor), UNBOUNDED)
+        let still_waiting = read_increment(&path, source(), Some(first[0].cursor), UNBOUNDED)
             .expect("the transcript reads");
         assert!(
             still_waiting.is_none(),
@@ -1815,9 +2197,11 @@ mod tests {
         let ClaudeCode { roots, .. } =
             default_claude_code(Path::new(&home)).expect("the default roots resolve");
 
+        let repos = GitRoots::from_env();
         let mut files = 0;
         let mut records = 0;
         let mut messages = 0;
+        let mut touches = 0;
         for ClaudeRoot { profile, projects } in &roots {
             let Ok(paths) = transcripts(projects, &mut HashSet::new()) else {
                 continue;
@@ -1831,11 +2215,22 @@ mod tests {
                 while let Some(Increment {
                     drafts,
                     cursor: advanced,
-                }) = read_increment(&path, profile, cursor, READ_BUDGET)
-                    .expect("the live transcript reads")
+                }) = read_increment(
+                    &path,
+                    Source {
+                        profile,
+                        repos: &repos,
+                    },
+                    cursor,
+                    READ_BUDGET,
+                )
+                .expect("the live transcript reads")
                 {
                     records += drafts.len();
                     for draft in drafts {
+                        if draft.kind == Kind::Touch {
+                            touches += 1;
+                        }
                         if draft.kind != Kind::Message {
                             continue;
                         }
@@ -1873,5 +2268,9 @@ mod tests {
         assert!(files > 0, "no transcript was found under {roots:?}");
         assert!(records > 0, "{files} transcripts yielded no record");
         assert!(messages > 0, "{files} transcripts yielded no message");
+        assert!(
+            touches > 0,
+            "{files} transcripts yielded no repository touch"
+        );
     }
 }

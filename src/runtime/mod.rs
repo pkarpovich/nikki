@@ -17,7 +17,9 @@ use crate::config::Config;
 use crate::macos::events::SLEEP_FLUSH_BUDGET;
 use crate::providers::Emission;
 use crate::runtime::buffer::{Buffer, BufferConfig, BufferError, BufferHandle};
-use crate::runtime::dedup::{browser_key, claude_message_key, claude_session_key, windows_key};
+use crate::runtime::dedup::{
+    browser_key, claude_message_key, claude_session_key, claude_touch_key, windows_key,
+};
 use crate::runtime::ship::{HttpTransport, ShipError, ShipNow, Shipper};
 
 const RFC3339_MILLIS: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
@@ -63,6 +65,7 @@ pub enum Kind {
     Visit,
     Message,
     Session,
+    Touch,
 }
 
 impl Kind {
@@ -79,6 +82,7 @@ impl Kind {
             Kind::Visit => "visit",
             Kind::Message => "message",
             Kind::Session => "session",
+            Kind::Touch => "touch",
         }
     }
 }
@@ -144,6 +148,12 @@ pub enum KeySource {
         field: String,
         value: String,
     },
+    ClaudeTouch {
+        session_id: String,
+        uuid: String,
+        repo: String,
+        action: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +193,12 @@ impl RecordDraft {
                 field,
                 value,
             } => claude_session_key(device, &session_id, &field, &value),
+            KeySource::ClaudeTouch {
+                session_id,
+                uuid,
+                repo,
+                action,
+            } => claude_touch_key(device, &session_id, &uuid, &repo, &action),
         };
         Envelope {
             provider,
@@ -428,6 +444,7 @@ mod tests {
             (Kind::Visit, "visit"),
             (Kind::Message, "message"),
             (Kind::Session, "session"),
+            (Kind::Touch, "touch"),
         ];
         for (kind, name) in kinds {
             assert_eq!(kind.as_str(), name);
