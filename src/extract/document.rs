@@ -28,14 +28,13 @@ mod tests {
 
     #[test]
     fn a_file_url_survives_whole() {
-        let path =
-            "file:///Users/pavel.karpovich/Projects/DC/ask-dealcloud/agent-sdk-runtime/main.py";
+        let path = "file:///Users/u/Projects/work/app/main.py";
         assert_eq!(file_url(path), Some(path.to_string()));
     }
 
     #[test]
     fn a_repository_root_survives_whole() {
-        let path = "file:///Users/pavel.karpovich/Projects/nikki/";
+        let path = "file:///Users/u/Projects/nikki/";
         assert_eq!(file_url(path), Some(path.to_string()));
     }
 
@@ -55,10 +54,7 @@ mod tests {
 
     #[test]
     fn a_bare_path_without_a_scheme_is_dropped() {
-        assert_eq!(
-            file_url("/Users/pavel.karpovich/Projects/nikki/Cargo.toml"),
-            None
-        );
+        assert_eq!(file_url("/Users/u/Projects/nikki/Cargo.toml"), None);
     }
 
     #[test]

@@ -16,7 +16,7 @@
               "id": "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
               "name": "✳ nikki daemon",
               "title": "nikki: revdiff",
-              "cwd": "/Users/pavel.karpovich/Projects/nikki",
+              "cwd": "/Users/u/Projects/nikki",
               "active": true,
               "flagged": false,
               "split": false,
@@ -25,11 +25,11 @@
               "realized": true,
               "fontSize": 18,
               "foreground": [
-                "/Users/pavel.karpovich/.local/bin/claude",
+                "/Users/u/.local/bin/claude",
                 "--enable-auto-mode",
                 "--resume"
               ],
-              "restoreCommand": "cd /Users/pavel.karpovich/Projects/nikki && claude --resume",
+              "restoreCommand": "cd /Users/u/Projects/nikki && claude --resume",
               "surfaces": [
                 { "kind": "left", "active": false, "visible": false },
                 { "kind": "scratch", "active": true, "visible": true }

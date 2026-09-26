@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn a_file_url_is_reduced_to_its_scheme_rather_than_falling_through() {
         assert_eq!(
-            reduced(&host_only(), "file:///Users/pavel.karpovich/secret.pdf"),
+            reduced(&host_only(), "file:///Users/u/secret.pdf"),
             "file:///"
         );
     }
@@ -298,12 +298,12 @@ mod tests {
     fn a_document_path_is_never_treated_as_a_url() {
         let mut payload = json!({
             "app": "Zed",
-            "path": "file:///Users/pavel.karpovich/Projects/nikki/src/runtime/redact.rs",
+            "path": "file:///Users/u/Projects/nikki/src/runtime/redact.rs",
         });
         host_only().apply(&mut payload);
         assert_eq!(
             payload["path"],
-            "file:///Users/pavel.karpovich/Projects/nikki/src/runtime/redact.rs"
+            "file:///Users/u/Projects/nikki/src/runtime/redact.rs"
         );
     }
 
@@ -374,7 +374,7 @@ mod tests {
                 "session": "nikki daemon",
                 "surface": "scratch",
                 "command": "psql postgres://user:hunter2@example.com/db",
-                "cwd": "/Users/pavel.karpovich/Projects/nikki",
+                "cwd": "/Users/u/Projects/nikki",
             },
         });
         redactor.apply(&mut payload);

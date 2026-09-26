@@ -69,7 +69,7 @@ There is **no minimised flag** to ask for and none is needed: `.optionOnScreenOn
 
 **Titles** - `AXUIElementCreateApplication(pid)` then `kAXWindowsAttribute` then `kAXTitleAttribute`. Verified to return titles for 31 of 31 running applications with no failures. `AXUIElementSetMessagingTimeout` is mandatory - an unresponsive application otherwise blocks the call indefinitely.
 
-**Open document** - `AXDocument` on a window returns a `file://` URL for real document applications. Verified: present on 5 of 18 applications with windows; meaningful on two, and they are the two that matter for this user - an editor returned `file:///Users/pavel.karpovich/Projects/DC/ask-dealcloud/agent-sdk-runtime/...` and a git client returned its repository root. Electron applications return an empty string and one media application returns its own `https://` internal URL, so the rule is: keep the value only when it is non-empty and its scheme is `file`.
+**Open document** - `AXDocument` on a window returns a `file://` URL for real document applications. Verified: present on 5 of 18 applications with windows; meaningful on two, and they are the two that matter for this user - an editor returned `file:///Users/u/Projects/work/app/...` and a git client returned its repository root. Electron applications return an empty string and one media application returns its own `https://` internal URL, so the rule is: keep the value only when it is non-empty and its scheme is `file`.
 
 **Activity** - `CGEventSourceSecondsSinceLastEventType(.combinedSessionState, .anyInputEventType)` for idle seconds, and `CGEventSourceCounterForEventType` for cumulative key and mouse event counts since boot, differenced between ticks. Neither needs a permission and neither can observe content.
 
@@ -140,9 +140,9 @@ Note the limitation this form carries: it reads the browser's own front window, 
   "workspaces": [
     {"id": "839DBFAA-...", "name": "tuclaw", "active": false, "sessions": [
       {"id": "7320056A-...", "name": "new tuclaw desktop app", "title": "tuclaw: done",
-       "cwd": "/Users/pavel.karpovich/Projects/tuclaw", "active": false, "flagged": true,
+       "cwd": "/Users/u/Projects/home", "active": false, "flagged": true,
        "split": false, "scratch": false, "overlay": false, "realized": true, "fontSize": 18,
-       "foreground": ["/Users/pavel.karpovich/.local/bin/claude", "--enable-auto-mode", "--resume"],
+       "foreground": ["/Users/u/.local/bin/claude", "--enable-auto-mode", "--resume"],
        "restoreCommand": "...", "surfaces": [{"kind": "left", "active": true, "visible": true}]}
     ]}
   ]}}}
@@ -312,7 +312,7 @@ The boundary between two repositories, pinned with captured bodies. The service 
         "app": "Zed",
         "bundle_id": "dev.zed.Zed",
         "title": "environment, home-environment, workspaces — settings.json",
-        "path": "file:///Users/pavel.karpovich/Projects/environment/dotfiles/mise/config.toml",
+        "path": "file:///Users/u/Projects/environment/dotfiles/mise/config.toml",
         "details": {"workspace": null},
         "display": 1,
         "tick_interval_sec": 30,

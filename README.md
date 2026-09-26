@@ -33,8 +33,8 @@ A coalesced interval, as the service returns it:
 {"type":"run","device":"mbp-21","from":"2026-08-29T11:23:04.000Z","to":"2026-08-29T11:41:34.000Z",
  "duration_sec":1110,"samples":37,"app":"Agterm","bundle_id":"com.umputun.agterm",
  "title":"nikki","display":1,"degraded":false,
- "details":{"workspace":"nhop","session":"nikki","surface":"left","foreground":"claude",
-            "cwd":"/Users/pavel.karpovich/Projects/nikki","command":"claude --resume ..."},
+ "details":{"workspace":"alpha","session":"nikki","surface":"left","foreground":"claude",
+            "cwd":"/Users/u/Projects/nikki","command":"claude --resume ..."},
  "keys":412,"mouse":88,"idle_min":0,"idle_max":134,"mic_active":false,
  "screen_locked":false,"display_asleep":false,
  "visible":[{"app":"Telegram","display":2,"title":null}]}
@@ -103,7 +103,7 @@ Brewfile, it becomes a `cask` line without `restart_service:`.
 **A release that adds a `(provider, kind)` pair must not reach a Mac before the service accepts it.**
 The service rejects an unknown pair per record inside a `200`, and the daemon deletes every record of
 a batch it got a 2xx for, so an early upgrade destroys that provider's backfill for good - for
-`claude_code/message` and `claude_code/session`, every existing transcript. Post one hand-made record
+`claude_code/message`, `claude_code/session` and `claude_code/touch`, every existing transcript. Post one hand-made record
 of each new pair to `/api/v1/records` and see `accepted: 1` before upgrading.
 
 Releases are cut by tagging; see `docs/releasing.md`.
@@ -408,6 +408,22 @@ transcript ships in several emissions, each with the cursor it advances to. The 
 moves only after the commit receipt resolves; an emission that carries no records but moves the
 offset - a stretch of tool lines - is still sent, so such a file is not re-read on every poll.
 
+Tool calls are not shipped, but where they worked is: an assistant line whose tool calls name a path
+inside a git repository also ships `claude_code/touch` records, one per repository and action on that
+line. A session's `cwd` is only the directory Claude Code was started from - a session started in
+one repository routinely spends the day editing others - so the repositories its tool
+calls touched are what says which project it worked on. `Edit`, `Write`, `MultiEdit` and
+`NotebookEdit` paths count as `edit`, `Read`, `Glob` and `Grep` paths as `read`, and every absolute,
+`~/` or `$HOME/` token in a `Bash` command as `run`; relative paths and any other tool count as
+nothing. Each path is resolved to the nearest ancestor holding `.git` (`src/providers/repo_roots.rs`,
+cached per directory, home and `/` never count as a repository), and a path outside every repository
+ships nothing. Only the repository root and the action leave the Mac - never the command, the path
+inside the repository or the arguments.
+
+The cursor carries a `version`. A cursor stored before the provider shipped touches has none, reads
+as version 0, and restarts its file from 0, so an upgrade backfills the touches of every transcript
+still on disk; the messages re-sent on the way are duplicates the service counts and drops.
+
 ### The focus source
 
 **Accessibility answers who is focused**, through `AXFocusedApplication` on the system-wide element,
@@ -502,7 +518,7 @@ section, and any change here must be mirrored there in the same pass.**
         "app": "Zed",
         "bundle_id": "dev.zed.Zed",
         "title": "environment, home-environment, workspaces — settings.json",
-        "path": "file:///Users/pavel.karpovich/Projects/environment/dotfiles/mise/config.toml",
+        "path": "file:///Users/u/Projects/environment/dotfiles/mise/config.toml",
         "details": {"workspace": null},
         "display": 1,
         "tick_interval_sec": 30,
@@ -563,6 +579,7 @@ retried** - so a kind missing from this table is destroyed permanently the first
 | `browser_history` | `visit` | `url`, `profile`, `visit_id` | `title`, `transition`, `duration_ms` |
 | `claude_code` | `message` | `session_id`, `uuid`, `block`, `role`, `message_kind`, `text`, `cwd`, `profile` | `git_branch` |
 | `claude_code` | `session` | `session_id`, `field`, `value` | none |
+| `claude_code` | `touch` | `session_id`, `uuid`, `repo`, `action` | none |
 
 Unknown payload fields are never rejected - the server preserves them in its `raw` column.
 
@@ -659,10 +676,11 @@ session.
 **What is shipped:** every prompt the user typed and every text reply the model wrote, as
 `claude_code/message`, one record per text block of a transcript line, the text unmodified. A line
 with several text blocks under one `uuid` ships one record per block, numbered by `block` from 0.
-Title and PR-link lines ship as `claude_code/session`.
+Title and PR-link lines ship as `claude_code/session`. Which git repositories a line's tool calls
+worked in ships as `claude_code/touch` - the repository root and the kind of access, nothing else.
 
-**What is never shipped:** tool calls, tool results, thinking, injected skill bodies and subagent
-transcripts. None of them leave the Mac.
+**What is never shipped:** tool calls themselves (commands, paths inside a repository, arguments),
+tool results, thinking, injected skill bodies and subagent transcripts. None of them leave the Mac.
 
 `claude_code/message` - envelope `ts` is the transcript line's own `timestamp`, when it was said
 rather than when it was shipped.
@@ -693,15 +711,30 @@ the last message line read before it in the file, else the file's modification t
 {"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:35:12.410Z","seq":90211,
  "kind":"message","dedup_key":"4c1e9a07b2d85f36","degraded":false,
  "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","uuid":"d41f0c2a-7e93-4b6d-a8f1-5c2e90b7d316","block":0,
-            "role":"user","message_kind":"prompt","text":"передеплоишь дев через spot?",
-            "cwd":"/Users/pavel.karpovich/Projects/THE_FEUD_V2","git_branch":"main","profile":"claude"}}
+            "role":"user","message_kind":"prompt","text":"redeploy staging with spot?",
+            "cwd":"/Users/u/Projects/app","git_branch":"main","profile":"claude"}}
 
 {"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:35:12.410Z","seq":90212,
  "kind":"session","dedup_key":"b07d3e5a91c4f268","degraded":false,
- "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","field":"ai_title","value":"Redeploy dev via spot"}}
+ "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","field":"ai_title","value":"Redeploy staging via spot"}}
+
+{"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:45:43.000Z","seq":90213,
+ "kind":"touch","dedup_key":"9e4d2c7a1b0f6e38","degraded":false,
+ "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","uuid":"a1c0e3f2-9b7d-4e21-8f0a-6d2c4b1e9f37",
+            "repo":"/Users/u/Projects/beta","action":"run"}}
 ```
 
-The values of `role`, `message_kind` and `field` are **stored opaquely** by the service and never
+`claude_code/touch` - one record per assistant line, repository and action. Envelope `ts` is the
+line's own `timestamp`.
+
+| field | type | required | meaning |
+|---|---|---|---|
+| `session_id` | string | yes | transcript `sessionId` (fallback: file stem) |
+| `uuid` | string | yes | transcript line `uuid` |
+| `repo` | string | yes | absolute path of the repository root the line's tool calls worked in |
+| `action` | string | yes | `edit` (Edit, Write, MultiEdit, NotebookEdit), `read` (Read, Glob, Grep), `run` (a path inside a Bash command) |
+
+The values of `role`, `message_kind`, `field` and `action` are **stored opaquely** by the service and never
 checked against a fixed set, like `transition`. A daemon that adds a new message kind later must not
 have every such record rejected, and so lost for good. An empty `text` is accepted, since a real text
 block can be empty after a model stop, and so is an empty `cwd`, which a line without one ships; only
@@ -721,7 +754,7 @@ repository in the same pass.
 
 ```json
 {"workspace":"nikki","session":"nikki daemon","surface":"scratch",
- "command":"rx docs/plans/2026-08-27-agterm-panes.md","cwd":"/Users/pavel.karpovich/Projects/nikki/docs"}
+ "command":"rx docs/plans/2026-08-27-agterm-panes.md","cwd":"/Users/u/Projects/nikki/docs"}
 ```
 
 - `session` is the session name with its animated status glyph stripped, so an auto-named session is
@@ -774,9 +807,10 @@ windows:  device \x1F "windows" \x1F kind \x1F ts_millis \x1F seq
 browser:  device \x1F "browser_history" \x1F profile \x1F generation \x1F visit_id
 message:  device \x1F "claude_code" \x1F "message" \x1F session_id \x1F uuid \x1F block
 session:  device \x1F "claude_code" \x1F "session" \x1F session_id \x1F field \x1F value
+touch:    device \x1F "claude_code" \x1F "touch" \x1F session_id \x1F uuid \x1F repo \x1F action
 ```
 
-Neither `claude_code` key hashes `seq` or `ts`, so a transcript re-read from 0 after its cursor was
+No `claude_code` key hashes `seq` or `ts`, so a transcript re-read from 0 after its cursor was
 lost re-sends the same keys and the server counts them as duplicates. The message key is scoped to
 `session_id` because a resumed or forked session copies earlier history into its new file under the
 same `uuid`s: that message is stored once per session, not once overall and not once per copy. The

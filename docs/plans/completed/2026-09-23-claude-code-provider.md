@@ -6,7 +6,7 @@ A third provider, `claude_code`, reads the Claude Code session transcripts on th
 
 Why: "what did I do last week, and when" cannot be answered from nikki today. The timeline shows that a terminal window titled with a Claude Code session name was focused from 13:30 to 14:30, and nothing of what was discussed. The conversation itself is the only source that answers it, and it lives only in local transcript files that Claude Code prunes on its own schedule. The README already lists "agent session transcripts" as a deferred provider the architecture admits; this plan builds it.
 
-Acceptance scenario: after this daemon has shipped the existing transcripts, an agent using only nikki's API describes the week of 13-20 September 2026 and names, for Monday 14 September 13:30-14:30, the THE_FEUD_V2 dev redeploy via spot - text that exists only in the shipped messages.
+Acceptance scenario: after this daemon has shipped the existing transcripts, an agent using only nikki's API describes a past week and names, for a one-hour block, what was done in it - text that exists only in the shipped messages.
 
 The provider interprets nothing beyond classifying which transcript lines are conversation. It does not summarise, shorten, redact or merge text.
 
@@ -145,20 +145,20 @@ Captured bodies:
 {"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:35:12.410Z","seq":90211,
  "kind":"message","dedup_key":"4c1e9a07b2d85f36","degraded":false,
  "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","uuid":"d41f0c2a-7e93-4b6d-a8f1-5c2e90b7d316","block":0,
-            "role":"user","message_kind":"prompt","text":"передеплоишь дев через spot?",
-            "cwd":"/Users/pavel.karpovich/Projects/THE_FEUD_V2","git_branch":"main","profile":"claude"}}
+            "role":"user","message_kind":"prompt","text":"redeploy staging with spot?",
+            "cwd":"/Users/u/Projects/app","git_branch":"main","profile":"claude"}}
 
 {"provider":"claude_code","device":"mbp-21","ts":"2026-09-14T11:35:12.410Z","seq":90212,
  "kind":"session","dedup_key":"b07d3e5a91c4f268","degraded":false,
- "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","field":"ai_title","value":"Redeploy dev via spot"}}
+ "payload":{"session_id":"8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94","field":"ai_title","value":"Redeploy staging via spot"}}
 ```
 
 ### Fixture `fixtures/claude_code_session.jsonl`
 
-Hand-written, one JSON object per line, all with `sessionId` `8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94`, `cwd` `/Users/u/Projects/THE_FEUD_V2`, `gitBranch` `main`, increasing `timestamp`s on 2026-09-14 and distinct `uuid`s. In order:
+Hand-written, one JSON object per line, all with `sessionId` `8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94`, `cwd` `/Users/u/Projects/app`, `gitBranch` `main`, increasing `timestamp`s on 2026-09-14 and distinct `uuid`s. In order:
 
 1. `custom-title` with `customTitle` `feud` (before any message - takes the file mtime)
-2. `user`, content string `передеплоишь дев через spot?` -> `prompt`
+2. `user`, content string `redeploy staging with spot?` -> `prompt`
 3. `assistant`, content `[thinking block, text block "Checking the template version first."]` -> one `text`
 4. `assistant`, content `[tool_use block]` -> nothing
 5. `user`, content `[tool_result block]` -> nothing
@@ -170,9 +170,9 @@ Hand-written, one JSON object per line, all with `sessionId` `8f2c61d0-4b7e-4a51
 11. `user`, content `[Request interrupted by user]` -> `prompt`
 12. `user`, `isCompactSummary: true`, content `This session is being continued ...` -> `compact_summary`
 13. `assistant`, `isSidechain: true`, text content -> nothing
-14. `ai-title` with `aiTitle` `Redeploy dev via spot` -> `session`, `ts` of line 12
+14. `ai-title` with `aiTitle` `Redeploy staging via spot` -> `session`, `ts` of line 12
 15. `ai-title` repeated verbatim -> the same `dedup_key` as line 14
-16. `pr-link` with `prUrl` `https://github.com/u/THE_FEUD_V2/pull/7` and its own `timestamp` -> `session`, `field: "pr"`, that `ts`
+16. `pr-link` with `prUrl` `https://github.com/u/app/pull/7` and its own `timestamp` -> `session`, `field: "pr"`, that `ts`
 17. `attachment` line -> nothing
 18. `user` line with `gitBranch` `""` -> `git_branch` omitted
 
@@ -185,6 +185,6 @@ Hand-written, one JSON object per line, all with `sessionId` `8f2c61d0-4b7e-4a51
 
 **Manual verification**:
 - watch the first backfill drain (`buffer.db` pending count falls to zero) and check the service's `cc_messages` row count is in the tens of thousands on the MBP
-- the acceptance scenario once a reader can reach the sessions API: describe the week of 13-20 September 2026 from nikki alone
+- the acceptance scenario once a reader can reach the sessions API: describe a past week from nikki alone
 
 **Later, separate plans**: diffs (what a session changed in files) as a third `claude_code` kind; Codex sessions.

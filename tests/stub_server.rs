@@ -22,8 +22,8 @@ const FIXTURE_VISITS: usize = 6;
 const SQLITE: &str = "/usr/bin/sqlite3";
 const CLAUDE_SESSION: &str = "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94";
 const CLAUDE_PROJECT: &str = "-Users-u-Projects-THE-FEUD-V2";
-const CLAUDE_CWD: &str = "/Users/u/Projects/THE_FEUD_V2";
-const CLAUDE_SUBAGENT_LINE: &str = "{\"type\": \"user\", \"uuid\": \"subagent-1\", \"sessionId\": \"subagent-session\", \"timestamp\": \"2026-09-14T11:36:00.000Z\", \"cwd\": \"/Users/u/Projects/THE_FEUD_V2\", \"message\": {\"content\": \"a subagent prompt\"}}\n";
+const CLAUDE_CWD: &str = "/Users/u/Projects/app";
+const CLAUDE_SUBAGENT_LINE: &str = "{\"type\": \"user\", \"uuid\": \"subagent-1\", \"sessionId\": \"subagent-session\", \"timestamp\": \"2026-09-14T11:36:00.000Z\", \"cwd\": \"/Users/u/Projects/app\", \"message\": {\"content\": \"a subagent prompt\"}}\n";
 
 /// What the daemon is told is on screen. A host with no window session - a CI runner - has no
 /// frontmost application, and without one the window provider assembles nothing at all, so a suite
@@ -1327,7 +1327,7 @@ fn the_claude_code_transcripts_ship_their_conversation_and_nothing_else() {
     let main = Some("main");
     let expected = vec![
         claude_session(None, "custom_title", "feud"),
-        claude_message(2, 0, "user", "prompt", "передеплоишь дев через spot?", main),
+        claude_message(2, 0, "user", "prompt", "redeploy staging with spot?", main),
         claude_message(
             3,
             0,
@@ -1388,12 +1388,12 @@ fn the_claude_code_transcripts_ship_their_conversation_and_nothing_else() {
         claude_session(
             Some("2026-09-14T11:35:12.000Z"),
             "ai_title",
-            "Redeploy dev via spot",
+            "Redeploy staging via spot",
         ),
         claude_session(
             Some("2026-09-14T11:35:16.000Z"),
             "pr",
-            "https://github.com/u/THE_FEUD_V2/pull/7",
+            "https://github.com/u/app/pull/7",
         ),
         claude_message(18, 0, "user", "prompt", "what changed on the branch?", None),
     ];

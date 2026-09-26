@@ -757,7 +757,7 @@ mod tests {
             cursor_display: Some(0),
             focused: FocusedWindow::Window {
                 title: Some("nikki — windows.rs".to_string()),
-                path: Some("file:///Users/pavel.karpovich/Projects/nikki/src/main.rs".to_string()),
+                path: Some("file:///Users/u/Projects/nikki/src/main.rs".to_string()),
             },
             titles,
             activity: Arc::new(Mutex::new(Activity {
@@ -830,7 +830,7 @@ mod tests {
         assert_eq!(payload["title"], "nikki — windows.rs");
         assert_eq!(
             payload["path"],
-            "file:///Users/pavel.karpovich/Projects/nikki/src/main.rs"
+            "file:///Users/u/Projects/nikki/src/main.rs"
         );
         assert_eq!(payload["display"], 0);
         assert_eq!(payload["tick_interval_sec"], 30);

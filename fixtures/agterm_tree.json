@@ -16,7 +16,7 @@
               "id": "7320056A-9A11-4F0C-B0D2-2E8B5F6A31C4",
               "name": "new tuclaw desktop app",
               "title": "tuclaw: done",
-              "cwd": "/Users/pavel.karpovich/Projects/tuclaw",
+              "cwd": "/Users/u/Projects/home",
               "active": false,
               "flagged": true,
               "split": false,
@@ -25,11 +25,11 @@
               "realized": true,
               "fontSize": 18,
               "foreground": [
-                "/Users/pavel.karpovich/.local/bin/claude",
+                "/Users/u/.local/bin/claude",
                 "--enable-auto-mode",
                 "--resume"
               ],
-              "restoreCommand": "cd /Users/pavel.karpovich/Projects/tuclaw && claude --resume",
+              "restoreCommand": "cd /Users/u/Projects/tuclaw && claude --resume",
               "surfaces": [{ "kind": "left", "active": true, "visible": true }]
             }
           ]
@@ -43,7 +43,7 @@
               "id": "C1A9F0D3-77B2-4E58-9C41-0F5D6B8A2E33",
               "name": "notes",
               "title": "notes",
-              "cwd": "/Users/pavel.karpovich/Obsidian",
+              "cwd": "/Users/u/Obsidian",
               "active": false,
               "flagged": false,
               "split": false,
@@ -59,7 +59,7 @@
               "id": "5E7B21C4-6F30-4D9A-A8B5-3C2E1D0F9A46",
               "name": "nikki daemon",
               "title": "nikki: cargo test",
-              "cwd": "/Users/pavel.karpovich/Projects/nikki",
+              "cwd": "/Users/u/Projects/nikki",
               "active": true,
               "flagged": false,
               "split": false,
@@ -68,11 +68,11 @@
               "realized": true,
               "fontSize": 18,
               "foreground": [
-                "/Users/pavel.karpovich/.local/bin/claude",
+                "/Users/u/.local/bin/claude",
                 "--enable-auto-mode",
                 "--resume"
               ],
-              "restoreCommand": "cd /Users/pavel.karpovich/Projects/nikki && claude --resume",
+              "restoreCommand": "cd /Users/u/Projects/nikki && claude --resume",
               "surfaces": [{ "kind": "left", "active": true, "visible": true }]
             },
             {

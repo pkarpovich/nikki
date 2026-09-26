@@ -17,7 +17,9 @@ use crate::config::Config;
 use crate::macos::events::SLEEP_FLUSH_BUDGET;
 use crate::providers::Emission;
 use crate::runtime::buffer::{Buffer, BufferConfig, BufferError, BufferHandle};
-use crate::runtime::dedup::{browser_key, claude_message_key, claude_session_key, windows_key};
+use crate::runtime::dedup::{
+    browser_key, claude_message_key, claude_session_key, claude_touch_key, windows_key,
+};
 use crate::runtime::ship::{HttpTransport, ShipError, ShipNow, Shipper};
 
 const RFC3339_MILLIS: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
@@ -63,6 +65,7 @@ pub enum Kind {
     Visit,
     Message,
     Session,
+    Touch,
 }
 
 impl Kind {
@@ -79,6 +82,7 @@ impl Kind {
             Kind::Visit => "visit",
             Kind::Message => "message",
             Kind::Session => "session",
+            Kind::Touch => "touch",
         }
     }
 }
@@ -144,6 +148,12 @@ pub enum KeySource {
         field: String,
         value: String,
     },
+    ClaudeTouch {
+        session_id: String,
+        uuid: String,
+        repo: String,
+        action: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +193,12 @@ impl RecordDraft {
                 field,
                 value,
             } => claude_session_key(device, &session_id, &field, &value),
+            KeySource::ClaudeTouch {
+                session_id,
+                uuid,
+                repo,
+                action,
+            } => claude_touch_key(device, &session_id, &uuid, &repo, &action),
         };
         Envelope {
             provider,
@@ -383,7 +399,7 @@ mod tests {
             kind: Kind::Message,
             ts: Timestamp::from_millis(1_789_386_912_410),
             degraded: false,
-            payload: json!({"text": "передеплоишь дев через spot?"}),
+            payload: json!({"text": "redeploy staging with spot?"}),
             key: KeySource::ClaudeMessage {
                 session_id: "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94".to_string(),
                 uuid: "d41f0c2a-7e93-4b6d-a8f1-5c2e90b7d316".to_string(),
@@ -428,6 +444,7 @@ mod tests {
             (Kind::Visit, "visit"),
             (Kind::Message, "message"),
             (Kind::Session, "session"),
+            (Kind::Touch, "touch"),
         ];
         for (kind, name) in kinds {
             assert_eq!(kind.as_str(), name);
@@ -513,8 +530,9 @@ mod tests {
 
     #[test]
     fn the_claude_session_key_ignores_the_sequence_number_and_follows_the_value() {
-        let first = claude_session_draft("Redeploy dev via spot").into_envelope("mbp-21", 1);
-        let repeated = claude_session_draft("Redeploy dev via spot").into_envelope("mbp-21", 9_999);
+        let first = claude_session_draft("Redeploy staging via spot").into_envelope("mbp-21", 1);
+        let repeated =
+            claude_session_draft("Redeploy staging via spot").into_envelope("mbp-21", 9_999);
         assert_eq!(first.dedup_key, repeated.dedup_key);
         assert_eq!(
             first.dedup_key,
@@ -522,7 +540,7 @@ mod tests {
                 "mbp-21",
                 "8f2c61d0-4b7e-4a51-9d3e-1c0b5e7a2f94",
                 "ai_title",
-                "Redeploy dev via spot"
+                "Redeploy staging via spot"
             )
         );
 

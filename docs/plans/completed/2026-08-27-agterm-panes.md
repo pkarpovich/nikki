@@ -57,7 +57,7 @@ them.
   ones. `foreground` and `splitForeground` describe the left and split panes; **there is no
   `scratchForeground`** - that is the gap this plan closes.
 - Auto-named sessions carry an animated status glyph inside `name` itself (`✳ План создания`,
-  `◑ План создания`, `●ask-dealcloud: done`); hand-named ones are stable (`nikki`, `nhop`). On
+  `◑ План создания`, `●work-app: done`); hand-named ones are stable (`nikki`, `nhop`). On
   2026-08-27 that animation produced 30 `state_change` records, six of them inside two seconds.
 
 **Files this plan touches:**

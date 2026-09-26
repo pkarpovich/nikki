@@ -49,6 +49,24 @@ pub fn claude_session_key(device: &str, session_id: &str, field: &str, value: &s
     ])
 }
 
+pub fn claude_touch_key(
+    device: &str,
+    session_id: &str,
+    uuid: &str,
+    repo: &str,
+    action: &str,
+) -> String {
+    key(&[
+        device,
+        Provider::ClaudeCode.as_str(),
+        Kind::Touch.as_str(),
+        session_id,
+        uuid,
+        repo,
+        action,
+    ])
+}
+
 pub fn key(fields: &[&str]) -> String {
     let digest = Sha256::digest(fields.join(UNIT_SEPARATOR).as_bytes());
     let mut hex = String::with_capacity(KEY_HEX_CHARS);
@@ -103,11 +121,50 @@ mod tests {
     #[test]
     fn the_claude_session_key_hashes_the_unit_separator_joined_fields() {
         assert_eq!(
-            claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy dev via spot"),
+            claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy staging via spot"),
             expected(&format!(
-                "mbp-21\u{1f}claude_code\u{1f}session\u{1f}{SESSION}\u{1f}ai_title\u{1f}Redeploy dev via spot"
+                "mbp-21\u{1f}claude_code\u{1f}session\u{1f}{SESSION}\u{1f}ai_title\u{1f}Redeploy staging via spot"
             ))
         );
+    }
+
+    const REPO: &str = "/Users/u/Projects/beta";
+
+    #[test]
+    fn the_claude_touch_key_hashes_the_unit_separator_joined_fields() {
+        assert_eq!(
+            claude_touch_key("mbp-21", SESSION, UUID, REPO, "edit"),
+            expected(&format!(
+                "mbp-21\u{1f}claude_code\u{1f}touch\u{1f}{SESSION}\u{1f}{UUID}\u{1f}{REPO}\u{1f}edit"
+            ))
+        );
+    }
+
+    #[test]
+    fn every_claude_touch_field_changes_the_key() {
+        let base = claude_touch_key("mbp-21", SESSION, UUID, REPO, "edit");
+        let variants = [
+            claude_touch_key("mba-22", SESSION, UUID, REPO, "edit"),
+            claude_touch_key(
+                "mbp-21",
+                "0b9e4c71-2d6a-4f38-8e15-7a3c9d0f6b24",
+                UUID,
+                REPO,
+                "edit",
+            ),
+            claude_touch_key(
+                "mbp-21",
+                SESSION,
+                "5a7e2b91-c04d-4e63-9f18-2d6b0a8c4e75",
+                REPO,
+                "edit",
+            ),
+            claude_touch_key("mbp-21", SESSION, UUID, "/Users/u/Projects/alpha", "edit"),
+            claude_touch_key("mbp-21", SESSION, UUID, REPO, "run"),
+        ];
+        for variant in variants {
+            assert_ne!(base, variant);
+        }
     }
 
     #[test]
@@ -126,16 +183,21 @@ mod tests {
 
     #[test]
     fn every_claude_session_field_changes_the_key() {
-        let base = claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy dev via spot");
+        let base = claude_session_key("mbp-21", SESSION, "ai_title", "Redeploy staging via spot");
         let variants = [
-            claude_session_key("mba-22", SESSION, "ai_title", "Redeploy dev via spot"),
+            claude_session_key("mba-22", SESSION, "ai_title", "Redeploy staging via spot"),
             claude_session_key(
                 "mbp-21",
                 "0b9e4c71-2d6a-4f38-8e15-7a3c9d0f6b24",
                 "ai_title",
-                "Redeploy dev via spot",
+                "Redeploy staging via spot",
             ),
-            claude_session_key("mbp-21", SESSION, "custom_title", "Redeploy dev via spot"),
+            claude_session_key(
+                "mbp-21",
+                SESSION,
+                "custom_title",
+                "Redeploy staging via spot",
+            ),
             claude_session_key("mbp-21", SESSION, "ai_title", "feud"),
         ];
         for variant in variants {
