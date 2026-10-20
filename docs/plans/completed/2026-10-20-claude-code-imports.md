@@ -468,7 +468,7 @@ so that `drafts_from_line` stays the single entry point.
 
 ### Task 7: [Final] Update documentation
 
-- [ ] Update `README.md`:
+- [x] Update `README.md`:
   - **Configuration:** the `[[claude_code.import]]` example and the field-table rows.
   - **claude_code provider section:** a paragraph on imports:
     - the folder contract;
@@ -484,11 +484,11 @@ so that `drafts_from_line` stays the single entry point.
     - a title line before any message falls back to the file's modification time;
     - a command that does not preserve mtimes makes that the copy time;
     - nothing prunes the import folder or its cursors.
-- [ ] Wire contract sections stay as they are. Confirm that no `(provider, kind)` pair or payload
+- [x] Wire contract sections stay as they are. Confirm that no `(provider, kind)` pair or payload
   field changed.
-- [ ] Update `CLAUDE.md` only if a new rule emerged. The `claude_code.rs` acceptance rule already
+- [x] Update `CLAUDE.md` only if a new rule emerged. The `claude_code.rs` acceptance rule already
   covers this.
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Move this plan to `docs/plans/completed/`.
 
 ## Post-Completion
 

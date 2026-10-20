@@ -228,6 +228,13 @@ max_bytes = 536870912
 roots = ["~/.claude", "~/.claude-work"]   # Claude Code profile directories, a missing one is skipped
 poll_interval = 60                        # seconds between transcript polls
 
+[[claude_code.import]]
+device = "linux-box"                                           # required, another machine's name
+dir = "~/Library/Application Support/nikki/imports/linux-box"  # required, ~/ or absolute
+since = "2026-10-19T00:00:00+02:00"                            # required, RFC 3339 with offset
+command = ["~/.config/nikki/pull-linux-box.sh"]                # optional argv
+every = 86400                                                  # seconds, required with command
+
 [[redact]]
 url_host = "*"
 keep = "host"                       # default: host only, path and query dropped
@@ -253,6 +260,12 @@ drop = ["title"]
 | `buffer.max_bytes` | 536870912 | 500 MB; must exceed the 512 bytes held back for the overflow record, for the same reason |
 | `claude_code.roots` | `["~/.claude", "~/.claude-work"]` | a leading `~/` expands against `HOME`, an absolute path is taken as is, any other relative path is an error. Each root's transcripts are read from `<root>/projects`, and its profile name is the directory's final component with one leading `.` stripped (`claude`, `claude-work`); two roots with the same profile name are an error. An empty list disables the provider |
 | `claude_code.poll_interval` | 60 | at least 1 second, for the same reason as `history_poll_interval` |
+| `claude_code.import` | empty | one table per imported machine, see the `claude_code` provider section. Each failure names its field, for example `claude_code.import.since` |
+| `claude_code.import.device` | none, required | non-empty, different from the top-level `device` (records would be indistinguishable from this Mac's) and unique across imports |
+| `claude_code.import.dir` | none, required | expanded like a root, but used directly as the projects directory with no `/projects` appended. It need not exist at startup |
+| `claude_code.import.since` | none, required | RFC 3339 with an offset. Messages stamped before it are never shipped |
+| `claude_code.import.command` | none | argv run to refill `dir`. Its first element is expanded like `dir` and must be absolute. Allowed only together with `every` |
+| `claude_code.import.every` | none | seconds between pull attempts, at least 1. Required with `command`, forbidden without |
 | `[[redact]]` | one `url_host = "*"`, `keep = "host"` rule | replaced wholesale when the key is present |
 
 An unknown key is a startup error rather than silence, and every validation failure names the field
@@ -423,6 +436,41 @@ inside the repository or the arguments.
 The cursor carries a `version`. A cursor stored before the provider shipped touches has none, reads
 as version 0, and restarts its file from 0, so an upgrade backfills the touches of every transcript
 still on disk; the messages re-sent on the way are duplicates the service counts and drops.
+
+**Imports.** A `[[claude_code.import]]` entry makes the daemon collect for a machine where nikki never
+runs. The folder is the whole interface: `<dir>/<project>/<session>.jsonl`, content only ever
+appended to. After the local roots, each tick lists the import's `dir` with the same two-level glob
+and reads it with the same reader, shipping the records under the import's `device` instead of this
+Mac's. How the bytes arrive is the command's business; the daemon has no SSH, ftp or sync code, only
+"run this argv with a deadline".
+
+- **Identity is the first line, not the inode.** A command that rewrites the folder gives every file
+  a new inode and overwrites it whole. An import cursor therefore stores a digest of the file's first
+  line, which Claude Code writes once and never changes, and continues from the stored offset while
+  the digest matches. A refilled 120 MB transcript ships only the lines appended since the last pull.
+  A file shorter than the stored offset with the same first line is a copy in progress: it is waited
+  for, not restarted. A different first line restarts the file from 0.
+- **`since`** drops every record whose `ts` is before it. The offset still advances past those lines,
+  so they are not re-read. A title stamped from an earlier message is dropped with it.
+- **No touches, fixed profile.** Paths in an imported transcript belong to the other machine's file
+  system, so no `claude_code/touch` records are shipped, and every imported record carries the profile
+  `claude`.
+- **The schedule is one cursor row**, `(claude_code, "import:<device>")`, holding the time of the last
+  attempt. On a poll tick an import with a command whose last attempt is at least `every` seconds old
+  runs it with a 10 minute deadline, then stores the current time whether the command succeeded or
+  not, so an unreachable machine costs one attempt per period, not one per poll. A failure logs one
+  `warn` with the device and the tail of stderr, a success one `info`. The attempt time is wall-clock
+  and lives in `buffer.db`, so a restart, an upgrade or a sleep does not reset it and a missed period
+  is caught on the first tick after it. The pull runs inside the tick, so local transcripts wait for
+  it at most 10 minutes once per period.
+
+An example command, with `exec` as the last step so the deadline kills the transfer itself rather than
+only the shell around it (the daemon kills its direct child, not that child's descendants):
+
+```sh
+#!/bin/sh
+exec scp -rp linux-box:.claude/projects/. "$HOME/Library/Application Support/nikki/imports/linux-box/"
+```
 
 ### The focus source
 
@@ -823,6 +871,9 @@ incremented whenever `max(id) < cursor` reveals the history database was replace
 database's ids restart from 1 and would otherwise collide with visits already stored under the old
 one, and the server would silently merge two unrelated visits under the older one's identity.
 
+An imported record's keys use the import's `device`, not this Mac's. A session that moves between
+machines is therefore stored once per device unless `since` is set to the hand-over moment.
+
 **The key is derived inside the enqueue transaction, after `seq` is allocated**, because the window
 key hashes `seq`. Redaction runs first and separately, since it must happen before anything is
 written to disk.
@@ -1024,6 +1075,9 @@ fixtures/              captured Dia output, agterm JSON, Local State, a small hi
 - No third-party window manager is used, so there is no tag or workspace grouping in the window layer.
 - The cursor of a transcript file that Claude Code later deletes stays in `buffer.db` - a few bytes
   per file, never read again. Nothing prunes them.
+- In an imported transcript, a title line before any message is stamped with the file's modification
+  time. A command that does not preserve mtimes makes that the copy time.
+- Nothing prunes an import folder or the cursors of files that disappear from it.
 - A session resumed or forked into a new file ships the history it copied once more, under the new
   `session_id`. That is by design: the message key is per session, so each session reads whole on
   its own.
