@@ -382,16 +382,16 @@ so that `drafts_from_line` stays the single entry point.
 **Files:**
 - Modify: `src/providers/claude_code.rs`
 
-- [ ] Add `Identity`, `Touches` and `since` to `Source`, and `Touches` to `LineContext`.
+- [x] Add `Identity`, `Touches` and `since` to `Source`, and `Touches` to `LineContext`.
   `drafts_from_line` skips `touch_drafts` under `Touches::Skipped`.
-- [ ] Add `head: Option<String>` to `FileCursor` (`#[serde(default)]`), and the first-line digest
+- [x] Add `head: Option<String>` to `FileCursor` (`#[serde(default)]`), and the first-line digest
   helper.
-- [ ] Implement the `Identity::Head` rules in `read_increment` exactly as listed in Technical Details.
+- [x] Implement the `Identity::Head` rules in `read_increment` exactly as listed in Technical Details.
   The `Identity::Inode` path stays unchanged.
-- [ ] Apply the `since` filter per draft, while still advancing the offset and `last_message_ts`.
-- [ ] Update existing callers and tests to pass `Identity::Inode`, `Touches::Collected` and
+- [x] Apply the `since` filter per draft, while still advancing the offset and `last_message_ts`.
+- [x] Update existing callers and tests to pass `Identity::Inode`, `Touches::Collected` and
   `since: None`.
-- [ ] Write tests through `read_increment` (using the existing `TempTranscripts` helpers):
+- [x] Write tests through `read_increment` (using the existing `TempTranscripts` helpers):
   - a file replaced by a copy with identical content and a new inode yields nothing under `Head`,
     while the same replacement under `Inode` restarts from 0 (the existing behaviour);
   - an identical copy plus appended lines yields only the appended lines;
@@ -404,13 +404,15 @@ so that `drafts_from_line` stays the single entry point.
     and the offset reaches the end of the file;
   - `Touches::Skipped` yields no `touch` drafts for the tool-call fixture lines that do yield them
     under `Collected`.
-- [ ] Run `mise run check` and `./scripts/acceptance.sh`.
+- [x] Run `mise run check` and `./scripts/acceptance.sh` (the claude_code live case passed; the Accessibility live case cannot run here, as Accessibility is not granted to this shell).
+- [x] ➕ `Identity::Head`, `Touches::Skipped`, `head_digest` and their imports are `#[cfg(test)]` until Task 4 constructs them; Task 4 removes those attributes. `FileCursor` lost `Copy` because of `head: Option<String>`.
 
 ### Task 4: Read import folders in the provider under their device
 
 **Files:**
 - Modify: `src/providers/claude_code.rs`
 
+- [ ] Remove the `#[cfg(test)]` attributes Task 3 left on `Identity::Head`, `Touches::Skipped`, `head_digest`, `HEAD_HEX_CHARS` and the `Write`/`Sha256` imports.
 - [ ] Add `const IMPORT_PROFILE: &str = "claude"`, and build the import `Source` with it:
   `Identity::Head`, `Touches::Skipped`, `since: Some(import.since)`.
 - [ ] `run` clones `imports` beside `roots`. `tick` reads the local roots first, then each import
