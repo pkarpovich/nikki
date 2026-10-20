@@ -137,7 +137,7 @@ you go to grant it the permissions it needs.
 |---|---|---|
 | Accessibility | which application is focused, window titles, the focused window, `AXDocument` paths, activation and title-change events | none |
 | Automation -> Dia | the active tab's URL, title and profile | one-time prompt on first use |
-| (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state, the process table, Claude Code transcripts under the configured roots | none |
+| (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state, the process table, Claude Code transcripts under the configured roots and import folders | none |
 
 Both grants are keyed by **identity and location together**: the Developer ID team plus the
 `dev.pkarpovich.nikki` identifier that `codesign --identifier` pins, and the place the program is
@@ -719,7 +719,8 @@ Bodies for the kinds not shown above:
 
 The conversation text of Claude Code sessions, read from the transcripts under
 `~/.claude/projects/*/*.jsonl` (plus `~/.claude-work/projects` on the MBP). One transcript file is one
-session.
+session. Folders configured under `[[claude_code.import]]` ship the same kinds under the import's
+`device`, always with profile `claude` and without `touch` records.
 
 **What is shipped:** every prompt the user typed and every text reply the model wrote, as
 `claude_code/message`, one record per text block of a transcript line, the text unmodified. A line
