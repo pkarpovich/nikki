@@ -160,15 +160,16 @@ mise run check
 ! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'
 ```
 
-Any task touching `src/providers/claude_code.rs` also runs `./scripts/acceptance.sh`.
+That gate is the whole of verification inside this plan. Do **not** run `./scripts/acceptance.sh`,
+any `-- --ignored` live test or the real binary, even where `CLAUDE.md` asks for it after a
+`claude_code.rs` change: those read the live machine and need grants the executor does not have. A
+human runs them once after the plan (see Post-Completion).
 
 ## Testing Strategy
 
 - **Unit tests:** inline, per task. They cover config parsing and validation, the device override in
   the buffer, the reader's head identity and `since` filter, touch suppression, and the pull schedule.
-- **End to end:** one new case in `tests/stub_server.rs`. It runs the real binary with an import
-  whose command copies the fixture into the import folder, and asserts what reaches the stub server.
-- No UI, no e2e browser tests.
+- Nothing above unit tests: no new `tests/stub_server.rs` case, no live tests, no acceptance script.
 
 ## Progress Tracking
 
@@ -316,7 +317,7 @@ so that `drafts_from_line` stays the single entry point.
 
 ## What Goes Where
 
-- **Implementation Steps:** config, emission device, reader, provider, the end-to-end test and docs,
+- **Implementation Steps:** config, emission device, reader, provider and docs,
   all in this repository.
 - **Post-Completion:** the real pull script and config on the Mac, a release, and a check on the
   service.
@@ -453,30 +454,7 @@ so that `drafts_from_line` stays the single entry point.
     a field the test can lower, not a test-only code path.
 - [x] Run `mise run check` and `./scripts/acceptance.sh`. (the claude_code live case passed; the Accessibility live case cannot run here, as Accessibility is not granted to this shell)
 
-### Task 6: End-to-end import through the real binary
-
-**Files:**
-- Modify: `tests/stub_server.rs`
-
-- [ ] Extend `Settings` / `config_text` with an optional import:
-  - `device = "imported-device"`;
-  - `dir` under the test's temp dir;
-  - `since` between two fixture timestamps;
-  - `command` = a script in the temp dir that copies the fixture into `dir/<project>/`;
-  - `every = 3600`.
-- [ ] Add a test asserting that the stub server receives:
-  - `claude_code/message` records with `device = "imported-device"` and `profile = "claude"`;
-  - no `claude_code/touch` records under that device;
-  - none of the fixture messages before `since`;
-  - this Mac's own records under the daemon device.
-- [ ] Add a restart case:
-  - stop the daemon, rewrite the import file with the same content plus one appended line, and start
-    it again;
-  - only the appended line's records arrive;
-  - the command did not run again (counter file), because `every` has not elapsed.
-- [ ] Run `mise run check` and `./scripts/acceptance.sh`.
-
-### Task 7: Verify acceptance criteria
+### Task 6: Verify acceptance criteria
 
 - [ ] Verify every Overview requirement against the acceptance scenario:
   - own device;
@@ -486,12 +464,9 @@ so that `drafts_from_line` stays the single entry point.
   - no transport code in the crate.
 - [ ] Verify that local-root behaviour is unchanged: all pre-existing claude_code tests pass without
   edits beyond the new parameters.
-- [ ] Run the full gate:
-  - `mise run check`;
-  - the unsafe grep;
-  - `./scripts/acceptance.sh`.
+- [ ] Run the gate: `mise run check` and the unsafe grep. Nothing else.
 
-### Task 8: [Final] Update documentation
+### Task 7: [Final] Update documentation
 
 - [ ] Update `README.md`:
   - **Configuration:** the `[[claude_code.import]]` example and the field-table rows.
@@ -520,6 +495,8 @@ so that `drafts_from_line` stays the single entry point.
 *Items requiring manual intervention or external systems - no checkboxes, informational only.*
 
 **On the Mac:**
+- run `./scripts/acceptance.sh` once from a terminal that holds the Accessibility grant, since
+  `claude_code.rs` changed;
 - write the pull script for the second machine;
 - add its `[[claude_code.import]]` entry with `since` set to the hand-over moment;
 - run `nikki --check-config`;
