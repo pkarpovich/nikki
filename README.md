@@ -409,8 +409,9 @@ None of its payload keys is one the redactor rewrites, so a URL or a token in a 
 
 Each file carries its own cursor under `(claude_code, <absolute path>)`: the file's inode, the byte
 offset read up to, and the `ts` of the last message line before that offset, which is what a title
-line read on a later poll is stamped with. A changed inode or a file shorter than the offset restarts
-the file from 0, and the dedup key absorbs the repeats. **Only a line ending in `\n` is consumed.**
+line read on a later poll is stamped with. For local roots a changed inode or a file shorter than the
+offset restarts the file from 0, and the dedup key absorbs the repeats; import files are identified by
+their first-line digest instead (see Imports). **Only a line ending in `\n` is consumed.**
 Claude Code appends to a transcript while the session runs, so the last line may be half-written when
 it is read; parsing it would either drop the message as malformed or ship a fragment, and the offset
 would move past the line for good. A partial line is left where it is and read whole on a later poll.
