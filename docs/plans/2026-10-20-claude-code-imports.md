@@ -431,27 +431,27 @@ so that `drafts_from_line` stays the single entry point.
 **Files:**
 - Modify: `src/providers/claude_code.rs`
 
-- [ ] Add the schedule cursor:
+- [x] Add the schedule cursor:
   - key `import:<device>`;
   - value JSON `{"last_attempt_at": <millis>}`, encoded and decoded like `FileCursor`, with garbage
     read as never attempted;
   - `pull_due(last_attempt, now, every)`;
   - `PULL_DEADLINE`.
-- [ ] Implement `pull_if_due` as described in Technical Details, and call it in `tick` before
+- [x] Implement `pull_if_due` as described in Technical Details, and call it in `tick` before
   listing that import's folder.
-- [ ] Write tests for `pull_due`:
+- [x] Write tests for `pull_due`:
   - never attempted means due;
   - exactly `every` elapsed means due;
   - one second short is not due;
   - a clock that moved backwards (`now < last`) is not due.
-- [ ] Write tests through `tick` with a real `Buffer` and a command that is a small shell script
+- [x] Write tests through `tick` with a real `Buffer` and a command that is a small shell script
   written into a temp dir:
   - the script copies the fixture into the import folder, and the records appear in the same tick;
   - a second tick within `every` does not run the script again (it appends to a counter file);
   - a script exiting non-zero still writes the attempt time, and the next tick does not retry;
   - a script outliving a shortened deadline is killed and the tick completes. Expose the deadline as
     a field the test can lower, not a test-only code path.
-- [ ] Run `mise run check` and `./scripts/acceptance.sh`.
+- [x] Run `mise run check` and `./scripts/acceptance.sh`. (the claude_code live case passed; the Accessibility live case cannot run here, as Accessibility is not granted to this shell)
 
 ### Task 6: End-to-end import through the real binary
 

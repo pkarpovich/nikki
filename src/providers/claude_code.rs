@@ -16,7 +16,8 @@ use tokio::time::{MissedTickBehavior, interval};
 
 use super::repo_roots::{GitRoots, RepoLookup};
 use super::{Ctx, Emission, Provider, ProviderError};
-use crate::config::{ClaudeImport, ClaudeRoot};
+use crate::config::{ClaudeImport, ClaudeRoot, Pull};
+use crate::extract::{CommandOutput, run_with_deadline};
 use crate::runtime::buffer::BufferHandle;
 use crate::runtime::{self, Cursor, KeySource, Kind, RecordDraft, Timestamp};
 
@@ -29,6 +30,8 @@ const TRANSCRIPT_EXTENSION: &str = "jsonl";
 const CURSOR_VERSION: u32 = 1;
 const IMPORT_PROFILE: &str = "claude";
 const HEAD_HEX_CHARS: usize = 16;
+const PULL_DEADLINE: Duration = Duration::from_secs(10 * 60);
+const STDERR_TAIL_BYTES: usize = 512;
 const COMMAND_SEPARATORS: &str = "\"'`;|&()<>=,";
 const PATH_TRAILERS: &[char] = &[':', ',', '.'];
 
@@ -37,6 +40,7 @@ pub struct ClaudeCodeProvider {
     known: HashMap<PathBuf, Option<FileCursor>>,
     unreadable: HashSet<PathBuf>,
     repos: GitRoots,
+    pull_deadline: Duration,
 }
 
 enum Flow {
@@ -60,6 +64,7 @@ impl ClaudeCodeProvider {
             known: HashMap::new(),
             unreadable: HashSet::new(),
             repos: GitRoots::from_env(),
+            pull_deadline: PULL_DEADLINE,
         }
     }
 
@@ -91,9 +96,15 @@ impl ClaudeCodeProvider {
             device,
             projects,
             since,
-            ..
+            pull,
         } in imports
         {
+            if let Some(pull) = pull {
+                match self.pull_if_due(device, pull, out).await? {
+                    Flow::Continue => {}
+                    Flow::RuntimeGone => return Ok(Flow::RuntimeGone),
+                }
+            }
             let Some(paths) = self.transcripts_in(projects) else {
                 continue;
             };
@@ -110,6 +121,81 @@ impl ClaudeCodeProvider {
                     Flow::RuntimeGone => return Ok(Flow::RuntimeGone),
                 }
             }
+        }
+        Ok(Flow::Continue)
+    }
+
+    async fn pull_if_due(
+        &mut self,
+        device: &str,
+        pull: &Pull,
+        out: &Sender<Emission>,
+    ) -> Result<Flow, ProviderError> {
+        let key = pull_key(device);
+        let stored = self
+            .cursors
+            .cursor(runtime::Provider::ClaudeCode, key.clone())
+            .await;
+        let stored = match stored {
+            Ok(stored) => stored,
+            Err(error) => {
+                return Err(ProviderError(format!(
+                    "the buffer refused a cursor: {error}"
+                )));
+            }
+        };
+        let last_attempt = match stored {
+            Some(value) => PullSchedule::decode(device, &value),
+            None => None,
+        };
+        let now = Timestamp::now();
+        if !pull_due(last_attempt, now, pull.every) {
+            return Ok(Flow::Continue);
+        }
+
+        let mut args = Vec::new();
+        for arg in &pull.args {
+            args.push(arg.as_str());
+        }
+        let output = run_with_deadline(&pull.program, &args, self.pull_deadline).await;
+        match output {
+            Some(CommandOutput {
+                succeeded: true, ..
+            }) => {
+                tracing::info!(device, "the import pull command finished");
+            }
+            Some(CommandOutput { stderr, .. }) => {
+                tracing::warn!(
+                    device,
+                    stderr = %tail(&stderr, STDERR_TAIL_BYTES),
+                    "the import pull command failed"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    device,
+                    "the import pull command did not start or passed its deadline"
+                );
+            }
+        }
+
+        let schedule = Cursor {
+            provider: runtime::Provider::ClaudeCode,
+            key,
+            value: PullSchedule {
+                last_attempt_at: Timestamp::now().millis(),
+            }
+            .encode(),
+        };
+        let (emission, committed) = Emission::awaiting_buffer(Vec::new(), Some(schedule));
+        if out.send(emission).await.is_err() {
+            return Ok(Flow::RuntimeGone);
+        }
+        if committed.await.is_err() {
+            tracing::error!(
+                device,
+                "the import pull attempt was not buffered, so the command may run again on the next tick"
+            );
         }
         Ok(Flow::Continue)
     }
@@ -292,6 +378,58 @@ fn transcripts(projects: &Path, unreadable: &mut HashSet<PathBuf>) -> io::Result
 
 fn cursor_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn pull_key(device: &str) -> String {
+    format!("import:{device}")
+}
+
+fn pull_due(last_attempt: Option<Timestamp>, now: Timestamp, every: u64) -> bool {
+    let Some(last_attempt) = last_attempt else {
+        return true;
+    };
+    if now.millis() < last_attempt.millis() {
+        return false;
+    }
+    let every_millis = i64::try_from(every)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1000);
+    now.millis() - last_attempt.millis() >= every_millis
+}
+
+fn tail(text: &str, max_bytes: usize) -> &str {
+    let Some(mut start) = text.len().checked_sub(max_bytes) else {
+        return text;
+    };
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PullSchedule {
+    last_attempt_at: i64,
+}
+
+impl PullSchedule {
+    fn encode(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    fn decode(device: &str, value: &str) -> Option<Timestamp> {
+        match serde_json::from_str::<PullSchedule>(value) {
+            Ok(PullSchedule { last_attempt_at }) => Some(Timestamp::from_millis(last_attempt_at)),
+            Err(error) => {
+                tracing::warn!(
+                    device,
+                    %error,
+                    "the stored import schedule does not parse, so the pull counts as never attempted"
+                );
+                None
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2590,6 +2728,184 @@ mod tests {
             flattened(emitted.into_iter().map(|(_, r)| r).collect()).len(),
             14
         );
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[test]
+    fn a_pull_that_was_never_attempted_is_due() {
+        assert!(pull_due(None, ts(0), 86_400));
+    }
+
+    #[test]
+    fn a_pull_is_due_once_exactly_the_period_has_elapsed() {
+        let last = Timestamp::from_millis(1_000_000);
+        let now = Timestamp::from_millis(1_000_000 + 3_600_000);
+        assert!(pull_due(Some(last), now, 3_600));
+    }
+
+    #[test]
+    fn a_pull_one_second_short_of_the_period_is_not_due() {
+        let last = Timestamp::from_millis(1_000_000);
+        let now = Timestamp::from_millis(1_000_000 + 3_599_000);
+        assert!(!pull_due(Some(last), now, 3_600));
+    }
+
+    #[test]
+    fn a_clock_that_moved_backwards_does_not_make_a_pull_due() {
+        let last = Timestamp::from_millis(5_000_000);
+        let now = Timestamp::from_millis(1_000_000);
+        assert!(!pull_due(Some(last), now, 1));
+    }
+
+    #[test]
+    fn a_stored_schedule_round_trips_and_garbage_counts_as_never_attempted() {
+        let encoded = PullSchedule {
+            last_attempt_at: 42,
+        }
+        .encode();
+        assert_eq!(
+            PullSchedule::decode(IMPORT_DEVICE, &encoded),
+            Some(Timestamp::from_millis(42))
+        );
+        assert_eq!(PullSchedule::decode(IMPORT_DEVICE, "not json"), None);
+    }
+
+    #[test]
+    fn the_stderr_tail_keeps_the_last_bytes_on_a_character_boundary() {
+        assert_eq!(tail("short", 512), "short");
+        assert_eq!(tail("abcdef", 3), "def");
+        assert_eq!(tail("ééé", 3), "é");
+    }
+
+    struct PullScript {
+        import: ClaudeImport,
+        counter: PathBuf,
+    }
+
+    fn pull_import(transcripts: &TempTranscripts, body: &str, every: u64) -> PullScript {
+        let fixture = transcripts.path.join("pull-source.jsonl");
+        fs::write(&fixture, FIXTURE).expect("the pull source could not be written");
+        let counter = transcripts.path.join("pull-counter");
+        let mut import = import_in(transcripts, ts(0));
+        let project = import.projects.join("-Users-o-Projects-app");
+        let script = transcripts.path.join("pull.sh");
+        let text = format!(
+            "echo run >> '{counter}'\n{body}\n",
+            counter = counter.display(),
+            body = body
+                .replace("{fixture}", &fixture.display().to_string())
+                .replace("{project}", &project.display().to_string())
+                .replace("{session}", SESSION),
+        );
+        fs::write(&script, text).expect("the pull script could not be written");
+        import.pull = Some(Pull {
+            program: PathBuf::from("/bin/sh"),
+            args: vec![script.display().to_string()],
+            every,
+        });
+        PullScript { import, counter }
+    }
+
+    fn pull_runs(script: &PullScript) -> usize {
+        match fs::read_to_string(&script.counter) {
+            Ok(text) => text.lines().count(),
+            Err(_) => 0,
+        }
+    }
+
+    const COPY_FIXTURE: &str = "mkdir -p '{project}' && cp '{fixture}' '{project}/{session}.jsonl'";
+
+    #[tokio::test]
+    async fn the_pull_command_fills_the_folder_and_its_records_ship_in_the_same_tick() {
+        let transcripts = TempTranscripts::new("provider-pull-fills");
+        let script = pull_import(&transcripts, COPY_FIXTURE, 3_600);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let emitted = tick_emissions(
+            &mut provider,
+            &[],
+            std::slice::from_ref(&script.import),
+            &buffer.handle(),
+        )
+        .await;
+
+        let mut messages = 0;
+        for (device, records) in &emitted {
+            if device.is_none() {
+                continue;
+            }
+            assert_eq!(device.as_deref(), Some(IMPORT_DEVICE));
+            messages += records.len();
+        }
+        assert!(messages > 0, "the pulled transcript did not ship");
+        assert_eq!(pull_runs(&script), 1);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_second_tick_within_the_period_does_not_run_the_command_again() {
+        let transcripts = TempTranscripts::new("provider-pull-period");
+        let script = pull_import(&transcripts, COPY_FIXTURE, 3_600);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let imports = [script.import.clone()];
+
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+
+        assert_eq!(pull_runs(&script), 1);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_restarted_provider_reads_the_attempt_time_from_the_buffer_and_does_not_pull_again() {
+        let transcripts = TempTranscripts::new("provider-pull-restart");
+        let script = pull_import(&transcripts, COPY_FIXTURE, 3_600);
+        let buffer = transcripts.buffer();
+        let imports = [script.import.clone()];
+
+        let mut first = ClaudeCodeProvider::new(buffer.handle());
+        tick_emissions(&mut first, &[], &imports, &buffer.handle()).await;
+        let mut restarted = ClaudeCodeProvider::new(buffer.handle());
+        tick_emissions(&mut restarted, &[], &imports, &buffer.handle()).await;
+
+        assert_eq!(pull_runs(&script), 1);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_failing_command_still_records_the_attempt_and_is_not_retried() {
+        let transcripts = TempTranscripts::new("provider-pull-fails");
+        let script = pull_import(&transcripts, "echo broken >&2\nexit 1", 3_600);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let imports = [script.import.clone()];
+
+        let first = tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+
+        assert_eq!(pull_runs(&script), 1);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].1.is_empty());
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_outlives_its_deadline_is_killed_and_the_tick_completes() {
+        let transcripts = TempTranscripts::new("provider-pull-deadline");
+        let script = pull_import(&transcripts, "exec sleep 30", 3_600);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        provider.pull_deadline = Duration::from_millis(200);
+        let imports = [script.import.clone()];
+
+        let started = std::time::Instant::now();
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        assert_eq!(pull_runs(&script), 1);
         buffer.close().await.expect("the buffer did not close");
     }
 
