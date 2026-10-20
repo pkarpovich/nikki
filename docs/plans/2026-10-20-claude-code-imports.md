@@ -329,21 +329,21 @@ so that `drafts_from_line` stays the single entry point.
 - Modify: `src/config.rs`
 - Modify: `src/providers/mod.rs` (the `test_config` literal)
 
-- [ ] Add `ClaudeImport` and `Pull` (shapes in Technical Details), plus `imports` on `ClaudeCode`.
-- [ ] Add the `FileClaudeImport` TOML shape under `FileClaudeCode.import` (default empty,
+- [x] Add `ClaudeImport` and `Pull` (shapes in Technical Details), plus `imports` on `ClaudeCode`.
+- [x] Add the `FileClaudeImport` TOML shape under `FileClaudeCode.import` (default empty,
   `deny_unknown_fields`).
-- [ ] Resolve in `claude_code_from`:
+- [x] Resolve in `claude_code_from`:
   - reuse the `~/` expansion from `claude_root_from` by extracting it into a shared function rather
     than copying it;
   - parse `since` with `chrono::DateTime::parse_from_rfc3339`;
   - apply every validation rule in Technical Details.
-- [ ] `claude_code_from` needs the top-level device for the "differs from the daemon device" rule:
+- [x] `claude_code_from` needs the top-level device for the "differs from the daemon device" rule:
   pass it in, or check after the section resolves in `parse`, whichever keeps the field name in the
   error.
-- [ ] Update every `ClaudeCode` literal (`src/config.rs` tests, `src/providers/mod.rs`) with
+- [x] Update every `ClaudeCode` literal (`src/config.rs` tests, `src/providers/mod.rs`) with
   `imports: Vec::new()`.
-- [ ] Write tests for a full entry, an entry without a command, and the default empty list.
-- [ ] Write tests for each rejection:
+- [x] Write tests for a full entry, an entry without a command, and the default empty list.
+- [x] Write tests for each rejection:
   - empty device;
   - device equal to the daemon's;
   - duplicate devices;
@@ -353,7 +353,7 @@ so that `drafts_from_line` stays the single entry point.
   - empty `command`;
   - `every = 0`;
   - an unknown key.
-- [ ] Run `mise run check`.
+- [x] Run `mise run check`.
 
 ### Task 2: Carry a device override on `Emission` into the buffer
 

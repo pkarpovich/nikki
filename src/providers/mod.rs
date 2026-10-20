@@ -197,6 +197,7 @@ pub(crate) mod tests {
             state_dir: std::env::temp_dir().join("nikki-provider-tests"),
             claude_code: ClaudeCode {
                 roots: Vec::new(),
+                imports: Vec::new(),
                 poll_interval: 60,
             },
         }
