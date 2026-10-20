@@ -182,7 +182,7 @@ human runs them once after the plan (see Post-Completion).
 Three pieces, each reusing what exists.
 
 1. **The schedule is one cursor row.**
-   - The row is `(claude_code, "import:<device>")` with value `{"last_attempt_at": <millis>}`.
+   - The row is `(claude_code, "import-pull:<device>")` with value `{"last_attempt_at": <millis>}`.
    - On every existing claude_code poll tick, an import with a command checks whether
      `now - last_attempt_at >= every`. If so, it runs the command through `run_with_deadline` and then
      writes the current time.
@@ -267,7 +267,7 @@ pub since: Option<Timestamp>
 ```
 
 `FileCursor` gains `#[serde(default)] pub head: Option<String>`, the first-line digest:
-- `sha256` of the first line's bytes, including its `\n`, as 16 hex characters;
+- `sha256` of the first line's bytes, including its `\n`, capped at its first 64 KiB, as 16 hex characters;
 - computed with the existing `sha2` dependency, through a helper beside `dedup::key` or a local one.
 
 `CURSOR_VERSION` stays 1, so stored local cursors keep working.
@@ -433,7 +433,7 @@ so that `drafts_from_line` stays the single entry point.
 - Modify: `src/providers/claude_code.rs`
 
 - [x] Add the schedule cursor:
-  - key `import:<device>`;
+  - key `import-pull:<device>`;
   - value JSON `{"last_attempt_at": <millis>}`, encoded and decoded like `FileCursor`, with garbage
     read as never attempted;
   - `pull_due(last_attempt, now, every)`;

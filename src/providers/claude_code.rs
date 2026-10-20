@@ -2,28 +2,31 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command;
 use tokio::sync::mpsc::Sender;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{MissedTickBehavior, interval, timeout};
 
 use super::repo_roots::{GitRoots, RepoLookup};
 use super::{Ctx, Emission, Provider, ProviderError};
 use crate::config::{ClaudeImport, ClaudeRoot, Pull};
-use crate::extract::{CommandOutput, run_with_deadline};
 use crate::runtime::buffer::BufferHandle;
 use crate::runtime::{self, Cursor, KeySource, Kind, RecordDraft, Timestamp};
 
 pub const READ_BUDGET: ReadBudget = ReadBudget {
     max_records: 500,
     max_bytes: 4 * 1024 * 1024,
+    max_scan_bytes: 32 * 1024 * 1024,
 };
 
 const TRANSCRIPT_EXTENSION: &str = "jsonl";
@@ -37,7 +40,7 @@ const PATH_TRAILERS: &[char] = &[':', ',', '.'];
 
 pub struct ClaudeCodeProvider {
     cursors: BufferHandle,
-    known: HashMap<PathBuf, Option<FileCursor>>,
+    known: HashMap<String, Option<FileCursor>>,
     unreadable: HashSet<PathBuf>,
     repos: GitRoots,
     pull_deadline: Duration,
@@ -157,24 +160,34 @@ impl ClaudeCodeProvider {
         for arg in &pull.args {
             args.push(arg.as_str());
         }
-        let output = run_with_deadline(&pull.program, &args, self.pull_deadline).await;
-        match output {
-            Some(CommandOutput {
+        match run_pull(&pull.program, &args, self.pull_deadline).await {
+            Some(PullOutcome {
                 succeeded: true, ..
             }) => {
                 tracing::info!(device, "the import pull command finished");
             }
-            Some(CommandOutput { stderr, .. }) => {
+            Some(PullOutcome {
+                timed_out: true,
+                stderr_tail,
+                ..
+            }) => {
                 tracing::warn!(
                     device,
-                    stderr = %tail(&stderr, STDERR_TAIL_BYTES),
+                    stderr = %stderr_tail,
+                    "the import pull command passed its deadline and was killed"
+                );
+            }
+            Some(PullOutcome { stderr_tail, .. }) => {
+                tracing::warn!(
+                    device,
+                    stderr = %stderr_tail,
                     "the import pull command failed"
                 );
             }
             None => {
                 tracing::warn!(
                     device,
-                    "the import pull command did not start or passed its deadline"
+                    "the import pull command did not start or did not complete"
                 );
             }
         }
@@ -225,7 +238,7 @@ impl ClaudeCodeProvider {
         reading: Reading<'_>,
         out: &Sender<Emission>,
     ) -> Result<Flow, ProviderError> {
-        let mut cursor = self.cursor_for(path).await?;
+        let mut cursor = self.cursor_for(path, reading.device).await?;
         loop {
             let source = Source {
                 profile: reading.profile,
@@ -260,7 +273,7 @@ impl ClaudeCodeProvider {
 
             let stored = Cursor {
                 provider: runtime::Provider::ClaudeCode,
-                key: cursor_key(path),
+                key: cursor_key(path, reading.device),
                 value: advanced.encode(),
             };
             let (emission, committed) = Emission::awaiting_buffer(drafts, Some(stored));
@@ -279,18 +292,23 @@ impl ClaudeCodeProvider {
                 return Ok(Flow::Continue);
             }
             self.known
-                .insert(path.to_path_buf(), Some(advanced.clone()));
+                .insert(cursor_key(path, reading.device), Some(advanced.clone()));
             cursor = Some(advanced);
         }
     }
 
-    async fn cursor_for(&mut self, path: &Path) -> Result<Option<FileCursor>, ProviderError> {
-        if let Some(cursor) = self.known.get(path) {
+    async fn cursor_for(
+        &mut self,
+        path: &Path,
+        device: Option<&str>,
+    ) -> Result<Option<FileCursor>, ProviderError> {
+        let key = cursor_key(path, device);
+        if let Some(cursor) = self.known.get(&key) {
             return Ok(cursor.clone());
         }
         let stored = self
             .cursors
-            .cursor(runtime::Provider::ClaudeCode, cursor_key(path))
+            .cursor(runtime::Provider::ClaudeCode, key.clone())
             .await;
         let stored = match stored {
             Ok(stored) => stored,
@@ -304,7 +322,7 @@ impl ClaudeCodeProvider {
             Some(value) => FileCursor::decode(path, &value),
             None => None,
         };
-        self.known.insert(path.to_path_buf(), cursor.clone());
+        self.known.insert(key, cursor.clone());
         Ok(cursor)
     }
 }
@@ -376,12 +394,51 @@ fn transcripts(projects: &Path, unreadable: &mut HashSet<PathBuf>) -> io::Result
     Ok(paths)
 }
 
-fn cursor_key(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+const MAX_LINE_BYTES: u64 = 32 * 1024 * 1024;
+const HEAD_HASH_BYTES: u64 = 64 * 1024;
+
+struct Skipped {
+    bytes: u64,
+    reached_newline: bool,
+}
+
+fn skip_through_newline(reader: &mut impl BufRead, limit: u64) -> io::Result<Skipped> {
+    let mut bytes = 0;
+    while bytes < limit {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            break;
+        }
+        let window = chunk.len().min((limit - bytes) as usize);
+        if let Some(position) = chunk[..window].iter().position(|byte| *byte == b'\n') {
+            reader.consume(position + 1);
+            return Ok(Skipped {
+                bytes: bytes + position as u64 + 1,
+                reached_newline: true,
+            });
+        }
+        reader.consume(window);
+        bytes += window as u64;
+    }
+    Ok(Skipped {
+        bytes,
+        reached_newline: false,
+    })
+}
+
+fn cursor_key(path: &Path, device: Option<&str>) -> String {
+    match device {
+        Some(device) => format!(
+            "import-file:{}:{device}:{}",
+            device.len(),
+            path.to_string_lossy()
+        ),
+        None => path.to_string_lossy().into_owned(),
+    }
 }
 
 fn pull_key(device: &str) -> String {
-    format!("import:{device}")
+    format!("import-pull:{device}")
 }
 
 fn pull_due(last_attempt: Option<Timestamp>, now: Timestamp, every: u64) -> bool {
@@ -397,14 +454,71 @@ fn pull_due(last_attempt: Option<Timestamp>, now: Timestamp, every: u64) -> bool
     now.millis() - last_attempt.millis() >= every_millis
 }
 
-fn tail(text: &str, max_bytes: usize) -> &str {
-    let Some(mut start) = text.len().checked_sub(max_bytes) else {
-        return text;
+struct PullOutcome {
+    succeeded: bool,
+    timed_out: bool,
+    stderr_tail: String,
+}
+
+async fn run_pull(program: &Path, args: &[&str], deadline: Duration) -> Option<PullOutcome> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::debug!(program = %program.display(), %error, "the import pull command could not start");
+            return None;
+        }
     };
-    while !text.is_char_boundary(start) {
-        start += 1;
+    let stderr = child.stderr.take()?;
+    let mut tail = Vec::new();
+    let finished = timeout(deadline, async {
+        tokio::join!(
+            read_tail(stderr, &mut tail, STDERR_TAIL_BYTES),
+            child.wait()
+        )
+    })
+    .await;
+    let Ok(((), status)) = finished else {
+        return Some(PullOutcome {
+            succeeded: false,
+            timed_out: true,
+            stderr_tail: String::from_utf8_lossy(&tail).into_owned(),
+        });
+    };
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::debug!(program = %program.display(), %error, "the import pull command did not complete");
+            return None;
+        }
+    };
+    Some(PullOutcome {
+        succeeded: status.success(),
+        timed_out: false,
+        stderr_tail: String::from_utf8_lossy(&tail).into_owned(),
+    })
+}
+
+async fn read_tail<R: AsyncRead + Unpin>(mut reader: R, tail: &mut Vec<u8>, max_bytes: usize) {
+    let mut chunk = [0u8; 4096];
+    loop {
+        let Ok(read) = reader.read(&mut chunk).await else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        tail.extend_from_slice(&chunk[..read]);
+        if tail.len() > max_bytes {
+            tail.drain(..tail.len() - max_bytes);
+        }
     }
-    &text[start..]
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -441,6 +555,8 @@ pub struct FileCursor {
     pub version: u32,
     #[serde(default)]
     pub head: Option<String>,
+    #[serde(default)]
+    pub skipping: bool,
 }
 
 impl FileCursor {
@@ -475,6 +591,7 @@ impl FileCursor {
 pub struct ReadBudget {
     pub max_records: usize,
     pub max_bytes: usize,
+    pub max_scan_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -630,6 +747,7 @@ pub fn read_increment(
                 last_message_ts: None,
                 version: CURSOR_VERSION,
                 head: None,
+                skipping: false,
             },
         },
         Identity::Head => {
@@ -649,6 +767,7 @@ pub fn read_increment(
                     last_message_ts: None,
                     version: CURSOR_VERSION,
                     head: Some(head),
+                    skipping: false,
                 },
             }
         }
@@ -670,16 +789,49 @@ pub fn read_increment(
     let mut offset = start.offset;
     let mut last_message_ts = start.last_message_ts;
     let head = start.head;
+    let mut skipping = start.skipping;
     let mut drafts = Vec::new();
     let mut text_bytes = 0;
     let mut line = Vec::new();
-    while drafts.len() < budget.max_records && text_bytes < budget.max_bytes {
-        line.clear();
-        let read = reader.read_until(b'\n', &mut line)?;
-        if line.last() != Some(&b'\n') {
-            break;
+    let line_cap = match identity {
+        Identity::Head => MAX_LINE_BYTES,
+        Identity::Inode => u64::MAX,
+    };
+    while drafts.len() < budget.max_records
+        && text_bytes < budget.max_bytes
+        && offset - start.offset < budget.max_scan_bytes
+    {
+        if skipping {
+            let remaining = budget.max_scan_bytes - (offset - start.offset);
+            let skipped = skip_through_newline(&mut reader, remaining)?;
+            offset += skipped.bytes;
+            skipping = !skipped.reached_newline;
+            if skipping {
+                break;
+            }
+            continue;
         }
+        line.clear();
+        let scanned = offset - start.offset;
+        let read_cap = match scanned {
+            0 => line_cap,
+            _ => line_cap.min(budget.max_scan_bytes - scanned),
+        };
+        let read = (&mut reader).take(read_cap).read_until(b'\n', &mut line)?;
         let line_start = offset;
+        if line.last() != Some(&b'\n') {
+            if (read as u64) < read_cap || read_cap < line_cap {
+                break;
+            }
+            tracing::warn!(
+                path = %path.display(),
+                offset = line_start,
+                "a transcript line exceeds the line cap and is skipped"
+            );
+            offset += read as u64;
+            skipping = true;
+            continue;
+        }
         offset += read as u64;
 
         let value: Value = match serde_json::from_slice(&line) {
@@ -735,18 +887,19 @@ pub fn read_increment(
             last_message_ts,
             version: CURSOR_VERSION,
             head,
+            skipping,
         },
     }))
 }
 
 fn head_digest(path: &Path) -> io::Result<Option<String>> {
-    let mut reader = BufReader::new(File::open(path)?);
-    let mut first_line = Vec::new();
-    reader.read_until(b'\n', &mut first_line)?;
-    if first_line.last() != Some(&b'\n') {
+    let mut reader = BufReader::new(File::open(path)?).take(HEAD_HASH_BYTES);
+    let mut head = Vec::new();
+    reader.read_until(b'\n', &mut head)?;
+    if head.last() != Some(&b'\n') && (head.len() as u64) < HEAD_HASH_BYTES {
         return Ok(None);
     }
-    let digest = Sha256::digest(&first_line);
+    let digest = Sha256::digest(&head);
     let mut hex = String::with_capacity(HEAD_HEX_CHARS);
     for byte in &digest[..HEAD_HEX_CHARS / 2] {
         let _ = write!(hex, "{byte:02x}");
@@ -1413,6 +1566,7 @@ mod tests {
     const UNBOUNDED: ReadBudget = ReadBudget {
         max_records: usize::MAX,
         max_bytes: usize::MAX,
+        max_scan_bytes: u64::MAX,
     };
 
     struct TempTranscripts {
@@ -1781,6 +1935,7 @@ mod tests {
             last_message_ts: Some(1_789_000_000_000),
             version: CURSOR_VERSION,
             head: Some("0123456789abcdef".to_string()),
+            skipping: true,
         };
         let path = Path::new("/tmp/session.jsonl");
         assert_eq!(
@@ -2131,6 +2286,7 @@ mod tests {
         let budget = ReadBudget {
             max_records: 2,
             max_bytes: usize::MAX,
+            max_scan_bytes: u64::MAX,
         };
 
         let split = read_all(&path, None, budget);
@@ -2160,6 +2316,7 @@ mod tests {
         let budget = ReadBudget {
             max_records: usize::MAX,
             max_bytes: 1,
+            max_scan_bytes: u64::MAX,
         };
 
         let split = read_all(&path, None, budget);
@@ -2169,6 +2326,107 @@ mod tests {
         assert_eq!(
             split.last().map(|increment| increment.cursor.clone()),
             Some(whole[0].cursor.clone())
+        );
+    }
+
+    #[test]
+    fn a_scan_budget_splits_a_file_even_when_no_draft_is_emitted() {
+        let transcripts = TempTranscripts::new("scan-budget");
+        let path = transcripts.write(FIXTURE);
+        let whole = read_all(&path, None, UNBOUNDED);
+        let budget = ReadBudget {
+            max_records: usize::MAX,
+            max_bytes: usize::MAX,
+            max_scan_bytes: 1,
+        };
+
+        let split = read_all(&path, None, budget);
+
+        assert!(split.len() > 1, "the budget split the file");
+        assert_eq!(drafts_in(&split), drafts_in(&whole));
+        assert_eq!(
+            split.last().map(|increment| increment.cursor.clone()),
+            Some(whole[0].cursor.clone())
+        );
+    }
+
+    #[test]
+    fn a_line_beyond_the_line_cap_is_skipped_without_stalling_an_imported_file() {
+        let transcripts = TempTranscripts::new("oversize-line");
+        let oversize = "x".repeat(MAX_LINE_BYTES as usize + 1);
+        let text = format!("{}{oversize}\n{}", prompt_line(1), prompt_line(2));
+        let path = transcripts.write(&text);
+        let skipped = head_read(&path, None);
+
+        let expected = transcripts.write(&format!("{}{}", prompt_line(1), prompt_line(2)));
+        let reference = head_read(&expected, None);
+
+        assert_eq!(drafts_in(&skipped), drafts_in(&reference));
+    }
+
+    #[test]
+    fn an_oversize_first_line_still_yields_the_lines_after_it_under_head_identity() {
+        let transcripts = TempTranscripts::new("oversize-first-line");
+        let oversize = "x".repeat(MAX_LINE_BYTES as usize + 1);
+        let path = transcripts.write(&format!("{oversize}\n{}", prompt_line(1)));
+
+        let increments = head_read(&path, None);
+
+        assert_eq!(drafts_in(&increments).len(), 1);
+    }
+
+    #[test]
+    fn an_oversize_line_is_skipped_across_reads_within_the_scan_budget() {
+        let transcripts = TempTranscripts::new("oversize-incremental");
+        let oversize = "x".repeat(MAX_LINE_BYTES as usize * 2);
+        let path = transcripts.write(&format!("{oversize}\n{}", prompt_line(1)));
+        let budget = ReadBudget {
+            max_scan_bytes: MAX_LINE_BYTES,
+            ..UNBOUNDED
+        };
+        let source = head_source(Touches::Collected, None);
+        let mut cursor: Option<FileCursor> = None;
+        let mut increments = Vec::new();
+        for _ in 0..6 {
+            let previous = cursor.as_ref().map_or(0, |cursor| cursor.offset);
+            let Some(increment) = read_increment(&path, source, cursor.clone(), budget).unwrap()
+            else {
+                break;
+            };
+            assert!(increment.cursor.offset - previous <= budget.max_scan_bytes);
+            cursor = Some(increment.cursor.clone());
+            increments.push(increment);
+        }
+
+        assert!(increments.len() >= 3, "the skip spanned several reads");
+        assert!(increments[0].cursor.skipping, "the skip is carried over");
+        assert_eq!(drafts_in(&increments).len(), 1);
+        assert!(!increments.last().unwrap().cursor.skipping);
+    }
+
+    #[test]
+    fn a_local_line_beyond_the_line_cap_is_still_parsed() {
+        let transcripts = TempTranscripts::new("oversize-local-line");
+        let padding = "x".repeat(MAX_LINE_BYTES as usize + 1);
+        let big =
+            prompt_line(1).replacen("\"type\"", &format!("\"pad\":\"{padding}\",\"type\""), 1);
+        let path = transcripts.write(&format!("{big}{}", prompt_line(2)));
+
+        let increments = read_all(&path, None, UNBOUNDED);
+
+        assert_eq!(drafts_in(&increments).len(), 2);
+    }
+
+    #[test]
+    fn cursor_keys_of_a_device_never_collide_with_its_pull_key_or_another_device() {
+        let path = Path::new("/Volumes/x/project/s.jsonl");
+        let file_key = cursor_key(path, Some("mac"));
+        let crafted_device = "mac:/Volumes/x/project/s.jsonl";
+
+        assert_ne!(file_key, pull_key(crafted_device));
+        assert_ne!(
+            cursor_key(Path::new("/b"), Some("a:5:c")),
+            cursor_key(Path::new("c:/b"), Some("a"))
         );
     }
 
@@ -2770,11 +3028,18 @@ mod tests {
         assert_eq!(PullSchedule::decode(IMPORT_DEVICE, "not json"), None);
     }
 
-    #[test]
-    fn the_stderr_tail_keeps_the_last_bytes_on_a_character_boundary() {
-        assert_eq!(tail("short", 512), "short");
-        assert_eq!(tail("abcdef", 3), "def");
-        assert_eq!(tail("ééé", 3), "é");
+    #[tokio::test]
+    async fn the_stderr_tail_keeps_only_the_last_bytes() {
+        let mut tail = Vec::new();
+        read_tail(&b"short"[..], &mut tail, 512).await;
+        assert_eq!(tail, b"short");
+        let mut tail = Vec::new();
+        read_tail(&b"abcdef"[..], &mut tail, 3).await;
+        assert_eq!(tail, b"def");
+        let long = vec![b'x'; 10_000];
+        let mut tail = Vec::new();
+        read_tail(&long[..], &mut tail, 4).await;
+        assert_eq!(tail, b"xxxx");
     }
 
     struct PullScript {

@@ -447,7 +447,7 @@ Mac's. How the bytes arrive is the command's business; the daemon has no SSH, ft
 
 - **Identity is the first line, not the inode.** A command that rewrites the folder gives every file
   a new inode and overwrites it whole. An import cursor therefore stores a digest of the file's first
-  line, which Claude Code writes once and never changes, and continues from the stored offset while
+  line (at most its first 64 KiB), which Claude Code writes once and never changes, and continues from the stored offset while
   the digest matches. A refilled 120 MB transcript ships only the lines appended since the last pull.
   A file shorter than the stored offset with the same first line is a copy in progress: it is waited
   for, not restarted. A different first line restarts the file from 0.
@@ -456,7 +456,7 @@ Mac's. How the bytes arrive is the command's business; the daemon has no SSH, ft
 - **No touches, fixed profile.** Paths in an imported transcript belong to the other machine's file
   system, so no `claude_code/touch` records are shipped, and every imported record carries the profile
   `claude`.
-- **The schedule is one cursor row**, `(claude_code, "import:<device>")`, holding the time of the last
+- **The schedule is one cursor row**, `(claude_code, "import-pull:<device>")`, holding the time of the last
   attempt. On a poll tick an import with a command whose last attempt is at least `every` seconds old
   runs it with a 10 minute deadline, then stores the current time whether the command succeeded or
   not, so an unreachable machine costs one attempt per period, not one per poll. A failure logs one
