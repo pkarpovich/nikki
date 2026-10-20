@@ -456,15 +456,15 @@ so that `drafts_from_line` stays the single entry point.
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] Verify every Overview requirement against the acceptance scenario:
+- [x] Verify every Overview requirement against the acceptance scenario:
   - own device;
   - nothing before `since`;
   - a daily rewrite ships only appended lines;
   - one attempt per period, even on failure;
   - no transport code in the crate.
-- [ ] Verify that local-root behaviour is unchanged: all pre-existing claude_code tests pass without
+- [x] Verify that local-root behaviour is unchanged: all pre-existing claude_code tests pass without
   edits beyond the new parameters.
-- [ ] Run the gate: `mise run check` and the unsafe grep. Nothing else.
+- [x] Run the gate: `mise run check` and the unsafe grep. Nothing else.
 
 ### Task 7: [Final] Update documentation
 
