@@ -76,7 +76,6 @@ impl Emission {
         (emission, receipt)
     }
 
-    #[cfg(test)]
     pub fn for_device(mut self, device: String) -> Emission {
         self.device = Some(device);
         self

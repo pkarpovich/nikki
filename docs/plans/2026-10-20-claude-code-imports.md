@@ -412,19 +412,19 @@ so that `drafts_from_line` stays the single entry point.
 **Files:**
 - Modify: `src/providers/claude_code.rs`
 
-- [ ] Remove the `#[cfg(test)]` attributes Task 3 left on `Identity::Head`, `Touches::Skipped`, `head_digest`, `HEAD_HEX_CHARS` and the `Write`/`Sha256` imports.
-- [ ] Add `const IMPORT_PROFILE: &str = "claude"`, and build the import `Source` with it:
+- [x] Remove the `#[cfg(test)]` attributes Task 3 left on `Identity::Head`, `Touches::Skipped`, `head_digest`, `HEAD_HEX_CHARS` and the `Write`/`Sha256` imports.
+- [x] Add `const IMPORT_PROFILE: &str = "claude"`, and build the import `Source` with it:
   `Identity::Head`, `Touches::Skipped`, `since: Some(import.since)`.
-- [ ] `run` clones `imports` beside `roots`. `tick` reads the local roots first, then each import
+- [x] `run` clones `imports` beside `roots`. `tick` reads the local roots first, then each import
   folder through the existing `transcripts_in` and `ship_file`.
-- [ ] `ship_file` takes the source settings and `Option<&str>` device, and calls `.for_device(...)`
+- [x] `ship_file` takes the source settings and `Option<&str>` device, and calls `.for_device(...)`
   on the emission when a device is given.
-- [ ] Write provider-level tests. Drive `tick` with a real `Buffer`, as existing provider tests do,
+- [x] Write provider-level tests. Drive `tick` with a real `Buffer`, as existing provider tests do,
   and assert what was enqueued:
   - an import folder's records carry the import device, profile `claude` and no touches;
   - a local root in the same tick still carries the daemon device and its touches;
   - a missing import folder is skipped without failing the tick.
-- [ ] Run `mise run check` and `./scripts/acceptance.sh`.
+- [x] Run `mise run check` and `./scripts/acceptance.sh`. (the claude_code live case passed; the Accessibility live case cannot run here, as Accessibility is not granted to this shell)
 
 ### Task 5: Run the pull command on its period
 

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-#[cfg(test)]
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
@@ -11,14 +10,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-#[cfg(test)]
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{MissedTickBehavior, interval};
 
 use super::repo_roots::{GitRoots, RepoLookup};
 use super::{Ctx, Emission, Provider, ProviderError};
-use crate::config::ClaudeRoot;
+use crate::config::{ClaudeImport, ClaudeRoot};
 use crate::runtime::buffer::BufferHandle;
 use crate::runtime::{self, Cursor, KeySource, Kind, RecordDraft, Timestamp};
 
@@ -29,7 +27,7 @@ pub const READ_BUDGET: ReadBudget = ReadBudget {
 
 const TRANSCRIPT_EXTENSION: &str = "jsonl";
 const CURSOR_VERSION: u32 = 1;
-#[cfg(test)]
+const IMPORT_PROFILE: &str = "claude";
 const HEAD_HEX_CHARS: usize = 16;
 const COMMAND_SEPARATORS: &str = "\"'`;|&()<>=,";
 const PATH_TRAILERS: &[char] = &[':', ',', '.'];
@@ -46,6 +44,15 @@ enum Flow {
     RuntimeGone,
 }
 
+#[derive(Clone, Copy)]
+struct Reading<'a> {
+    profile: &'a str,
+    identity: Identity,
+    touches: Touches,
+    since: Option<Timestamp>,
+    device: Option<&'a str>,
+}
+
 impl ClaudeCodeProvider {
     pub fn new(cursors: BufferHandle) -> ClaudeCodeProvider {
         ClaudeCodeProvider {
@@ -59,14 +66,46 @@ impl ClaudeCodeProvider {
     async fn tick(
         &mut self,
         roots: &[ClaudeRoot],
+        imports: &[ClaudeImport],
         out: &Sender<Emission>,
     ) -> Result<Flow, ProviderError> {
         for ClaudeRoot { profile, projects } in roots {
             let Some(paths) = self.transcripts_in(projects) else {
                 continue;
             };
+            let reading = Reading {
+                profile,
+                identity: Identity::Inode,
+                touches: Touches::Collected,
+                since: None,
+                device: None,
+            };
             for path in paths {
-                match self.ship_file(&path, profile, out).await? {
+                match self.ship_file(&path, reading, out).await? {
+                    Flow::Continue => {}
+                    Flow::RuntimeGone => return Ok(Flow::RuntimeGone),
+                }
+            }
+        }
+        for ClaudeImport {
+            device,
+            projects,
+            since,
+            ..
+        } in imports
+        {
+            let Some(paths) = self.transcripts_in(projects) else {
+                continue;
+            };
+            let reading = Reading {
+                profile: IMPORT_PROFILE,
+                identity: Identity::Head,
+                touches: Touches::Skipped,
+                since: Some(*since),
+                device: Some(device),
+            };
+            for path in paths {
+                match self.ship_file(&path, reading, out).await? {
                     Flow::Continue => {}
                     Flow::RuntimeGone => return Ok(Flow::RuntimeGone),
                 }
@@ -97,17 +136,17 @@ impl ClaudeCodeProvider {
     async fn ship_file(
         &mut self,
         path: &Path,
-        profile: &str,
+        reading: Reading<'_>,
         out: &Sender<Emission>,
     ) -> Result<Flow, ProviderError> {
         let mut cursor = self.cursor_for(path).await?;
         loop {
             let source = Source {
-                profile,
+                profile: reading.profile,
                 repos: &self.repos,
-                identity: Identity::Inode,
-                touches: Touches::Collected,
-                since: None,
+                identity: reading.identity,
+                touches: reading.touches,
+                since: reading.since,
             };
             let increment = match read_increment(path, source, cursor, READ_BUDGET) {
                 Ok(increment) => {
@@ -139,6 +178,10 @@ impl ClaudeCodeProvider {
                 value: advanced.encode(),
             };
             let (emission, committed) = Emission::awaiting_buffer(drafts, Some(stored));
+            let emission = match reading.device {
+                Some(device) => emission.for_device(device.to_string()),
+                None => emission,
+            };
             if out.send(emission).await.is_err() {
                 return Ok(Flow::RuntimeGone);
             }
@@ -187,11 +230,12 @@ impl Provider for ClaudeCodeProvider {
 
     async fn run(&mut self, ctx: Ctx, out: Sender<Emission>) -> Result<(), ProviderError> {
         let roots = ctx.config.claude_code.roots.clone();
+        let imports = ctx.config.claude_code.imports.clone();
         let mut ticker = interval(Duration::from_secs(ctx.config.claude_code.poll_interval));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            match self.tick(&roots, &out).await? {
+            match self.tick(&roots, &imports, &out).await? {
                 Flow::Continue => {}
                 Flow::RuntimeGone => {
                     tracing::info!("the runtime is gone, so the Claude Code provider stops");
@@ -304,14 +348,12 @@ pub struct Increment {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Identity {
     Inode,
-    #[cfg(test)]
     Head,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Touches {
     Collected,
-    #[cfg(test)]
     Skipped,
 }
 
@@ -452,7 +494,6 @@ pub fn read_increment(
                 head: None,
             },
         },
-        #[cfg(test)]
         Identity::Head => {
             let Some(head) = head_digest(path)? else {
                 return Ok(None);
@@ -560,7 +601,6 @@ pub fn read_increment(
     }))
 }
 
-#[cfg(test)]
 fn head_digest(path: &Path) -> io::Result<Option<String>> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut first_line = Vec::new();
@@ -600,7 +640,6 @@ pub fn drafts_from_line(line: &Value, context: &LineContext) -> LineOutcome {
                         outcome.drafts.push(draft);
                     }
                 }
-                #[cfg(test)]
                 Touches::Skipped => {}
             }
             outcome
@@ -2071,11 +2110,12 @@ mod tests {
             records,
             cursor,
             committed,
+            device,
             ..
         }) = inbox.recv().await
         {
             handle
-                .enqueue(records.clone(), cursor, None)
+                .enqueue(records.clone(), cursor, device)
                 .await
                 .expect("the emission could not be buffered");
             emitted.push(records);
@@ -2100,9 +2140,21 @@ mod tests {
         roots: &[ClaudeRoot],
         handle: &BufferHandle,
     ) -> Vec<Vec<RecordDraft>> {
+        tick_with(provider, roots, &[], handle).await
+    }
+
+    async fn tick_with(
+        provider: &mut ClaudeCodeProvider,
+        roots: &[ClaudeRoot],
+        imports: &[ClaudeImport],
+        handle: &BufferHandle,
+    ) -> Vec<Vec<RecordDraft>> {
         let (out, inbox) = channel(4);
         let committer = tokio::spawn(commit_into(handle.clone(), inbox));
-        let flow = provider.tick(roots, &out).await.expect("the tick failed");
+        let flow = provider
+            .tick(roots, imports, &out)
+            .await
+            .expect("the tick failed");
         match flow {
             Flow::Continue => {}
             Flow::RuntimeGone => panic!("the runtime is still there"),
@@ -2323,7 +2375,7 @@ mod tests {
         let (out, inbox) = channel(4);
         let dropping = tokio::spawn(drop_uncommitted(inbox));
         provider
-            .tick(&roots, &out)
+            .tick(&roots, &[], &out)
             .await
             .expect("an unbuffered emission is not a provider failure");
         drop(out);
@@ -2374,6 +2426,173 @@ mod tests {
         buffer.close().await.expect("the buffer did not close");
     }
 
+    const IMPORT_DEVICE: &str = "imported-device";
+
+    fn import_in(transcripts: &TempTranscripts, since: Timestamp) -> ClaudeImport {
+        ClaudeImport {
+            device: IMPORT_DEVICE.to_string(),
+            projects: transcripts.path.join("import"),
+            since,
+            pull: None,
+        }
+    }
+
+    fn write_import_session(import: &ClaudeImport, text: &str) {
+        let project = import.projects.join("-Users-o-Projects-app");
+        fs::create_dir_all(&project).expect("the import project could not be created");
+        fs::write(project.join(format!("{SESSION}.jsonl")), text)
+            .expect("the imported transcript could not be written");
+    }
+
+    async fn tick_emissions(
+        provider: &mut ClaudeCodeProvider,
+        roots: &[ClaudeRoot],
+        imports: &[ClaudeImport],
+        handle: &BufferHandle,
+    ) -> Vec<(Option<String>, Vec<RecordDraft>)> {
+        let (out, mut inbox) = channel(4);
+        let handle = handle.clone();
+        let committer = tokio::spawn(async move {
+            let mut emitted = Vec::new();
+            while let Some(Emission {
+                records,
+                cursor,
+                committed,
+                device,
+                ..
+            }) = inbox.recv().await
+            {
+                handle
+                    .enqueue(records.clone(), cursor, device.clone())
+                    .await
+                    .expect("the emission could not be buffered");
+                emitted.push((device, records));
+                let Some(committed) = committed else {
+                    continue;
+                };
+                let _ = committed.send(());
+            }
+            emitted
+        });
+        let flow = provider
+            .tick(roots, imports, &out)
+            .await
+            .expect("the tick failed");
+        match flow {
+            Flow::Continue => {}
+            Flow::RuntimeGone => panic!("the runtime is still there"),
+        }
+        drop(out);
+        committer.await.expect("the committer panicked")
+    }
+
+    #[tokio::test]
+    async fn an_import_folder_ships_under_its_device_with_the_fixed_profile_and_no_touches() {
+        let transcripts = TempTranscripts::new("provider-import");
+        let import = import_in(&transcripts, ts(0));
+        write_import_session(&import, FIXTURE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let emitted = tick_emissions(&mut provider, &[], &[import], &buffer.handle()).await;
+
+        assert!(!emitted.is_empty());
+        let mut shipped = Vec::new();
+        for (device, records) in emitted {
+            assert_eq!(device.as_deref(), Some(IMPORT_DEVICE));
+            shipped.extend(records);
+        }
+        assert_eq!(shipped.len(), 14);
+        for draft in &shipped {
+            assert_ne!(draft.kind, Kind::Touch);
+            if draft.kind == Kind::Message {
+                assert_eq!(draft.payload["profile"], json!("claude"));
+            }
+        }
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_local_root_in_the_same_tick_keeps_the_daemon_device() {
+        let transcripts = TempTranscripts::new("provider-import-and-local");
+        transcripts.write(FIXTURE);
+        let import = import_in(&transcripts, ts(0));
+        write_import_session(&import, &prompt_line(1));
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let emitted = tick_emissions(
+            &mut provider,
+            &[transcripts.root()],
+            &[import],
+            &buffer.handle(),
+        )
+        .await;
+
+        let devices: Vec<Option<&str>> = emitted
+            .iter()
+            .map(|(device, _)| device.as_deref())
+            .collect();
+        assert_eq!(devices, vec![None, Some(IMPORT_DEVICE)]);
+        assert_eq!(emitted[0].1.len(), 14);
+        assert_eq!(emitted[1].1.len(), 1);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn an_import_drops_messages_before_since_and_does_not_resend_after_a_refill() {
+        let transcripts = TempTranscripts::new("provider-import-since");
+        let import = import_in(&transcripts, ts(30));
+        write_import_session(&import, FIXTURE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let imports = [import.clone()];
+
+        let first = tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        let first = flattened(first.into_iter().map(|(_, records)| records).collect());
+        for draft in &first {
+            assert_ne!(draft.kind, Kind::Message);
+        }
+
+        let refilled = format!("{FIXTURE}{}", prompt_line(1));
+        let project = import.projects.join("-Users-o-Projects-app");
+        let staged = transcripts.path.join("staged-import.tmp");
+        fs::write(&staged, &refilled).expect("the refill could not be staged");
+        fs::rename(&staged, project.join(format!("{SESSION}.jsonl")))
+            .expect("the refill could not be moved");
+        let second = tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        let second = flattened(second.into_iter().map(|(_, records)| records).collect());
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].payload["uuid"], json!("prompt-1"));
+
+        let third = tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        assert!(third.is_empty());
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_missing_import_folder_is_skipped_without_failing_the_tick() {
+        let transcripts = TempTranscripts::new("provider-import-missing");
+        transcripts.write(FIXTURE);
+        let import = import_in(&transcripts, ts(0));
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let emitted = tick_emissions(
+            &mut provider,
+            &[transcripts.root()],
+            &[import],
+            &buffer.handle(),
+        )
+        .await;
+
+        assert_eq!(
+            flattened(emitted.into_iter().map(|(_, r)| r).collect()).len(),
+            14
+        );
+        buffer.close().await.expect("the buffer did not close");
+    }
+
     #[tokio::test]
     async fn a_buffer_that_refuses_cursor_reads_fails_the_provider() {
         let transcripts = TempTranscripts::new("provider-closed-buffer");
@@ -2383,7 +2602,7 @@ mod tests {
         buffer.close().await.expect("the buffer did not close");
 
         let (out, _inbox) = channel(4);
-        let outcome = provider.tick(&[transcripts.root()], &out).await;
+        let outcome = provider.tick(&[transcripts.root()], &[], &out).await;
 
         let Err(ProviderError(reason)) = outcome else {
             panic!("a refused cursor read must fail the provider");
