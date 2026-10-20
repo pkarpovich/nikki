@@ -1214,6 +1214,7 @@ mod tests {
                     key: PROFILE.to_string(),
                     value: state.encode(),
                 }),
+                None,
             )
             .await
             .expect("the cursor could not be stored");

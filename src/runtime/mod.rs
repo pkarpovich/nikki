@@ -314,9 +314,10 @@ async fn store(records: &BufferHandle, ship_now: &ShipNow, emission: Emission) {
         cursor,
         committed,
         ships_before_commit,
+        device,
     } = emission;
     let count = drafts.len();
-    let buffered = match records.enqueue(drafts, cursor).await {
+    let buffered = match records.enqueue(drafts, cursor, device).await {
         Ok(envelopes) => envelopes,
         Err(error) => {
             tracing::error!(%error, count, "records could not be buffered");

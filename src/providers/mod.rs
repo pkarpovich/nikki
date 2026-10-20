@@ -32,6 +32,7 @@ pub struct Emission {
     pub cursor: Option<Cursor>,
     pub committed: Option<oneshot::Sender<()>>,
     pub ships_before_commit: bool,
+    pub device: Option<String>,
 }
 
 impl Emission {
@@ -41,6 +42,7 @@ impl Emission {
             cursor: None,
             committed: None,
             ships_before_commit: false,
+            device: None,
         }
     }
 
@@ -54,6 +56,7 @@ impl Emission {
             cursor,
             committed: Some(committed),
             ships_before_commit: true,
+            device: None,
         };
         (emission, receipt)
     }
@@ -68,8 +71,15 @@ impl Emission {
             cursor,
             committed: Some(committed),
             ships_before_commit: false,
+            device: None,
         };
         (emission, receipt)
+    }
+
+    #[cfg(test)]
+    pub fn for_device(mut self, device: String) -> Emission {
+        self.device = Some(device);
+        self
     }
 
     #[cfg(test)]
@@ -366,10 +376,18 @@ pub(crate) mod tests {
             cursor,
             committed,
             ships_before_commit,
+            device,
         } = Emission::new(Vec::new());
         assert!(records.is_empty());
         assert!(cursor.is_none());
         assert!(committed.is_none());
         assert!(!ships_before_commit);
+        assert!(device.is_none());
+    }
+
+    #[test]
+    fn for_device_sets_the_override() {
+        let emission = Emission::new(Vec::new()).for_device("other".to_string());
+        assert_eq!(emission.device.as_deref(), Some("other"));
     }
 }

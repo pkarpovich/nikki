@@ -1804,7 +1804,7 @@ mod tests {
         }) = inbox.recv().await
         {
             handle
-                .enqueue(records.clone(), cursor)
+                .enqueue(records.clone(), cursor, None)
                 .await
                 .expect("the emission could not be buffered");
             emitted.push(records);
@@ -2141,6 +2141,7 @@ mod tests {
             cursor,
             committed,
             ships_before_commit,
+            ..
         }) = inbox.recv().await
         else {
             panic!("the provider stopped without emitting");
@@ -2153,7 +2154,7 @@ mod tests {
         assert_eq!(*provider, runtime::Provider::ClaudeCode);
         assert_eq!(*key, transcripts.session().to_string_lossy());
         handle
-            .enqueue(records, cursor)
+            .enqueue(records, cursor, None)
             .await
             .expect("the emission could not be buffered");
         let Some(committed) = committed else {

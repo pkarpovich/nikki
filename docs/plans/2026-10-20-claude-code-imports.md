@@ -362,20 +362,20 @@ so that `drafts_from_line` stays the single entry point.
 - Modify: `src/runtime/mod.rs`
 - Modify: `src/runtime/buffer.rs`
 
-- [ ] Add `device: Option<String>` to `Emission`, set to `None` in `new`, `awaiting_commit`,
+- [x] Add `device: Option<String>` to `Emission`, set to `None` in `new`, `awaiting_commit`,
   `awaiting_buffer` and the `#[cfg(test)]` constructor, and add `for_device(self, device: String)`.
-- [ ] Thread it through `store` into `BufferHandle::enqueue(drafts, cursor, device)`, the
+- [x] Thread it through `store` into `BufferHandle::enqueue(drafts, cursor, device)`, the
   `Command::Enqueue` variant and `fn enqueue`. Drafts are sealed with the override when present.
   The overflow marker always uses the daemon device.
-- [ ] Update every existing `enqueue` call site, including tests, with `None`.
-- [ ] Write buffer tests:
+- [x] Update every existing `enqueue` call site, including tests, with `None`.
+- [x] Write buffer tests:
   - an emission with an override seals envelopes whose `device` is the override and whose
     `dedup_key` equals the key computed for the override device;
   - `seq` keeps increasing across mixed-device enqueues;
   - an overflow triggered by an override enqueue writes its marker under the daemon device.
-- [ ] Write a test that an enqueue without an override is byte-for-byte what it was (an existing test
+- [x] Write a test that an enqueue without an override is byte-for-byte what it was (an existing test
   passing unchanged is enough if it asserts the device).
-- [ ] Run `mise run check`.
+- [x] Run `mise run check`.
 
 ### Task 3: Head identity, `since` and touch suppression in the reader
 

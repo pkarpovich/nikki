@@ -150,10 +150,12 @@ impl BufferHandle {
         &self,
         drafts: Vec<RecordDraft>,
         cursor: Option<Cursor>,
+        device: Option<String>,
     ) -> Result<Vec<Envelope>, BufferError> {
         self.call(move |reply| Command::Enqueue {
             drafts,
             cursor,
+            device,
             reply,
         })
         .await
@@ -224,6 +226,7 @@ enum Command {
     Enqueue {
         drafts: Vec<RecordDraft>,
         cursor: Option<Cursor>,
+        device: Option<String>,
         reply: oneshot::Sender<Result<Vec<Envelope>, BufferError>>,
     },
     TakeBatch {
@@ -267,6 +270,7 @@ fn serve(
             Command::Enqueue {
                 drafts,
                 cursor,
+                device: record_device,
                 reply,
             } => {
                 let _ = reply.send(enqueue(
@@ -276,6 +280,7 @@ fn serve(
                     &redactor,
                     drafts,
                     cursor,
+                    record_device,
                 ));
             }
             Command::TakeBatch { limit, reply } => {
@@ -334,7 +339,9 @@ fn enqueue(
     redactor: &Redactor,
     drafts: Vec<RecordDraft>,
     cursor: Option<Cursor>,
+    record_device: Option<String>,
 ) -> Result<Vec<Envelope>, BufferError> {
+    let record_device = record_device.as_deref().unwrap_or(device);
     let transaction = connection.transaction()?;
     let created_at = Timestamp::now().to_rfc3339();
     let mut seq = read_seq(&transaction)?;
@@ -343,7 +350,7 @@ fn enqueue(
     for mut draft in drafts {
         redactor.apply(&mut draft.payload);
         seq += 1;
-        let envelope = draft.into_envelope(device, seq);
+        let envelope = draft.into_envelope(record_device, seq);
         insert_pending(&transaction, &envelope, &created_at)?;
         sealed.push(envelope);
     }
@@ -755,7 +762,7 @@ mod tests {
         let handle = buffer.handle();
 
         handle
-            .enqueue(vec![tick(1_787_666_152_481)], None)
+            .enqueue(vec![tick(1_787_666_152_481)], None, None)
             .await
             .expect("the first batch could not be enqueued");
         state
@@ -767,7 +774,7 @@ mod tests {
             .expect("the counter could not be corrupted");
 
         let error = handle
-            .enqueue(vec![tick(1_787_666_152_482)], None)
+            .enqueue(vec![tick(1_787_666_152_482)], None, None)
             .await
             .expect_err("a corrupt counter must not be guessed at");
 
@@ -795,6 +802,7 @@ mod tests {
             .enqueue(
                 vec![tick(1_787_666_152_481), visit(929_269)],
                 Some(browser_cursor("929269")),
+                None,
             )
             .await
             .expect("the batch could not be enqueued");
@@ -834,6 +842,7 @@ mod tests {
             .enqueue(
                 vec![tick(1_787_666_152_481)],
                 Some(browser_cursor("929269")),
+                None,
             )
             .await
             .expect_err("the refused insert must fail the enqueue");
@@ -851,7 +860,7 @@ mod tests {
             .execute_batch("DROP TRIGGER refuse")
             .expect("the trigger could not be dropped");
         let sealed = handle
-            .enqueue(vec![tick(1_787_666_152_481)], None)
+            .enqueue(vec![tick(1_787_666_152_481)], None, None)
             .await
             .expect("the retry could not be enqueued");
         assert_eq!(sealed[0].seq, 1);
@@ -866,7 +875,7 @@ mod tests {
         let buffer = open(&state, 1_000, 1_000_000);
         let sealed = buffer
             .handle()
-            .enqueue(vec![tick(1), tick(2), tick(3)], None)
+            .enqueue(vec![tick(1), tick(2), tick(3)], None, None)
             .await
             .expect("the first batch could not be enqueued");
         assert_eq!(sealed[2].seq, 3);
@@ -875,7 +884,7 @@ mod tests {
         let buffer = open(&state, 1_000, 1_000_000);
         let sealed = buffer
             .handle()
-            .enqueue(vec![tick(4)], None)
+            .enqueue(vec![tick(4)], None, None)
             .await
             .expect("the second batch could not be enqueued");
         assert_eq!(sealed[0].seq, 4);
@@ -889,7 +898,11 @@ mod tests {
 
         let sealed = buffer
             .handle()
-            .enqueue(vec![tick(1_787_666_152_481), tick(1_787_666_152_481)], None)
+            .enqueue(
+                vec![tick(1_787_666_152_481), tick(1_787_666_152_481)],
+                None,
+                None,
+            )
             .await
             .expect("the batch could not be enqueued");
 
@@ -908,7 +921,7 @@ mod tests {
 
         for index in 0..12 {
             handle
-                .enqueue(vec![tick(index)], None)
+                .enqueue(vec![tick(index)], None, None)
                 .await
                 .expect("a record could not be enqueued");
         }
@@ -931,7 +944,7 @@ mod tests {
 
         for index in 0..30 {
             handle
-                .enqueue(vec![tick(index)], None)
+                .enqueue(vec![tick(index)], None, None)
                 .await
                 .expect("a record could not be enqueued");
         }
@@ -953,11 +966,11 @@ mod tests {
         let handle = buffer.handle();
 
         handle
-            .enqueue(vec![tick(1), tick(2), tick(3)], None)
+            .enqueue(vec![tick(1), tick(2), tick(3)], None, None)
             .await
             .expect("the first batch could not be enqueued");
         let sealed = handle
-            .enqueue(vec![tick(4)], None)
+            .enqueue(vec![tick(4)], None, None)
             .await
             .expect("the overflowing batch could not be enqueued");
 
@@ -983,7 +996,7 @@ mod tests {
         let handle = buffer.handle();
 
         handle
-            .enqueue(vec![tick(1), tick(2), tick(3)], None)
+            .enqueue(vec![tick(1), tick(2), tick(3)], None, None)
             .await
             .expect("the overflowing batch could not be enqueued");
 
@@ -999,13 +1012,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_override_device_seals_the_drafts_and_derives_their_keys() {
+        let state = TempState::new("override-device");
+        let buffer = open(&state, 1_000, 1_000_000);
+        let handle = buffer.handle();
+
+        let sealed = handle
+            .enqueue(
+                vec![tick(1_787_666_152_481)],
+                None,
+                Some("imported".to_string()),
+            )
+            .await
+            .expect("the batch could not be enqueued");
+
+        assert_eq!(sealed[0].device, "imported");
+        assert_eq!(
+            sealed[0].dedup_key,
+            crate::runtime::dedup::windows_key("imported", Kind::Tick, 1_787_666_152_481, 1)
+        );
+
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn seq_keeps_increasing_across_mixed_device_enqueues() {
+        let state = TempState::new("mixed-devices");
+        let buffer = open(&state, 1_000, 1_000_000);
+        let handle = buffer.handle();
+
+        let own = handle
+            .enqueue(vec![tick(1)], None, None)
+            .await
+            .expect("the own batch could not be enqueued");
+        let imported = handle
+            .enqueue(vec![tick(2)], None, Some("imported".to_string()))
+            .await
+            .expect("the imported batch could not be enqueued");
+        let own_again = handle
+            .enqueue(vec![tick(3)], None, None)
+            .await
+            .expect("the second own batch could not be enqueued");
+
+        assert_eq!(own[0].device, "mbp-21");
+        assert_eq!(imported[0].device, "imported");
+        assert_eq!(own_again[0].device, "mbp-21");
+        assert_eq!([own[0].seq, imported[0].seq, own_again[0].seq], [1, 2, 3]);
+
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn an_overflow_caused_by_an_override_enqueue_is_marked_under_the_daemon_device() {
+        let state = TempState::new("override-overflow");
+        let buffer = open(&state, 2, 1_000_000);
+        let handle = buffer.handle();
+
+        let sealed = handle
+            .enqueue(
+                vec![tick(1), tick(2), tick(3)],
+                None,
+                Some("imported".to_string()),
+            )
+            .await
+            .expect("the overflowing batch could not be enqueued");
+
+        let marker = sealed
+            .iter()
+            .find(|envelope| envelope.kind == Kind::BufferOverflow)
+            .expect("the overflow marker is missing");
+        assert_eq!(marker.device, "mbp-21");
+        assert!(
+            sealed
+                .iter()
+                .filter(|envelope| envelope.kind == Kind::Tick)
+                .all(|envelope| envelope.device == "imported")
+        );
+
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
     async fn take_and_delete_round_trip_in_order() {
         let state = TempState::new("take-delete");
         let buffer = open(&state, 1_000, 1_000_000);
         let handle = buffer.handle();
 
         handle
-            .enqueue(vec![tick(1), tick(2), tick(3), tick(4)], None)
+            .enqueue(vec![tick(1), tick(2), tick(3), tick(4)], None, None)
             .await
             .expect("the batch could not be enqueued");
 
@@ -1049,7 +1143,7 @@ mod tests {
             drafts.push(tick(index as i64));
         }
         handle
-            .enqueue(drafts, None)
+            .enqueue(drafts, None, None)
             .await
             .expect("the batch could not be enqueued");
 
@@ -1076,7 +1170,7 @@ mod tests {
         let handle = buffer.handle();
 
         handle
-            .enqueue(vec![tick(1), tick(2)], None)
+            .enqueue(vec![tick(1), tick(2)], None, None)
             .await
             .expect("the batch could not be enqueued");
         handle.flush_now().await.expect("the flush failed");
@@ -1094,7 +1188,7 @@ mod tests {
         buffer.close().await.expect("the buffer did not close");
 
         let error = handle
-            .enqueue(vec![tick(1)], None)
+            .enqueue(vec![tick(1)], None, None)
             .await
             .expect_err("a closed buffer must refuse work");
         match error {
@@ -1124,7 +1218,7 @@ mod tests {
                         Provider::ClaudeCode => message(index),
                     };
                     handle
-                        .enqueue(vec![draft], None)
+                        .enqueue(vec![draft], None, None)
                         .await
                         .expect("a provider could not enqueue");
                 }
