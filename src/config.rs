@@ -3,15 +3,18 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use chrono::DateTime;
 use serde::Deserialize;
 use url::Url;
 
+use crate::runtime::Timestamp;
 use crate::runtime::buffer::OVERFLOW_HEADROOM_BYTES;
 
 const TICK_INTERVAL_MIN: i64 = 1;
 const TICK_INTERVAL_MAX: i64 = 3600;
 const HISTORY_POLL_INTERVAL_MIN: u64 = 1;
 const CLAUDE_CODE_POLL_INTERVAL_MIN: u64 = 1;
+const CLAUDE_CODE_PULL_EVERY_MIN: u64 = 1;
 
 const DEFAULT_CONFIG_RELATIVE: &str = ".config/nikki/config.toml";
 const DEFAULT_STATE_RELATIVE: &str = "Library/Application Support/nikki";
@@ -111,7 +114,23 @@ pub struct Browser {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeCode {
     pub roots: Vec<ClaudeRoot>,
+    pub imports: Vec<ClaudeImport>,
     pub poll_interval: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeImport {
+    pub device: String,
+    pub projects: PathBuf,
+    pub since: Timestamp,
+    pub pull: Option<Pull>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pull {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub every: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,7 +259,7 @@ fn parse(
         });
     }
 
-    let claude_code = claude_code_from(claude_code, home)?;
+    let claude_code = claude_code_from(claude_code, &device, home)?;
 
     Ok(Config {
         service_url,
@@ -258,10 +277,12 @@ fn parse(
 
 fn claude_code_from(
     section: FileClaudeCode,
+    daemon_device: &str,
     home: Option<&Path>,
 ) -> Result<ClaudeCode, ConfigError> {
     let FileClaudeCode {
         roots,
+        import,
         poll_interval,
     } = section;
 
@@ -291,39 +312,155 @@ fn claude_code_from(
         resolved.push(root);
     }
 
+    let mut imports: Vec<ClaudeImport> = Vec::new();
+    for entry in import {
+        let import = claude_import_from(entry, daemon_device, home)?;
+        for existing in &imports {
+            if existing.device == import.device {
+                return Err(ConfigError::Invalid {
+                    field: "claude_code.import.device",
+                    reason: format!(
+                        "two imports name the device `{}`, and their records would be indistinguishable",
+                        import.device
+                    ),
+                });
+            }
+        }
+        imports.push(import);
+    }
+
     Ok(ClaudeCode {
         roots: resolved,
+        imports,
         poll_interval,
+    })
+}
+
+fn claude_import_from(
+    entry: FileClaudeImport,
+    daemon_device: &str,
+    home: Option<&Path>,
+) -> Result<ClaudeImport, ConfigError> {
+    let FileClaudeImport {
+        device,
+        dir,
+        since,
+        command,
+        every,
+    } = entry;
+
+    let device = required(device, "claude_code.import.device")?;
+    if device == daemon_device {
+        return Err(ConfigError::Invalid {
+            field: "claude_code.import.device",
+            reason: format!(
+                "`{device}` is this daemon's own device, and imported records would be indistinguishable from this machine's"
+            ),
+        });
+    }
+
+    let dir = required(dir, "claude_code.import.dir")?;
+    let projects = expand_home(&dir, home, "claude_code.import.dir")?;
+
+    let since = required(since, "claude_code.import.since")?;
+    let since = match DateTime::parse_from_rfc3339(&since) {
+        Ok(since) => Timestamp::from_millis(since.timestamp_millis()),
+        Err(error) => {
+            return Err(ConfigError::Invalid {
+                field: "claude_code.import.since",
+                reason: format!("`{since}` is not an RFC 3339 time with an offset: {error}"),
+            });
+        }
+    };
+
+    let pull = match (command, every) {
+        (None, None) => None,
+        (Some(_), None) => {
+            return Err(ConfigError::Invalid {
+                field: "claude_code.import.every",
+                reason:
+                    "is required with `command`, because the period is how often the command runs"
+                        .to_string(),
+            });
+        }
+        (None, Some(_)) => {
+            return Err(ConfigError::Invalid {
+                field: "claude_code.import.command",
+                reason: "is required with `every`, because a period without a command runs nothing"
+                    .to_string(),
+            });
+        }
+        (Some(command), Some(every)) => Some(pull_from(command, every, home)?),
+    };
+
+    Ok(ClaudeImport {
+        device,
+        projects,
+        since,
+        pull,
+    })
+}
+
+fn pull_from(command: Vec<String>, every: u64, home: Option<&Path>) -> Result<Pull, ConfigError> {
+    let mut argv = command.into_iter();
+    let Some(program) = argv.next() else {
+        return Err(ConfigError::Invalid {
+            field: "claude_code.import.command",
+            reason: "must name a program, and an empty argv runs nothing".to_string(),
+        });
+    };
+    if every < CLAUDE_CODE_PULL_EVERY_MIN {
+        return Err(ConfigError::Invalid {
+            field: "claude_code.import.every",
+            reason: format!(
+                "{every} is below {CLAUDE_CODE_PULL_EVERY_MIN} second, and a period of zero would run the command on every poll"
+            ),
+        });
+    }
+    let program = expand_home(&program, home, "claude_code.import.command")?;
+    Ok(Pull {
+        program,
+        args: argv.collect(),
+        every,
     })
 }
 
 #[cfg(test)]
 pub fn default_claude_code(home: &Path) -> Result<ClaudeCode, ConfigError> {
-    claude_code_from(FileClaudeCode::default(), Some(home))
+    claude_code_from(FileClaudeCode::default(), "", Some(home))
 }
 
-fn claude_root_from(root: &str, home: Option<&Path>) -> Result<ClaudeRoot, ConfigError> {
-    let field = "claude_code.roots";
-    let path = match root.strip_prefix("~/") {
+fn expand_home(
+    value: &str,
+    home: Option<&Path>,
+    field: &'static str,
+) -> Result<PathBuf, ConfigError> {
+    let path = match value.strip_prefix("~/") {
         Some(rest) => {
             let Some(home) = home else {
                 return Err(ConfigError::Invalid {
                     field,
-                    reason: format!("`{root}` starts with `~/`, and HOME is not set"),
+                    reason: format!("`{value}` starts with `~/`, and HOME is not set"),
                 });
             };
             home.join(rest)
         }
-        None => PathBuf::from(root),
+        None => PathBuf::from(value),
     };
     if !path.is_absolute() {
         return Err(ConfigError::Invalid {
             field,
             reason: format!(
-                "`{root}` is neither absolute nor under `~/`, and a relative root would depend on the directory the daemon was started from"
+                "`{value}` is neither absolute nor under `~/`, and a relative path would depend on the directory the daemon was started from"
             ),
         });
     }
+    Ok(path)
+}
+
+fn claude_root_from(root: &str, home: Option<&Path>) -> Result<ClaudeRoot, ConfigError> {
+    let field = "claude_code.roots";
+    let path = expand_home(root, home, field)?;
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Err(ConfigError::Invalid {
             field,
@@ -449,14 +586,27 @@ struct FileBrowser {
 struct FileClaudeCode {
     #[serde(default = "default_claude_code_roots")]
     roots: Vec<String>,
+    #[serde(default)]
+    import: Vec<FileClaudeImport>,
     #[serde(default = "default_claude_code_poll_interval")]
     poll_interval: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileClaudeImport {
+    device: Option<String>,
+    dir: Option<String>,
+    since: Option<String>,
+    command: Option<Vec<String>>,
+    every: Option<u64>,
 }
 
 impl Default for FileClaudeCode {
     fn default() -> FileClaudeCode {
         FileClaudeCode {
             roots: default_claude_code_roots(),
+            import: Vec::new(),
             poll_interval: default_claude_code_poll_interval(),
         }
     }
@@ -675,6 +825,7 @@ drop = ["title"]
         assert_eq!(
             config.claude_code,
             ClaudeCode {
+                imports: Vec::new(),
                 roots: vec![
                     claude_root("claude", "/Users/someone/.claude/projects"),
                     claude_root("claude-work", "/Users/someone/.claude-work/projects"),
@@ -693,6 +844,7 @@ drop = ["title"]
         assert_eq!(
             config.claude_code,
             ClaudeCode {
+                imports: Vec::new(),
                 roots: vec![
                     claude_root("claude", "/Users/someone/.claude/projects"),
                     claude_root("claude-old", "/Volumes/archive/claude-old/projects"),
@@ -774,6 +926,150 @@ drop = ["title"]
             config.claude_code.roots,
             vec![claude_root("claude", "/Users/someone/.claude/projects")]
         );
+    }
+
+    const IMPORT_SINCE_MILLIS: i64 = 1_792_360_800_000;
+
+    fn import_entry(lines: &str) -> String {
+        format!("[[claude_code.import]]\n{lines}")
+    }
+
+    const IMPORT_FULL_LINES: &str = "device = \"work-laptop\"\ndir = \"~/Library/Application Support/nikki/imports/work-laptop\"\nsince = \"2026-10-19T00:00:00+02:00\"\ncommand = [\"~/.config/nikki/pull.sh\", \"--quiet\"]\nevery = 86400";
+
+    #[test]
+    fn a_full_import_entry_is_resolved() {
+        let config = parse_text(&with_claude_code(&import_entry(IMPORT_FULL_LINES)))
+            .expect("a full import parses");
+        assert_eq!(
+            config.claude_code.imports,
+            vec![ClaudeImport {
+                device: "work-laptop".to_string(),
+                projects: PathBuf::from(
+                    "/Users/someone/Library/Application Support/nikki/imports/work-laptop"
+                ),
+                since: Timestamp::from_millis(IMPORT_SINCE_MILLIS),
+                pull: Some(Pull {
+                    program: PathBuf::from("/Users/someone/.config/nikki/pull.sh"),
+                    args: vec!["--quiet".to_string()],
+                    every: 86400,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_import_entry_without_a_command_has_no_pull() {
+        let lines = "device = \"work-laptop\"\ndir = \"/Volumes/sync/work\"\nsince = \"2026-10-18T22:00:00Z\"";
+        let config = parse_text(&with_claude_code(&import_entry(lines)))
+            .expect("an import without a command parses");
+        assert_eq!(
+            config.claude_code.imports,
+            vec![ClaudeImport {
+                device: "work-laptop".to_string(),
+                projects: PathBuf::from("/Volumes/sync/work"),
+                since: Timestamp::from_millis(IMPORT_SINCE_MILLIS),
+                pull: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn without_import_entries_the_import_list_is_empty() {
+        let config = parse_text(&with_claude_code("poll_interval = 5")).expect("parses");
+        assert_eq!(config.claude_code.imports, Vec::new());
+    }
+
+    #[test]
+    fn an_invalid_import_entry_names_its_field() {
+        let valid_dir = "dir = \"/Volumes/sync/work\"";
+        let valid_since = "since = \"2026-10-19T00:00:00Z\"";
+        let cases = [
+            (
+                "claude_code.import.device",
+                format!("device = \"\"\n{valid_dir}\n{valid_since}"),
+            ),
+            (
+                "claude_code.import.device",
+                format!("device = \"mbp-21\"\n{valid_dir}\n{valid_since}"),
+            ),
+            (
+                "claude_code.import.dir",
+                format!("device = \"work\"\ndir = \"imports/work\"\n{valid_since}"),
+            ),
+            (
+                "claude_code.import.since",
+                format!("device = \"work\"\n{valid_dir}\nsince = \"yesterday\""),
+            ),
+            (
+                "claude_code.import.since",
+                format!("device = \"work\"\n{valid_dir}\nsince = \"2026-10-19T00:00:00\""),
+            ),
+            (
+                "claude_code.import.every",
+                format!("device = \"work\"\n{valid_dir}\n{valid_since}\ncommand = [\"/bin/pull\"]"),
+            ),
+            (
+                "claude_code.import.command",
+                format!("device = \"work\"\n{valid_dir}\n{valid_since}\nevery = 60"),
+            ),
+            (
+                "claude_code.import.command",
+                format!("device = \"work\"\n{valid_dir}\n{valid_since}\ncommand = []\nevery = 60"),
+            ),
+            (
+                "claude_code.import.command",
+                format!(
+                    "device = \"work\"\n{valid_dir}\n{valid_since}\ncommand = [\"pull.sh\"]\nevery = 60"
+                ),
+            ),
+            (
+                "claude_code.import.every",
+                format!(
+                    "device = \"work\"\n{valid_dir}\n{valid_since}\ncommand = [\"/bin/pull\"]\nevery = 0"
+                ),
+            ),
+        ];
+        for (field, lines) in cases {
+            assert_eq!(
+                claude_code_invalid_field(&import_entry(&lines)),
+                field,
+                "for {lines}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_import_field_is_reported_as_missing() {
+        let error = parse_text(&with_claude_code(&import_entry("device = \"work\"")))
+            .expect_err("an import without dir is rejected");
+        match error {
+            ConfigError::Missing { field } => assert_eq!(field, "claude_code.import.dir"),
+            other => panic!("expected a missing field, got {other}"),
+        }
+    }
+
+    #[test]
+    fn two_imports_with_the_same_device_are_rejected() {
+        let one = "device = \"work\"\ndir = \"/Volumes/a\"\nsince = \"2026-10-19T00:00:00Z\"";
+        let two = "device = \"work\"\ndir = \"/Volumes/b\"\nsince = \"2026-10-19T00:00:00Z\"";
+        let section = format!("{}\n{}", import_entry(one), import_entry(two));
+        assert_eq!(
+            claude_code_invalid_field(&section),
+            "claude_code.import.device"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_in_an_import_entry_is_rejected() {
+        let lines = format!("{IMPORT_FULL_LINES}\nevry = 5");
+        let error = parse_text(&with_claude_code(&import_entry(&lines)))
+            .expect_err("a typo in an import is rejected");
+        match error {
+            ConfigError::Parse { source, .. } => {
+                assert!(source.to_string().contains("evry"), "message was {source}")
+            }
+            other => panic!("expected a parse error, got {other}"),
+        }
     }
 
     #[test]

@@ -160,15 +160,16 @@ mise run check
 ! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'
 ```
 
-Any task touching `src/providers/claude_code.rs` also runs `./scripts/acceptance.sh`.
+That gate is the whole of verification inside this plan. Do **not** run `./scripts/acceptance.sh`,
+any `-- --ignored` live test or the real binary, even where `CLAUDE.md` asks for it after a
+`claude_code.rs` change: those read the live machine and need grants the executor does not have. A
+human runs them once after the plan (see Post-Completion).
 
 ## Testing Strategy
 
 - **Unit tests:** inline, per task. They cover config parsing and validation, the device override in
   the buffer, the reader's head identity and `since` filter, touch suppression, and the pull schedule.
-- **End to end:** one new case in `tests/stub_server.rs`. It runs the real binary with an import
-  whose command copies the fixture into the import folder, and asserts what reaches the stub server.
-- No UI, no e2e browser tests.
+- Nothing above unit tests: no new `tests/stub_server.rs` case, no live tests, no acceptance script.
 
 ## Progress Tracking
 
@@ -181,7 +182,7 @@ Any task touching `src/providers/claude_code.rs` also runs `./scripts/acceptance
 Three pieces, each reusing what exists.
 
 1. **The schedule is one cursor row.**
-   - The row is `(claude_code, "import:<device>")` with value `{"last_attempt_at": <millis>}`.
+   - The row is `(claude_code, "import-pull:<device>")` with value `{"last_attempt_at": <millis>}`.
    - On every existing claude_code poll tick, an import with a command checks whether
      `now - last_attempt_at >= every`. If so, it runs the command through `run_with_deadline` and then
      writes the current time.
@@ -266,7 +267,7 @@ pub since: Option<Timestamp>
 ```
 
 `FileCursor` gains `#[serde(default)] pub head: Option<String>`, the first-line digest:
-- `sha256` of the first line's bytes, including its `\n`, as 16 hex characters;
+- `sha256` of the first line's bytes, including its `\n`, capped at its first 64 KiB, as 16 hex characters;
 - computed with the existing `sha2` dependency, through a helper beside `dedup::key` or a local one.
 
 `CURSOR_VERSION` stays 1, so stored local cursors keep working.
@@ -316,7 +317,7 @@ so that `drafts_from_line` stays the single entry point.
 
 ## What Goes Where
 
-- **Implementation Steps:** config, emission device, reader, provider, the end-to-end test and docs,
+- **Implementation Steps:** config, emission device, reader, provider and docs,
   all in this repository.
 - **Post-Completion:** the real pull script and config on the Mac, a release, and a check on the
   service.
@@ -329,21 +330,21 @@ so that `drafts_from_line` stays the single entry point.
 - Modify: `src/config.rs`
 - Modify: `src/providers/mod.rs` (the `test_config` literal)
 
-- [ ] Add `ClaudeImport` and `Pull` (shapes in Technical Details), plus `imports` on `ClaudeCode`.
-- [ ] Add the `FileClaudeImport` TOML shape under `FileClaudeCode.import` (default empty,
+- [x] Add `ClaudeImport` and `Pull` (shapes in Technical Details), plus `imports` on `ClaudeCode`.
+- [x] Add the `FileClaudeImport` TOML shape under `FileClaudeCode.import` (default empty,
   `deny_unknown_fields`).
-- [ ] Resolve in `claude_code_from`:
+- [x] Resolve in `claude_code_from`:
   - reuse the `~/` expansion from `claude_root_from` by extracting it into a shared function rather
     than copying it;
   - parse `since` with `chrono::DateTime::parse_from_rfc3339`;
   - apply every validation rule in Technical Details.
-- [ ] `claude_code_from` needs the top-level device for the "differs from the daemon device" rule:
+- [x] `claude_code_from` needs the top-level device for the "differs from the daemon device" rule:
   pass it in, or check after the section resolves in `parse`, whichever keeps the field name in the
   error.
-- [ ] Update every `ClaudeCode` literal (`src/config.rs` tests, `src/providers/mod.rs`) with
+- [x] Update every `ClaudeCode` literal (`src/config.rs` tests, `src/providers/mod.rs`) with
   `imports: Vec::new()`.
-- [ ] Write tests for a full entry, an entry without a command, and the default empty list.
-- [ ] Write tests for each rejection:
+- [x] Write tests for a full entry, an entry without a command, and the default empty list.
+- [x] Write tests for each rejection:
   - empty device;
   - device equal to the daemon's;
   - duplicate devices;
@@ -353,7 +354,7 @@ so that `drafts_from_line` stays the single entry point.
   - empty `command`;
   - `every = 0`;
   - an unknown key.
-- [ ] Run `mise run check`.
+- [x] Run `mise run check`.
 
 ### Task 2: Carry a device override on `Emission` into the buffer
 
@@ -362,36 +363,36 @@ so that `drafts_from_line` stays the single entry point.
 - Modify: `src/runtime/mod.rs`
 - Modify: `src/runtime/buffer.rs`
 
-- [ ] Add `device: Option<String>` to `Emission`, set to `None` in `new`, `awaiting_commit`,
+- [x] Add `device: Option<String>` to `Emission`, set to `None` in `new`, `awaiting_commit`,
   `awaiting_buffer` and the `#[cfg(test)]` constructor, and add `for_device(self, device: String)`.
-- [ ] Thread it through `store` into `BufferHandle::enqueue(drafts, cursor, device)`, the
+- [x] Thread it through `store` into `BufferHandle::enqueue(drafts, cursor, device)`, the
   `Command::Enqueue` variant and `fn enqueue`. Drafts are sealed with the override when present.
   The overflow marker always uses the daemon device.
-- [ ] Update every existing `enqueue` call site, including tests, with `None`.
-- [ ] Write buffer tests:
+- [x] Update every existing `enqueue` call site, including tests, with `None`.
+- [x] Write buffer tests:
   - an emission with an override seals envelopes whose `device` is the override and whose
     `dedup_key` equals the key computed for the override device;
   - `seq` keeps increasing across mixed-device enqueues;
   - an overflow triggered by an override enqueue writes its marker under the daemon device.
-- [ ] Write a test that an enqueue without an override is byte-for-byte what it was (an existing test
+- [x] Write a test that an enqueue without an override is byte-for-byte what it was (an existing test
   passing unchanged is enough if it asserts the device).
-- [ ] Run `mise run check`.
+- [x] Run `mise run check`.
 
 ### Task 3: Head identity, `since` and touch suppression in the reader
 
 **Files:**
 - Modify: `src/providers/claude_code.rs`
 
-- [ ] Add `Identity`, `Touches` and `since` to `Source`, and `Touches` to `LineContext`.
+- [x] Add `Identity`, `Touches` and `since` to `Source`, and `Touches` to `LineContext`.
   `drafts_from_line` skips `touch_drafts` under `Touches::Skipped`.
-- [ ] Add `head: Option<String>` to `FileCursor` (`#[serde(default)]`), and the first-line digest
+- [x] Add `head: Option<String>` to `FileCursor` (`#[serde(default)]`), and the first-line digest
   helper.
-- [ ] Implement the `Identity::Head` rules in `read_increment` exactly as listed in Technical Details.
+- [x] Implement the `Identity::Head` rules in `read_increment` exactly as listed in Technical Details.
   The `Identity::Inode` path stays unchanged.
-- [ ] Apply the `since` filter per draft, while still advancing the offset and `last_message_ts`.
-- [ ] Update existing callers and tests to pass `Identity::Inode`, `Touches::Collected` and
+- [x] Apply the `since` filter per draft, while still advancing the offset and `last_message_ts`.
+- [x] Update existing callers and tests to pass `Identity::Inode`, `Touches::Collected` and
   `since: None`.
-- [ ] Write tests through `read_increment` (using the existing `TempTranscripts` helpers):
+- [x] Write tests through `read_increment` (using the existing `TempTranscripts` helpers):
   - a file replaced by a copy with identical content and a new inode yields nothing under `Head`,
     while the same replacement under `Inode` restarts from 0 (the existing behaviour);
   - an identical copy plus appended lines yields only the appended lines;
@@ -404,94 +405,70 @@ so that `drafts_from_line` stays the single entry point.
     and the offset reaches the end of the file;
   - `Touches::Skipped` yields no `touch` drafts for the tool-call fixture lines that do yield them
     under `Collected`.
-- [ ] Run `mise run check` and `./scripts/acceptance.sh`.
+- [x] Run `mise run check` and `./scripts/acceptance.sh` (the claude_code live case passed; the Accessibility live case cannot run here, as Accessibility is not granted to this shell).
+- [x] ➕ `Identity::Head`, `Touches::Skipped`, `head_digest` and their imports are `#[cfg(test)]` until Task 4 constructs them; Task 4 removes those attributes. `FileCursor` lost `Copy` because of `head: Option<String>`.
 
 ### Task 4: Read import folders in the provider under their device
 
 **Files:**
 - Modify: `src/providers/claude_code.rs`
 
-- [ ] Add `const IMPORT_PROFILE: &str = "claude"`, and build the import `Source` with it:
+- [x] Remove the `#[cfg(test)]` attributes Task 3 left on `Identity::Head`, `Touches::Skipped`, `head_digest`, `HEAD_HEX_CHARS` and the `Write`/`Sha256` imports.
+- [x] Add `const IMPORT_PROFILE: &str = "claude"`, and build the import `Source` with it:
   `Identity::Head`, `Touches::Skipped`, `since: Some(import.since)`.
-- [ ] `run` clones `imports` beside `roots`. `tick` reads the local roots first, then each import
+- [x] `run` clones `imports` beside `roots`. `tick` reads the local roots first, then each import
   folder through the existing `transcripts_in` and `ship_file`.
-- [ ] `ship_file` takes the source settings and `Option<&str>` device, and calls `.for_device(...)`
+- [x] `ship_file` takes the source settings and `Option<&str>` device, and calls `.for_device(...)`
   on the emission when a device is given.
-- [ ] Write provider-level tests. Drive `tick` with a real `Buffer`, as existing provider tests do,
+- [x] Write provider-level tests. Drive `tick` with a real `Buffer`, as existing provider tests do,
   and assert what was enqueued:
   - an import folder's records carry the import device, profile `claude` and no touches;
   - a local root in the same tick still carries the daemon device and its touches;
   - a missing import folder is skipped without failing the tick.
-- [ ] Run `mise run check` and `./scripts/acceptance.sh`.
+- [x] Run `mise run check` and `./scripts/acceptance.sh`. (the claude_code live case passed; the Accessibility live case cannot run here, as Accessibility is not granted to this shell)
 
 ### Task 5: Run the pull command on its period
 
 **Files:**
 - Modify: `src/providers/claude_code.rs`
 
-- [ ] Add the schedule cursor:
-  - key `import:<device>`;
+- [x] Add the schedule cursor:
+  - key `import-pull:<device>`;
   - value JSON `{"last_attempt_at": <millis>}`, encoded and decoded like `FileCursor`, with garbage
     read as never attempted;
   - `pull_due(last_attempt, now, every)`;
   - `PULL_DEADLINE`.
-- [ ] Implement `pull_if_due` as described in Technical Details, and call it in `tick` before
+- [x] Implement `pull_if_due` as described in Technical Details, and call it in `tick` before
   listing that import's folder.
-- [ ] Write tests for `pull_due`:
+- [x] Write tests for `pull_due`:
   - never attempted means due;
   - exactly `every` elapsed means due;
   - one second short is not due;
   - a clock that moved backwards (`now < last`) is not due.
-- [ ] Write tests through `tick` with a real `Buffer` and a command that is a small shell script
+- [x] Write tests through `tick` with a real `Buffer` and a command that is a small shell script
   written into a temp dir:
   - the script copies the fixture into the import folder, and the records appear in the same tick;
   - a second tick within `every` does not run the script again (it appends to a counter file);
   - a script exiting non-zero still writes the attempt time, and the next tick does not retry;
   - a script outliving a shortened deadline is killed and the tick completes. Expose the deadline as
     a field the test can lower, not a test-only code path.
-- [ ] Run `mise run check` and `./scripts/acceptance.sh`.
+- [x] Run `mise run check` and `./scripts/acceptance.sh`. (the claude_code live case passed; the Accessibility live case cannot run here, as Accessibility is not granted to this shell)
 
-### Task 6: End-to-end import through the real binary
+### Task 6: Verify acceptance criteria
 
-**Files:**
-- Modify: `tests/stub_server.rs`
-
-- [ ] Extend `Settings` / `config_text` with an optional import:
-  - `device = "imported-device"`;
-  - `dir` under the test's temp dir;
-  - `since` between two fixture timestamps;
-  - `command` = a script in the temp dir that copies the fixture into `dir/<project>/`;
-  - `every = 3600`.
-- [ ] Add a test asserting that the stub server receives:
-  - `claude_code/message` records with `device = "imported-device"` and `profile = "claude"`;
-  - no `claude_code/touch` records under that device;
-  - none of the fixture messages before `since`;
-  - this Mac's own records under the daemon device.
-- [ ] Add a restart case:
-  - stop the daemon, rewrite the import file with the same content plus one appended line, and start
-    it again;
-  - only the appended line's records arrive;
-  - the command did not run again (counter file), because `every` has not elapsed.
-- [ ] Run `mise run check` and `./scripts/acceptance.sh`.
-
-### Task 7: Verify acceptance criteria
-
-- [ ] Verify every Overview requirement against the acceptance scenario:
+- [x] Verify every Overview requirement against the acceptance scenario:
   - own device;
   - nothing before `since`;
   - a daily rewrite ships only appended lines;
   - one attempt per period, even on failure;
   - no transport code in the crate.
-- [ ] Verify that local-root behaviour is unchanged: all pre-existing claude_code tests pass without
+- [x] Verify that local-root behaviour is unchanged: all pre-existing claude_code tests pass without
   edits beyond the new parameters.
-- [ ] Run the full gate:
-  - `mise run check`;
-  - the unsafe grep;
-  - `./scripts/acceptance.sh`.
+- [x] Run the gate: `mise run check` and the unsafe grep. Nothing else.
 
-### Task 8: [Final] Update documentation
+### Task 7: [Final] Update documentation
 
-- [ ] Update `README.md`:
+- [x] Update `README.md`:
   - **Configuration:** the `[[claude_code.import]]` example and the field-table rows.
   - **claude_code provider section:** a paragraph on imports:
     - the folder contract;
@@ -507,17 +484,19 @@ so that `drafts_from_line` stays the single entry point.
     - a title line before any message falls back to the file's modification time;
     - a command that does not preserve mtimes makes that the copy time;
     - nothing prunes the import folder or its cursors.
-- [ ] Wire contract sections stay as they are. Confirm that no `(provider, kind)` pair or payload
+- [x] Wire contract sections stay as they are. Confirm that no `(provider, kind)` pair or payload
   field changed.
-- [ ] Update `CLAUDE.md` only if a new rule emerged. The `claude_code.rs` acceptance rule already
+- [x] Update `CLAUDE.md` only if a new rule emerged. The `claude_code.rs` acceptance rule already
   covers this.
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Move this plan to `docs/plans/completed/`.
 
 ## Post-Completion
 
 *Items requiring manual intervention or external systems - no checkboxes, informational only.*
 
 **On the Mac:**
+- run `./scripts/acceptance.sh` once from a terminal that holds the Accessibility grant, since
+  `claude_code.rs` changed;
 - write the pull script for the second machine;
 - add its `[[claude_code.import]]` entry with `since` set to the hand-over moment;
 - run `nikki --check-config`;

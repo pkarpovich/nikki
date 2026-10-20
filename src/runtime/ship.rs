@@ -536,7 +536,7 @@ mod tests {
         }
         buffer
             .handle()
-            .enqueue(drafts, None)
+            .enqueue(drafts, None, None)
             .await
             .expect("the batch could not be enqueued");
     }
@@ -1095,7 +1095,7 @@ mod tests {
         let buffer = open(&leaky, keep_everything());
         buffer
             .handle()
-            .enqueue(vec![visit(1, &url)], None)
+            .enqueue(vec![visit(1, &url)], None, None)
             .await
             .expect("the control record could not be enqueued");
         let control = leaky.envelopes().join("");
@@ -1109,7 +1109,7 @@ mod tests {
         let buffer = open(&state, host_only());
         buffer
             .handle()
-            .enqueue(vec![visit(1, &url)], None)
+            .enqueue(vec![visit(1, &url)], None, None)
             .await
             .expect("the record could not be enqueued");
         let stored = state.envelopes().join("");
@@ -1128,7 +1128,11 @@ mod tests {
         let buffer = open(&state, host_only());
         let sealed = buffer
             .handle()
-            .enqueue(vec![visit(1, "https://example.com/secret?q=secret")], None)
+            .enqueue(
+                vec![visit(1, "https://example.com/secret?q=secret")],
+                None,
+                None,
+            )
             .await
             .expect("the record could not be enqueued");
 

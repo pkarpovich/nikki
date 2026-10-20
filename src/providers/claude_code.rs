@@ -1,43 +1,63 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command;
 use tokio::sync::mpsc::Sender;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{MissedTickBehavior, interval, timeout};
 
 use super::repo_roots::{GitRoots, RepoLookup};
 use super::{Ctx, Emission, Provider, ProviderError};
-use crate::config::ClaudeRoot;
+use crate::config::{ClaudeImport, ClaudeRoot, Pull};
 use crate::runtime::buffer::BufferHandle;
 use crate::runtime::{self, Cursor, KeySource, Kind, RecordDraft, Timestamp};
 
 pub const READ_BUDGET: ReadBudget = ReadBudget {
     max_records: 500,
     max_bytes: 4 * 1024 * 1024,
+    max_scan_bytes: 32 * 1024 * 1024,
 };
 
 const TRANSCRIPT_EXTENSION: &str = "jsonl";
 const CURSOR_VERSION: u32 = 1;
+const IMPORT_PROFILE: &str = "claude";
+const HEAD_HEX_CHARS: usize = 16;
+const PULL_DEADLINE: Duration = Duration::from_secs(10 * 60);
+const STDERR_TAIL_BYTES: usize = 512;
 const COMMAND_SEPARATORS: &str = "\"'`;|&()<>=,";
 const PATH_TRAILERS: &[char] = &[':', ',', '.'];
 
 pub struct ClaudeCodeProvider {
     cursors: BufferHandle,
-    known: HashMap<PathBuf, Option<FileCursor>>,
+    known: HashMap<String, Option<FileCursor>>,
     unreadable: HashSet<PathBuf>,
     repos: GitRoots,
+    pull_deadline: Duration,
 }
 
 enum Flow {
     Continue,
     RuntimeGone,
+}
+
+#[derive(Clone, Copy)]
+struct Reading<'a> {
+    profile: &'a str,
+    identity: Identity,
+    touches: Touches,
+    since: Option<Timestamp>,
+    device: Option<&'a str>,
 }
 
 impl ClaudeCodeProvider {
@@ -47,24 +67,148 @@ impl ClaudeCodeProvider {
             known: HashMap::new(),
             unreadable: HashSet::new(),
             repos: GitRoots::from_env(),
+            pull_deadline: PULL_DEADLINE,
         }
     }
 
     async fn tick(
         &mut self,
         roots: &[ClaudeRoot],
+        imports: &[ClaudeImport],
         out: &Sender<Emission>,
     ) -> Result<Flow, ProviderError> {
         for ClaudeRoot { profile, projects } in roots {
             let Some(paths) = self.transcripts_in(projects) else {
                 continue;
             };
+            let reading = Reading {
+                profile,
+                identity: Identity::Inode,
+                touches: Touches::Collected,
+                since: None,
+                device: None,
+            };
             for path in paths {
-                match self.ship_file(&path, profile, out).await? {
+                match self.ship_file(&path, reading, out).await? {
                     Flow::Continue => {}
                     Flow::RuntimeGone => return Ok(Flow::RuntimeGone),
                 }
             }
+        }
+        for ClaudeImport {
+            device,
+            projects,
+            since,
+            pull,
+        } in imports
+        {
+            if let Some(pull) = pull {
+                match self.pull_if_due(device, pull, out).await? {
+                    Flow::Continue => {}
+                    Flow::RuntimeGone => return Ok(Flow::RuntimeGone),
+                }
+            }
+            let Some(paths) = self.transcripts_in(projects) else {
+                continue;
+            };
+            let reading = Reading {
+                profile: IMPORT_PROFILE,
+                identity: Identity::Head,
+                touches: Touches::Skipped,
+                since: Some(*since),
+                device: Some(device),
+            };
+            for path in paths {
+                match self.ship_file(&path, reading, out).await? {
+                    Flow::Continue => {}
+                    Flow::RuntimeGone => return Ok(Flow::RuntimeGone),
+                }
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    async fn pull_if_due(
+        &mut self,
+        device: &str,
+        pull: &Pull,
+        out: &Sender<Emission>,
+    ) -> Result<Flow, ProviderError> {
+        let key = pull_key(device);
+        let stored = self
+            .cursors
+            .cursor(runtime::Provider::ClaudeCode, key.clone())
+            .await;
+        let stored = match stored {
+            Ok(stored) => stored,
+            Err(error) => {
+                return Err(ProviderError(format!(
+                    "the buffer refused a cursor: {error}"
+                )));
+            }
+        };
+        let last_attempt = match stored {
+            Some(value) => PullSchedule::decode(device, &value),
+            None => None,
+        };
+        let now = Timestamp::now();
+        if !pull_due(last_attempt, now, pull.every) {
+            return Ok(Flow::Continue);
+        }
+
+        let mut args = Vec::new();
+        for arg in &pull.args {
+            args.push(arg.as_str());
+        }
+        match run_pull(&pull.program, &args, self.pull_deadline).await {
+            Some(PullOutcome {
+                succeeded: true, ..
+            }) => {
+                tracing::info!(device, "the import pull command finished");
+            }
+            Some(PullOutcome {
+                timed_out: true,
+                stderr_tail,
+                ..
+            }) => {
+                tracing::warn!(
+                    device,
+                    stderr = %stderr_tail,
+                    "the import pull command passed its deadline and was killed"
+                );
+            }
+            Some(PullOutcome { stderr_tail, .. }) => {
+                tracing::warn!(
+                    device,
+                    stderr = %stderr_tail,
+                    "the import pull command failed"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    device,
+                    "the import pull command did not start or did not complete"
+                );
+            }
+        }
+
+        let schedule = Cursor {
+            provider: runtime::Provider::ClaudeCode,
+            key,
+            value: PullSchedule {
+                last_attempt_at: Timestamp::now().millis(),
+            }
+            .encode(),
+        };
+        let (emission, committed) = Emission::awaiting_buffer(Vec::new(), Some(schedule));
+        if out.send(emission).await.is_err() {
+            return Ok(Flow::RuntimeGone);
+        }
+        if committed.await.is_err() {
+            tracing::error!(
+                device,
+                "the import pull attempt was not buffered, so the command may run again on the next tick"
+            );
         }
         Ok(Flow::Continue)
     }
@@ -91,14 +235,17 @@ impl ClaudeCodeProvider {
     async fn ship_file(
         &mut self,
         path: &Path,
-        profile: &str,
+        reading: Reading<'_>,
         out: &Sender<Emission>,
     ) -> Result<Flow, ProviderError> {
-        let mut cursor = self.cursor_for(path).await?;
+        let mut cursor = self.cursor_for(path, reading.device).await?;
         loop {
             let source = Source {
-                profile,
+                profile: reading.profile,
                 repos: &self.repos,
+                identity: reading.identity,
+                touches: reading.touches,
+                since: reading.since,
             };
             let increment = match read_increment(path, source, cursor, READ_BUDGET) {
                 Ok(increment) => {
@@ -126,10 +273,14 @@ impl ClaudeCodeProvider {
 
             let stored = Cursor {
                 provider: runtime::Provider::ClaudeCode,
-                key: cursor_key(path),
+                key: cursor_key(path, reading.device),
                 value: advanced.encode(),
             };
             let (emission, committed) = Emission::awaiting_buffer(drafts, Some(stored));
+            let emission = match reading.device {
+                Some(device) => emission.for_device(device.to_string()),
+                None => emission,
+            };
             if out.send(emission).await.is_err() {
                 return Ok(Flow::RuntimeGone);
             }
@@ -140,18 +291,24 @@ impl ClaudeCodeProvider {
                 );
                 return Ok(Flow::Continue);
             }
-            self.known.insert(path.to_path_buf(), Some(advanced));
+            self.known
+                .insert(cursor_key(path, reading.device), Some(advanced.clone()));
             cursor = Some(advanced);
         }
     }
 
-    async fn cursor_for(&mut self, path: &Path) -> Result<Option<FileCursor>, ProviderError> {
-        if let Some(cursor) = self.known.get(path) {
-            return Ok(*cursor);
+    async fn cursor_for(
+        &mut self,
+        path: &Path,
+        device: Option<&str>,
+    ) -> Result<Option<FileCursor>, ProviderError> {
+        let key = cursor_key(path, device);
+        if let Some(cursor) = self.known.get(&key) {
+            return Ok(cursor.clone());
         }
         let stored = self
             .cursors
-            .cursor(runtime::Provider::ClaudeCode, cursor_key(path))
+            .cursor(runtime::Provider::ClaudeCode, key.clone())
             .await;
         let stored = match stored {
             Ok(stored) => stored,
@@ -165,7 +322,7 @@ impl ClaudeCodeProvider {
             Some(value) => FileCursor::decode(path, &value),
             None => None,
         };
-        self.known.insert(path.to_path_buf(), cursor);
+        self.known.insert(key, cursor.clone());
         Ok(cursor)
     }
 }
@@ -177,11 +334,12 @@ impl Provider for ClaudeCodeProvider {
 
     async fn run(&mut self, ctx: Ctx, out: Sender<Emission>) -> Result<(), ProviderError> {
         let roots = ctx.config.claude_code.roots.clone();
+        let imports = ctx.config.claude_code.imports.clone();
         let mut ticker = interval(Duration::from_secs(ctx.config.claude_code.poll_interval));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            match self.tick(&roots, &out).await? {
+            match self.tick(&roots, &imports, &out).await? {
                 Flow::Continue => {}
                 Flow::RuntimeGone => {
                     tracing::info!("the runtime is gone, so the Claude Code provider stops");
@@ -236,17 +394,169 @@ fn transcripts(projects: &Path, unreadable: &mut HashSet<PathBuf>) -> io::Result
     Ok(paths)
 }
 
-fn cursor_key(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+const MAX_LINE_BYTES: u64 = 32 * 1024 * 1024;
+const HEAD_HASH_BYTES: u64 = 64 * 1024;
+
+struct Skipped {
+    bytes: u64,
+    reached_newline: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+fn skip_through_newline(reader: &mut impl BufRead, limit: u64) -> io::Result<Skipped> {
+    let mut bytes = 0;
+    while bytes < limit {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            break;
+        }
+        let window = chunk.len().min((limit - bytes) as usize);
+        if let Some(position) = chunk[..window].iter().position(|byte| *byte == b'\n') {
+            reader.consume(position + 1);
+            return Ok(Skipped {
+                bytes: bytes + position as u64 + 1,
+                reached_newline: true,
+            });
+        }
+        reader.consume(window);
+        bytes += window as u64;
+    }
+    Ok(Skipped {
+        bytes,
+        reached_newline: false,
+    })
+}
+
+fn cursor_key(path: &Path, device: Option<&str>) -> String {
+    match device {
+        Some(device) => format!(
+            "import-file:{}:{device}:{}",
+            device.len(),
+            path.to_string_lossy()
+        ),
+        None => path.to_string_lossy().into_owned(),
+    }
+}
+
+fn pull_key(device: &str) -> String {
+    format!("import-pull:{device}")
+}
+
+fn pull_due(last_attempt: Option<Timestamp>, now: Timestamp, every: u64) -> bool {
+    let Some(last_attempt) = last_attempt else {
+        return true;
+    };
+    if now.millis() < last_attempt.millis() {
+        return false;
+    }
+    let every_millis = i64::try_from(every)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1000);
+    now.millis() - last_attempt.millis() >= every_millis
+}
+
+struct PullOutcome {
+    succeeded: bool,
+    timed_out: bool,
+    stderr_tail: String,
+}
+
+async fn run_pull(program: &Path, args: &[&str], deadline: Duration) -> Option<PullOutcome> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::debug!(program = %program.display(), %error, "the import pull command could not start");
+            return None;
+        }
+    };
+    let stderr = child.stderr.take()?;
+    let mut tail = Vec::new();
+    let finished = timeout(deadline, async {
+        tokio::join!(
+            read_tail(stderr, &mut tail, STDERR_TAIL_BYTES),
+            child.wait()
+        )
+    })
+    .await;
+    let Ok(((), status)) = finished else {
+        return Some(PullOutcome {
+            succeeded: false,
+            timed_out: true,
+            stderr_tail: String::from_utf8_lossy(&tail).into_owned(),
+        });
+    };
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::debug!(program = %program.display(), %error, "the import pull command did not complete");
+            return None;
+        }
+    };
+    Some(PullOutcome {
+        succeeded: status.success(),
+        timed_out: false,
+        stderr_tail: String::from_utf8_lossy(&tail).into_owned(),
+    })
+}
+
+async fn read_tail<R: AsyncRead + Unpin>(mut reader: R, tail: &mut Vec<u8>, max_bytes: usize) {
+    let mut chunk = [0u8; 4096];
+    loop {
+        let Ok(read) = reader.read(&mut chunk).await else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        tail.extend_from_slice(&chunk[..read]);
+        if tail.len() > max_bytes {
+            tail.drain(..tail.len() - max_bytes);
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PullSchedule {
+    last_attempt_at: i64,
+}
+
+impl PullSchedule {
+    fn encode(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    fn decode(device: &str, value: &str) -> Option<Timestamp> {
+        match serde_json::from_str::<PullSchedule>(value) {
+            Ok(PullSchedule { last_attempt_at }) => Some(Timestamp::from_millis(last_attempt_at)),
+            Err(error) => {
+                tracing::warn!(
+                    device,
+                    %error,
+                    "the stored import schedule does not parse, so the pull counts as never attempted"
+                );
+                None
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileCursor {
     pub inode: u64,
     pub offset: u64,
     pub last_message_ts: Option<i64>,
     #[serde(default)]
     pub version: u32,
+    #[serde(default)]
+    pub head: Option<String>,
+    #[serde(default)]
+    pub skipping: bool,
 }
 
 impl FileCursor {
@@ -281,6 +591,7 @@ impl FileCursor {
 pub struct ReadBudget {
     pub max_records: usize,
     pub max_bytes: usize,
+    pub max_scan_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -289,15 +600,31 @@ pub struct Increment {
     pub cursor: FileCursor,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Identity {
+    Inode,
+    Head,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Touches {
+    Collected,
+    Skipped,
+}
+
 #[derive(Clone, Copy)]
 pub struct Source<'a> {
     pub profile: &'a str,
     pub repos: &'a dyn RepoLookup,
+    pub identity: Identity,
+    pub touches: Touches,
+    pub since: Option<Timestamp>,
 }
 
 pub struct LineContext<'a> {
     pub profile: &'a str,
     pub repos: &'a dyn RepoLookup,
+    pub touches: Touches,
     pub fallback_session_id: &'a str,
     pub last_message_ts: Option<Timestamp>,
     pub file_modified: Timestamp,
@@ -401,18 +728,49 @@ pub fn read_increment(
     cursor: Option<FileCursor>,
     budget: ReadBudget,
 ) -> io::Result<Option<Increment>> {
-    let Source { profile, repos } = source;
+    let Source {
+        profile,
+        repos,
+        identity,
+        touches,
+        since,
+    } = source;
     let metadata = fs::metadata(path)?;
     let inode = metadata.ino();
     let length = metadata.len();
-    let start = match cursor {
-        Some(cursor) if cursor.inode == inode && cursor.offset <= length => cursor,
-        Some(_) | None => FileCursor {
-            inode,
-            offset: 0,
-            last_message_ts: None,
-            version: CURSOR_VERSION,
+    let start = match identity {
+        Identity::Inode => match cursor {
+            Some(cursor) if cursor.inode == inode && cursor.offset <= length => cursor,
+            Some(_) | None => FileCursor {
+                inode,
+                offset: 0,
+                last_message_ts: None,
+                version: CURSOR_VERSION,
+                head: None,
+                skipping: false,
+            },
         },
+        Identity::Head => {
+            let Some(head) = head_digest(path)? else {
+                return Ok(None);
+            };
+            match cursor {
+                Some(cursor) if cursor.head.as_deref() == Some(head.as_str()) => {
+                    if cursor.offset > length {
+                        return Ok(None);
+                    }
+                    FileCursor { inode, ..cursor }
+                }
+                Some(_) | None => FileCursor {
+                    inode,
+                    offset: 0,
+                    last_message_ts: None,
+                    version: CURSOR_VERSION,
+                    head: Some(head),
+                    skipping: false,
+                },
+            }
+        }
     };
     if length == start.offset {
         return Ok(None);
@@ -430,16 +788,50 @@ pub fn read_increment(
 
     let mut offset = start.offset;
     let mut last_message_ts = start.last_message_ts;
+    let head = start.head;
+    let mut skipping = start.skipping;
     let mut drafts = Vec::new();
     let mut text_bytes = 0;
     let mut line = Vec::new();
-    while drafts.len() < budget.max_records && text_bytes < budget.max_bytes {
-        line.clear();
-        let read = reader.read_until(b'\n', &mut line)?;
-        if line.last() != Some(&b'\n') {
-            break;
+    let line_cap = match identity {
+        Identity::Head => MAX_LINE_BYTES,
+        Identity::Inode => u64::MAX,
+    };
+    while drafts.len() < budget.max_records
+        && text_bytes < budget.max_bytes
+        && offset - start.offset < budget.max_scan_bytes
+    {
+        if skipping {
+            let remaining = budget.max_scan_bytes - (offset - start.offset);
+            let skipped = skip_through_newline(&mut reader, remaining)?;
+            offset += skipped.bytes;
+            skipping = !skipped.reached_newline;
+            if skipping {
+                break;
+            }
+            continue;
         }
+        line.clear();
+        let scanned = offset - start.offset;
+        let read_cap = match scanned {
+            0 => line_cap,
+            _ => line_cap.min(budget.max_scan_bytes - scanned),
+        };
+        let read = (&mut reader).take(read_cap).read_until(b'\n', &mut line)?;
         let line_start = offset;
+        if line.last() != Some(&b'\n') {
+            if (read as u64) < read_cap || read_cap < line_cap {
+                break;
+            }
+            tracing::warn!(
+                path = %path.display(),
+                offset = line_start,
+                "a transcript line exceeds the line cap and is skipped"
+            );
+            offset += read as u64;
+            skipping = true;
+            continue;
+        }
         offset += read as u64;
 
         let value: Value = match serde_json::from_slice(&line) {
@@ -457,6 +849,7 @@ pub fn read_increment(
         let context = LineContext {
             profile,
             repos,
+            touches,
             fallback_session_id,
             last_message_ts: last_message_ts.map(Timestamp::from_millis),
             file_modified,
@@ -469,6 +862,11 @@ pub fn read_increment(
             last_message_ts = Some(ts.millis());
         }
         for draft in line_drafts {
+            if let Some(since) = since
+                && draft.ts < since
+            {
+                continue;
+            }
             text_bytes += draft
                 .payload
                 .get("text")
@@ -488,8 +886,25 @@ pub fn read_increment(
             offset,
             last_message_ts,
             version: CURSOR_VERSION,
+            head,
+            skipping,
         },
     }))
+}
+
+fn head_digest(path: &Path) -> io::Result<Option<String>> {
+    let mut reader = BufReader::new(File::open(path)?).take(HEAD_HASH_BYTES);
+    let mut head = Vec::new();
+    reader.read_until(b'\n', &mut head)?;
+    if head.last() != Some(&b'\n') && (head.len() as u64) < HEAD_HASH_BYTES {
+        return Ok(None);
+    }
+    let digest = Sha256::digest(&head);
+    let mut hex = String::with_capacity(HEAD_HEX_CHARS);
+    for byte in &digest[..HEAD_HEX_CHARS / 2] {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(Some(hex))
 }
 
 fn modified_millis(modified: io::Result<SystemTime>) -> Timestamp {
@@ -510,8 +925,13 @@ pub fn drafts_from_line(line: &Value, context: &LineContext) -> LineOutcome {
         "user" => message_drafts(line, Role::User, context),
         "assistant" => {
             let mut outcome = message_drafts(line, Role::Assistant, context);
-            for draft in touch_drafts(line, context) {
-                outcome.drafts.push(draft);
+            match context.touches {
+                Touches::Collected => {
+                    for draft in touch_drafts(line, context) {
+                        outcome.drafts.push(draft);
+                    }
+                }
+                Touches::Skipped => {}
             }
             outcome
         }
@@ -827,6 +1247,9 @@ mod tests {
         Source {
             profile: PROFILE,
             repos: &NoRepos,
+            identity: Identity::Inode,
+            touches: Touches::Collected,
+            since: None,
         }
     }
 
@@ -834,6 +1257,7 @@ mod tests {
         LineContext {
             profile: PROFILE,
             repos: &NoRepos,
+            touches: Touches::Collected,
             fallback_session_id: "file-stem",
             last_message_ts,
             file_modified: Timestamp::from_millis(FILE_MODIFIED),
@@ -1142,6 +1566,7 @@ mod tests {
     const UNBOUNDED: ReadBudget = ReadBudget {
         max_records: usize::MAX,
         max_bytes: usize::MAX,
+        max_scan_bytes: u64::MAX,
     };
 
     struct TempTranscripts {
@@ -1243,7 +1668,7 @@ mod tests {
         while let Some(increment) =
             read_increment(path, source(), cursor, budget).expect("the transcript reads")
         {
-            cursor = Some(increment.cursor);
+            cursor = Some(increment.cursor.clone());
             increments.push(increment);
         }
         increments
@@ -1318,6 +1743,7 @@ mod tests {
         let context = LineContext {
             profile: PROFILE,
             repos: &REPOS,
+            touches: Touches::Collected,
             fallback_session_id: "file-stem",
             last_message_ts: None,
             file_modified: Timestamp::from_millis(FILE_MODIFIED),
@@ -1380,6 +1806,7 @@ mod tests {
         let context = LineContext {
             profile: PROFILE,
             repos: &REPOS,
+            touches: Touches::Collected,
             fallback_session_id: "file-stem",
             last_message_ts: None,
             file_modified: Timestamp::from_millis(FILE_MODIFIED),
@@ -1429,6 +1856,7 @@ mod tests {
         let context = LineContext {
             profile: PROFILE,
             repos: &REPOS,
+            touches: Touches::Collected,
             fallback_session_id: "file-stem",
             last_message_ts: None,
             file_modified: Timestamp::from_millis(FILE_MODIFIED),
@@ -1506,9 +1934,14 @@ mod tests {
             offset: 9_000,
             last_message_ts: Some(1_789_000_000_000),
             version: CURSOR_VERSION,
+            head: Some("0123456789abcdef".to_string()),
+            skipping: true,
         };
         let path = Path::new("/tmp/session.jsonl");
-        assert_eq!(FileCursor::decode(path, &cursor.encode()), Some(cursor));
+        assert_eq!(
+            FileCursor::decode(path, &cursor.encode()),
+            Some(cursor.clone())
+        );
         assert_eq!(FileCursor::decode(path, "not a cursor"), None);
         assert_eq!(FileCursor::decode(path, "{\"offset\": 3}"), None);
     }
@@ -1544,7 +1977,7 @@ mod tests {
         let path = transcripts.write(FIXTURE);
         let first = read_all(&path, None, UNBOUNDED);
 
-        let again = read_increment(&path, source(), Some(first[0].cursor), UNBOUNDED)
+        let again = read_increment(&path, source(), Some(first[0].cursor.clone()), UNBOUNDED)
             .expect("the transcript reads");
 
         assert!(again.is_none());
@@ -1558,7 +1991,7 @@ mod tests {
         assert_eq!(messages(drafts_in(&first)), fixture_messages(0..6));
 
         transcripts.append(&FIXTURE[fixture_prefix(6).len()..]);
-        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+        let second = read_all(&path, Some(first[0].cursor.clone()), UNBOUNDED);
 
         assert_eq!(messages(drafts_in(&second)), fixture_messages(6..18));
         let titles: Vec<RecordDraft> = drafts_in(&second)
@@ -1583,7 +2016,7 @@ mod tests {
                 .map(|line| format!("{line}\n"))
                 .unwrap_or_default(),
         );
-        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+        let second = read_all(&path, Some(first[0].cursor.clone()), UNBOUNDED);
 
         let drafts = drafts_in(&second);
         assert_eq!(drafts.len(), 1);
@@ -1604,20 +2037,21 @@ mod tests {
         assert_eq!(first[0].cursor.offset, complete.len() as u64);
         assert_eq!(messages(drafts_in(&first)), fixture_messages(0..2));
 
-        let waiting = read_increment(&path, source(), Some(first[0].cursor), UNBOUNDED)
+        let waiting = read_increment(&path, source(), Some(first[0].cursor.clone()), UNBOUNDED)
             .expect("the transcript reads");
         assert!(waiting.is_none(), "a partial line alone is not consumed");
 
         transcripts.append(tail);
-        let still_waiting = read_increment(&path, source(), Some(first[0].cursor), UNBOUNDED)
-            .expect("the transcript reads");
+        let still_waiting =
+            read_increment(&path, source(), Some(first[0].cursor.clone()), UNBOUNDED)
+                .expect("the transcript reads");
         assert!(
             still_waiting.is_none(),
             "a line without its newline is not consumed"
         );
 
         transcripts.append("\n");
-        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+        let second = read_all(&path, Some(first[0].cursor.clone()), UNBOUNDED);
         assert_eq!(messages(drafts_in(&second)), fixture_messages(2..3));
         assert_eq!(
             second[0].cursor.offset,
@@ -1634,7 +2068,7 @@ mod tests {
         let longer = format!("{FIXTURE}{FIXTURE}");
         transcripts.replace(&longer);
         assert_ne!(inode(&path), first[0].cursor.inode);
-        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+        let second = read_all(&path, Some(first[0].cursor.clone()), UNBOUNDED);
 
         assert_eq!(second[0].cursor.inode, inode(&path));
         assert_eq!(second[0].cursor.offset, longer.len() as u64);
@@ -1650,10 +2084,179 @@ mod tests {
         let shorter = fixture_prefix(3);
         fs::write(&path, &shorter).expect("the transcript could not be truncated");
         assert_eq!(inode(&path), first[0].cursor.inode);
-        let second = read_all(&path, Some(first[0].cursor), UNBOUNDED);
+        let second = read_all(&path, Some(first[0].cursor.clone()), UNBOUNDED);
 
         assert_eq!(second[0].cursor.offset, shorter.len() as u64);
         assert_eq!(messages(drafts_in(&second)), fixture_messages(0..3));
+    }
+
+    fn head_source(touches: Touches, since: Option<Timestamp>) -> Source<'static> {
+        Source {
+            profile: PROFILE,
+            repos: &REPOS,
+            identity: Identity::Head,
+            touches,
+            since,
+        }
+    }
+
+    fn read_all_with(path: &Path, source: Source, cursor: Option<FileCursor>) -> Vec<Increment> {
+        let mut cursor = cursor;
+        let mut increments = Vec::new();
+        while let Some(increment) =
+            read_increment(path, source, cursor, UNBOUNDED).expect("the transcript reads")
+        {
+            cursor = Some(increment.cursor.clone());
+            increments.push(increment);
+        }
+        increments
+    }
+
+    fn head_read(path: &Path, cursor: Option<FileCursor>) -> Vec<Increment> {
+        read_all_with(path, head_source(Touches::Collected, None), cursor)
+    }
+
+    #[test]
+    fn a_copy_with_a_new_inode_and_identical_content_yields_nothing_under_head_identity() {
+        let transcripts = TempTranscripts::new("head-copy");
+        let path = transcripts.write(FIXTURE);
+        let first = head_read(&path, None);
+        assert_eq!(first[0].cursor.offset, FIXTURE.len() as u64);
+
+        transcripts.replace(FIXTURE);
+        assert_ne!(inode(&path), first[0].cursor.inode);
+
+        assert!(head_read(&path, Some(first[0].cursor.clone())).is_empty());
+        let restarted = read_all(&path, Some(first[0].cursor.clone()), UNBOUNDED);
+        assert_eq!(drafts_in(&restarted).len(), 14);
+    }
+
+    #[test]
+    fn an_identical_copy_with_appended_lines_yields_only_the_appended_lines() {
+        let transcripts = TempTranscripts::new("head-append");
+        let prefix = fixture_prefix(3);
+        let path = transcripts.write(&prefix);
+        let first = head_read(&path, None);
+
+        transcripts.replace(&fixture_prefix(4));
+        let second = head_read(&path, Some(first[0].cursor.clone()));
+
+        assert_eq!(drafts_in(&second), outcomes()[3].drafts);
+        assert_eq!(second[0].cursor.offset, fixture_prefix(4).len() as u64);
+    }
+
+    #[test]
+    fn a_file_shorter_than_the_offset_with_the_same_head_waits_until_it_is_whole() {
+        let transcripts = TempTranscripts::new("head-short");
+        let path = transcripts.write(FIXTURE);
+        let first = head_read(&path, None);
+
+        let partial = fixture_prefix(3);
+        transcripts.replace(&partial);
+        assert!(head_read(&path, Some(first[0].cursor.clone())).is_empty());
+
+        transcripts.replace(&format!("{FIXTURE}{}", fixture_prefix(2)));
+        let resumed = head_read(&path, Some(first[0].cursor.clone()));
+        assert_eq!(
+            resumed[0].cursor.offset,
+            (FIXTURE.len() + fixture_prefix(2).len()) as u64
+        );
+        assert_eq!(messages(drafts_in(&resumed)), fixture_messages(0..2));
+    }
+
+    #[test]
+    fn a_different_first_line_restarts_from_the_start_under_head_identity() {
+        let transcripts = TempTranscripts::new("head-different");
+        let path = transcripts.write(FIXTURE);
+        let first = head_read(&path, None);
+
+        let other = FIXTURE.replacen("\"customTitle\": \"feud\"", "\"customTitle\": \"other\"", 1);
+        assert_ne!(other, FIXTURE);
+        transcripts.replace(&other);
+        let second = head_read(&path, Some(first[0].cursor.clone()));
+
+        assert_ne!(second[0].cursor.head, first[0].cursor.head);
+        assert_eq!(second[0].cursor.offset, other.len() as u64);
+        assert_eq!(messages(drafts_in(&second)), fixture_messages(0..18));
+    }
+
+    #[test]
+    fn a_file_without_a_complete_first_line_yields_nothing_under_head_identity() {
+        let transcripts = TempTranscripts::new("head-partial");
+        let first_line = fixture_prefix(1);
+        let path = transcripts.write(first_line.trim_end());
+
+        assert!(head_read(&path, None).is_empty());
+
+        transcripts.append("\n");
+        let increments = head_read(&path, None);
+        assert_eq!(increments[0].cursor.offset, first_line.len() as u64);
+        assert_eq!(
+            increments[0].cursor.head.as_deref().map(str::len),
+            Some(HEAD_HEX_CHARS)
+        );
+    }
+
+    #[test]
+    fn a_stored_cursor_without_a_head_decodes_and_restarts_from_the_start_under_head_identity() {
+        let path = Path::new("/tmp/session.jsonl");
+        let stored = "{\"inode\":7,\"offset\":10,\"last_message_ts\":null,\"version\":1}";
+        let cursor = FileCursor::decode(path, stored).expect("a cursor without a head decodes");
+        assert_eq!(cursor.head, None);
+
+        let transcripts = TempTranscripts::new("head-legacy");
+        let path = transcripts.write(FIXTURE);
+        let increments = head_read(&path, Some(cursor));
+
+        assert_eq!(increments[0].cursor.offset, FIXTURE.len() as u64);
+        assert_eq!(messages(drafts_in(&increments)), fixture_messages(0..18));
+    }
+
+    #[test]
+    fn since_drops_earlier_messages_and_titles_stamped_from_them_and_the_offset_reaches_the_end() {
+        let transcripts = TempTranscripts::new("since");
+        let path = transcripts.write(FIXTURE);
+        let since = ts(13);
+
+        let increments = read_all_with(&path, head_source(Touches::Collected, Some(since)), None);
+
+        let drafts = drafts_in(&increments);
+        for draft in &drafts {
+            assert!(draft.ts >= since, "{:?} is before since", draft.kind);
+            assert_ne!(draft.payload.get("field"), Some(&json!("ai_title")));
+        }
+        assert_eq!(messages(drafts), fixture_messages(17..18));
+        assert_eq!(increments[0].cursor.offset, FIXTURE.len() as u64);
+        assert!(increments[0].cursor.last_message_ts.is_some());
+    }
+
+    #[test]
+    fn skipped_touches_yield_no_touch_drafts_where_collected_touches_do() {
+        let transcripts = TempTranscripts::new("touches");
+        let tool_call = tool_line(
+            json!([{"type": "tool_use", "id": "t1", "name": "Read",
+                    "input": {"file_path": "/Users/u/Projects/alpha/src/main.go"}}]),
+            false,
+        );
+        let path = transcripts.write(&format!("{FIXTURE}{tool_call}\n"));
+
+        let collected = read_all_with(&path, head_source(Touches::Collected, None), None);
+        let skipped = read_all_with(&path, head_source(Touches::Skipped, None), None);
+
+        let mut collected_touches = 0;
+        for draft in drafts_in(&collected) {
+            if draft.kind == Kind::Touch {
+                collected_touches += 1;
+            }
+        }
+        assert!(collected_touches > 0, "the fixture yields touches");
+        for draft in drafts_in(&skipped) {
+            assert_ne!(draft.kind, Kind::Touch);
+        }
+        assert_eq!(
+            messages(drafts_in(&skipped)),
+            messages(drafts_in(&collected))
+        );
     }
 
     #[test]
@@ -1683,6 +2286,7 @@ mod tests {
         let budget = ReadBudget {
             max_records: 2,
             max_bytes: usize::MAX,
+            max_scan_bytes: u64::MAX,
         };
 
         let split = read_all(&path, None, budget);
@@ -1699,8 +2303,8 @@ mod tests {
         assert!(last.drafts.len() <= 3);
         assert_eq!(drafts_in(&split), drafts_in(&whole));
         assert_eq!(
-            split.last().map(|increment| increment.cursor),
-            Some(whole[0].cursor)
+            split.last().map(|increment| increment.cursor.clone()),
+            Some(whole[0].cursor.clone())
         );
     }
 
@@ -1712,6 +2316,7 @@ mod tests {
         let budget = ReadBudget {
             max_records: usize::MAX,
             max_bytes: 1,
+            max_scan_bytes: u64::MAX,
         };
 
         let split = read_all(&path, None, budget);
@@ -1719,8 +2324,109 @@ mod tests {
         assert!(split.len() > 1, "the budget split the file");
         assert_eq!(drafts_in(&split), drafts_in(&whole));
         assert_eq!(
-            split.last().map(|increment| increment.cursor),
-            Some(whole[0].cursor)
+            split.last().map(|increment| increment.cursor.clone()),
+            Some(whole[0].cursor.clone())
+        );
+    }
+
+    #[test]
+    fn a_scan_budget_splits_a_file_even_when_no_draft_is_emitted() {
+        let transcripts = TempTranscripts::new("scan-budget");
+        let path = transcripts.write(FIXTURE);
+        let whole = read_all(&path, None, UNBOUNDED);
+        let budget = ReadBudget {
+            max_records: usize::MAX,
+            max_bytes: usize::MAX,
+            max_scan_bytes: 1,
+        };
+
+        let split = read_all(&path, None, budget);
+
+        assert!(split.len() > 1, "the budget split the file");
+        assert_eq!(drafts_in(&split), drafts_in(&whole));
+        assert_eq!(
+            split.last().map(|increment| increment.cursor.clone()),
+            Some(whole[0].cursor.clone())
+        );
+    }
+
+    #[test]
+    fn a_line_beyond_the_line_cap_is_skipped_without_stalling_an_imported_file() {
+        let transcripts = TempTranscripts::new("oversize-line");
+        let oversize = "x".repeat(MAX_LINE_BYTES as usize + 1);
+        let text = format!("{}{oversize}\n{}", prompt_line(1), prompt_line(2));
+        let path = transcripts.write(&text);
+        let skipped = head_read(&path, None);
+
+        let expected = transcripts.write(&format!("{}{}", prompt_line(1), prompt_line(2)));
+        let reference = head_read(&expected, None);
+
+        assert_eq!(drafts_in(&skipped), drafts_in(&reference));
+    }
+
+    #[test]
+    fn an_oversize_first_line_still_yields_the_lines_after_it_under_head_identity() {
+        let transcripts = TempTranscripts::new("oversize-first-line");
+        let oversize = "x".repeat(MAX_LINE_BYTES as usize + 1);
+        let path = transcripts.write(&format!("{oversize}\n{}", prompt_line(1)));
+
+        let increments = head_read(&path, None);
+
+        assert_eq!(drafts_in(&increments).len(), 1);
+    }
+
+    #[test]
+    fn an_oversize_line_is_skipped_across_reads_within_the_scan_budget() {
+        let transcripts = TempTranscripts::new("oversize-incremental");
+        let oversize = "x".repeat(MAX_LINE_BYTES as usize * 2);
+        let path = transcripts.write(&format!("{oversize}\n{}", prompt_line(1)));
+        let budget = ReadBudget {
+            max_scan_bytes: MAX_LINE_BYTES,
+            ..UNBOUNDED
+        };
+        let source = head_source(Touches::Collected, None);
+        let mut cursor: Option<FileCursor> = None;
+        let mut increments = Vec::new();
+        for _ in 0..6 {
+            let previous = cursor.as_ref().map_or(0, |cursor| cursor.offset);
+            let Some(increment) = read_increment(&path, source, cursor.clone(), budget).unwrap()
+            else {
+                break;
+            };
+            assert!(increment.cursor.offset - previous <= budget.max_scan_bytes);
+            cursor = Some(increment.cursor.clone());
+            increments.push(increment);
+        }
+
+        assert!(increments.len() >= 3, "the skip spanned several reads");
+        assert!(increments[0].cursor.skipping, "the skip is carried over");
+        assert_eq!(drafts_in(&increments).len(), 1);
+        assert!(!increments.last().unwrap().cursor.skipping);
+    }
+
+    #[test]
+    fn a_local_line_beyond_the_line_cap_is_still_parsed() {
+        let transcripts = TempTranscripts::new("oversize-local-line");
+        let padding = "x".repeat(MAX_LINE_BYTES as usize + 1);
+        let big =
+            prompt_line(1).replacen("\"type\"", &format!("\"pad\":\"{padding}\",\"type\""), 1);
+        let path = transcripts.write(&format!("{big}{}", prompt_line(2)));
+
+        let increments = read_all(&path, None, UNBOUNDED);
+
+        assert_eq!(drafts_in(&increments).len(), 2);
+    }
+
+    #[test]
+    fn cursor_keys_of_a_device_never_collide_with_its_pull_key_or_another_device() {
+        let path = Path::new("/Volumes/x/project/s.jsonl");
+        let file_key = cursor_key(path, Some("mac"));
+        let crafted_device = "mac:/Volumes/x/project/s.jsonl";
+
+        assert_ne!(file_key, pull_key(crafted_device));
+        assert_ne!(
+            cursor_key(Path::new("/b"), Some("a:5:c")),
+            cursor_key(Path::new("c:/b"), Some("a"))
         );
     }
 
@@ -1800,11 +2506,12 @@ mod tests {
             records,
             cursor,
             committed,
+            device,
             ..
         }) = inbox.recv().await
         {
             handle
-                .enqueue(records.clone(), cursor)
+                .enqueue(records.clone(), cursor, device)
                 .await
                 .expect("the emission could not be buffered");
             emitted.push(records);
@@ -1829,9 +2536,21 @@ mod tests {
         roots: &[ClaudeRoot],
         handle: &BufferHandle,
     ) -> Vec<Vec<RecordDraft>> {
+        tick_with(provider, roots, &[], handle).await
+    }
+
+    async fn tick_with(
+        provider: &mut ClaudeCodeProvider,
+        roots: &[ClaudeRoot],
+        imports: &[ClaudeImport],
+        handle: &BufferHandle,
+    ) -> Vec<Vec<RecordDraft>> {
         let (out, inbox) = channel(4);
         let committer = tokio::spawn(commit_into(handle.clone(), inbox));
-        let flow = provider.tick(roots, &out).await.expect("the tick failed");
+        let flow = provider
+            .tick(roots, imports, &out)
+            .await
+            .expect("the tick failed");
         match flow {
             Flow::Continue => {}
             Flow::RuntimeGone => panic!("the runtime is still there"),
@@ -2052,7 +2771,7 @@ mod tests {
         let (out, inbox) = channel(4);
         let dropping = tokio::spawn(drop_uncommitted(inbox));
         provider
-            .tick(&roots, &out)
+            .tick(&roots, &[], &out)
             .await
             .expect("an unbuffered emission is not a provider failure");
         drop(out);
@@ -2103,6 +2822,358 @@ mod tests {
         buffer.close().await.expect("the buffer did not close");
     }
 
+    const IMPORT_DEVICE: &str = "imported-device";
+
+    fn import_in(transcripts: &TempTranscripts, since: Timestamp) -> ClaudeImport {
+        ClaudeImport {
+            device: IMPORT_DEVICE.to_string(),
+            projects: transcripts.path.join("import"),
+            since,
+            pull: None,
+        }
+    }
+
+    fn write_import_session(import: &ClaudeImport, text: &str) {
+        let project = import.projects.join("-Users-o-Projects-app");
+        fs::create_dir_all(&project).expect("the import project could not be created");
+        fs::write(project.join(format!("{SESSION}.jsonl")), text)
+            .expect("the imported transcript could not be written");
+    }
+
+    async fn tick_emissions(
+        provider: &mut ClaudeCodeProvider,
+        roots: &[ClaudeRoot],
+        imports: &[ClaudeImport],
+        handle: &BufferHandle,
+    ) -> Vec<(Option<String>, Vec<RecordDraft>)> {
+        let (out, mut inbox) = channel(4);
+        let handle = handle.clone();
+        let committer = tokio::spawn(async move {
+            let mut emitted = Vec::new();
+            while let Some(Emission {
+                records,
+                cursor,
+                committed,
+                device,
+                ..
+            }) = inbox.recv().await
+            {
+                handle
+                    .enqueue(records.clone(), cursor, device.clone())
+                    .await
+                    .expect("the emission could not be buffered");
+                emitted.push((device, records));
+                let Some(committed) = committed else {
+                    continue;
+                };
+                let _ = committed.send(());
+            }
+            emitted
+        });
+        let flow = provider
+            .tick(roots, imports, &out)
+            .await
+            .expect("the tick failed");
+        match flow {
+            Flow::Continue => {}
+            Flow::RuntimeGone => panic!("the runtime is still there"),
+        }
+        drop(out);
+        committer.await.expect("the committer panicked")
+    }
+
+    #[tokio::test]
+    async fn an_import_folder_ships_under_its_device_with_the_fixed_profile_and_no_touches() {
+        let transcripts = TempTranscripts::new("provider-import");
+        let import = import_in(&transcripts, ts(0));
+        write_import_session(&import, FIXTURE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let emitted = tick_emissions(&mut provider, &[], &[import], &buffer.handle()).await;
+
+        assert!(!emitted.is_empty());
+        let mut shipped = Vec::new();
+        for (device, records) in emitted {
+            assert_eq!(device.as_deref(), Some(IMPORT_DEVICE));
+            shipped.extend(records);
+        }
+        assert_eq!(shipped.len(), 14);
+        for draft in &shipped {
+            assert_ne!(draft.kind, Kind::Touch);
+            if draft.kind == Kind::Message {
+                assert_eq!(draft.payload["profile"], json!("claude"));
+            }
+        }
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_local_root_in_the_same_tick_keeps_the_daemon_device() {
+        let transcripts = TempTranscripts::new("provider-import-and-local");
+        transcripts.write(FIXTURE);
+        let import = import_in(&transcripts, ts(0));
+        write_import_session(&import, &prompt_line(1));
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let emitted = tick_emissions(
+            &mut provider,
+            &[transcripts.root()],
+            &[import],
+            &buffer.handle(),
+        )
+        .await;
+
+        let devices: Vec<Option<&str>> = emitted
+            .iter()
+            .map(|(device, _)| device.as_deref())
+            .collect();
+        assert_eq!(devices, vec![None, Some(IMPORT_DEVICE)]);
+        assert_eq!(emitted[0].1.len(), 14);
+        assert_eq!(emitted[1].1.len(), 1);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn an_import_drops_messages_before_since_and_does_not_resend_after_a_refill() {
+        let transcripts = TempTranscripts::new("provider-import-since");
+        let import = import_in(&transcripts, ts(30));
+        write_import_session(&import, FIXTURE);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let imports = [import.clone()];
+
+        let first = tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        let first = flattened(first.into_iter().map(|(_, records)| records).collect());
+        for draft in &first {
+            assert_ne!(draft.kind, Kind::Message);
+        }
+
+        let refilled = format!("{FIXTURE}{}", prompt_line(1));
+        let project = import.projects.join("-Users-o-Projects-app");
+        let staged = transcripts.path.join("staged-import.tmp");
+        fs::write(&staged, &refilled).expect("the refill could not be staged");
+        fs::rename(&staged, project.join(format!("{SESSION}.jsonl")))
+            .expect("the refill could not be moved");
+        let second = tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        let second = flattened(second.into_iter().map(|(_, records)| records).collect());
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].payload["uuid"], json!("prompt-1"));
+
+        let third = tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        assert!(third.is_empty());
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_missing_import_folder_is_skipped_without_failing_the_tick() {
+        let transcripts = TempTranscripts::new("provider-import-missing");
+        transcripts.write(FIXTURE);
+        let import = import_in(&transcripts, ts(0));
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let emitted = tick_emissions(
+            &mut provider,
+            &[transcripts.root()],
+            &[import],
+            &buffer.handle(),
+        )
+        .await;
+
+        assert_eq!(
+            flattened(emitted.into_iter().map(|(_, r)| r).collect()).len(),
+            14
+        );
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[test]
+    fn a_pull_that_was_never_attempted_is_due() {
+        assert!(pull_due(None, ts(0), 86_400));
+    }
+
+    #[test]
+    fn a_pull_is_due_once_exactly_the_period_has_elapsed() {
+        let last = Timestamp::from_millis(1_000_000);
+        let now = Timestamp::from_millis(1_000_000 + 3_600_000);
+        assert!(pull_due(Some(last), now, 3_600));
+    }
+
+    #[test]
+    fn a_pull_one_second_short_of_the_period_is_not_due() {
+        let last = Timestamp::from_millis(1_000_000);
+        let now = Timestamp::from_millis(1_000_000 + 3_599_000);
+        assert!(!pull_due(Some(last), now, 3_600));
+    }
+
+    #[test]
+    fn a_clock_that_moved_backwards_does_not_make_a_pull_due() {
+        let last = Timestamp::from_millis(5_000_000);
+        let now = Timestamp::from_millis(1_000_000);
+        assert!(!pull_due(Some(last), now, 1));
+    }
+
+    #[test]
+    fn a_stored_schedule_round_trips_and_garbage_counts_as_never_attempted() {
+        let encoded = PullSchedule {
+            last_attempt_at: 42,
+        }
+        .encode();
+        assert_eq!(
+            PullSchedule::decode(IMPORT_DEVICE, &encoded),
+            Some(Timestamp::from_millis(42))
+        );
+        assert_eq!(PullSchedule::decode(IMPORT_DEVICE, "not json"), None);
+    }
+
+    #[tokio::test]
+    async fn the_stderr_tail_keeps_only_the_last_bytes() {
+        let mut tail = Vec::new();
+        read_tail(&b"short"[..], &mut tail, 512).await;
+        assert_eq!(tail, b"short");
+        let mut tail = Vec::new();
+        read_tail(&b"abcdef"[..], &mut tail, 3).await;
+        assert_eq!(tail, b"def");
+        let long = vec![b'x'; 10_000];
+        let mut tail = Vec::new();
+        read_tail(&long[..], &mut tail, 4).await;
+        assert_eq!(tail, b"xxxx");
+    }
+
+    struct PullScript {
+        import: ClaudeImport,
+        counter: PathBuf,
+    }
+
+    fn pull_import(transcripts: &TempTranscripts, body: &str, every: u64) -> PullScript {
+        let fixture = transcripts.path.join("pull-source.jsonl");
+        fs::write(&fixture, FIXTURE).expect("the pull source could not be written");
+        let counter = transcripts.path.join("pull-counter");
+        let mut import = import_in(transcripts, ts(0));
+        let project = import.projects.join("-Users-o-Projects-app");
+        let script = transcripts.path.join("pull.sh");
+        let text = format!(
+            "echo run >> '{counter}'\n{body}\n",
+            counter = counter.display(),
+            body = body
+                .replace("{fixture}", &fixture.display().to_string())
+                .replace("{project}", &project.display().to_string())
+                .replace("{session}", SESSION),
+        );
+        fs::write(&script, text).expect("the pull script could not be written");
+        import.pull = Some(Pull {
+            program: PathBuf::from("/bin/sh"),
+            args: vec![script.display().to_string()],
+            every,
+        });
+        PullScript { import, counter }
+    }
+
+    fn pull_runs(script: &PullScript) -> usize {
+        match fs::read_to_string(&script.counter) {
+            Ok(text) => text.lines().count(),
+            Err(_) => 0,
+        }
+    }
+
+    const COPY_FIXTURE: &str = "mkdir -p '{project}' && cp '{fixture}' '{project}/{session}.jsonl'";
+
+    #[tokio::test]
+    async fn the_pull_command_fills_the_folder_and_its_records_ship_in_the_same_tick() {
+        let transcripts = TempTranscripts::new("provider-pull-fills");
+        let script = pull_import(&transcripts, COPY_FIXTURE, 3_600);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+
+        let emitted = tick_emissions(
+            &mut provider,
+            &[],
+            std::slice::from_ref(&script.import),
+            &buffer.handle(),
+        )
+        .await;
+
+        let mut messages = 0;
+        for (device, records) in &emitted {
+            if device.is_none() {
+                continue;
+            }
+            assert_eq!(device.as_deref(), Some(IMPORT_DEVICE));
+            messages += records.len();
+        }
+        assert!(messages > 0, "the pulled transcript did not ship");
+        assert_eq!(pull_runs(&script), 1);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_second_tick_within_the_period_does_not_run_the_command_again() {
+        let transcripts = TempTranscripts::new("provider-pull-period");
+        let script = pull_import(&transcripts, COPY_FIXTURE, 3_600);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let imports = [script.import.clone()];
+
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+
+        assert_eq!(pull_runs(&script), 1);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_restarted_provider_reads_the_attempt_time_from_the_buffer_and_does_not_pull_again() {
+        let transcripts = TempTranscripts::new("provider-pull-restart");
+        let script = pull_import(&transcripts, COPY_FIXTURE, 3_600);
+        let buffer = transcripts.buffer();
+        let imports = [script.import.clone()];
+
+        let mut first = ClaudeCodeProvider::new(buffer.handle());
+        tick_emissions(&mut first, &[], &imports, &buffer.handle()).await;
+        let mut restarted = ClaudeCodeProvider::new(buffer.handle());
+        tick_emissions(&mut restarted, &[], &imports, &buffer.handle()).await;
+
+        assert_eq!(pull_runs(&script), 1);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_failing_command_still_records_the_attempt_and_is_not_retried() {
+        let transcripts = TempTranscripts::new("provider-pull-fails");
+        let script = pull_import(&transcripts, "echo broken >&2\nexit 1", 3_600);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        let imports = [script.import.clone()];
+
+        let first = tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+
+        assert_eq!(pull_runs(&script), 1);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].1.is_empty());
+        buffer.close().await.expect("the buffer did not close");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_outlives_its_deadline_is_killed_and_the_tick_completes() {
+        let transcripts = TempTranscripts::new("provider-pull-deadline");
+        let script = pull_import(&transcripts, "exec sleep 30", 3_600);
+        let buffer = transcripts.buffer();
+        let mut provider = ClaudeCodeProvider::new(buffer.handle());
+        provider.pull_deadline = Duration::from_millis(200);
+        let imports = [script.import.clone()];
+
+        let started = std::time::Instant::now();
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        tick_emissions(&mut provider, &[], &imports, &buffer.handle()).await;
+        assert_eq!(pull_runs(&script), 1);
+        buffer.close().await.expect("the buffer did not close");
+    }
+
     #[tokio::test]
     async fn a_buffer_that_refuses_cursor_reads_fails_the_provider() {
         let transcripts = TempTranscripts::new("provider-closed-buffer");
@@ -2112,7 +3183,7 @@ mod tests {
         buffer.close().await.expect("the buffer did not close");
 
         let (out, _inbox) = channel(4);
-        let outcome = provider.tick(&[transcripts.root()], &out).await;
+        let outcome = provider.tick(&[transcripts.root()], &[], &out).await;
 
         let Err(ProviderError(reason)) = outcome else {
             panic!("a refused cursor read must fail the provider");
@@ -2141,6 +3212,7 @@ mod tests {
             cursor,
             committed,
             ships_before_commit,
+            ..
         }) = inbox.recv().await
         else {
             panic!("the provider stopped without emitting");
@@ -2153,7 +3225,7 @@ mod tests {
         assert_eq!(*provider, runtime::Provider::ClaudeCode);
         assert_eq!(*key, transcripts.session().to_string_lossy());
         handle
-            .enqueue(records, cursor)
+            .enqueue(records, cursor, None)
             .await
             .expect("the emission could not be buffered");
         let Some(committed) = committed else {
@@ -2220,8 +3292,11 @@ mod tests {
                     Source {
                         profile,
                         repos: &repos,
+                        identity: Identity::Inode,
+                        touches: Touches::Collected,
+                        since: None,
                     },
-                    cursor,
+                    cursor.clone(),
                     READ_BUDGET,
                 )
                 .expect("the live transcript reads")
