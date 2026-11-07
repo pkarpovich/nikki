@@ -186,6 +186,7 @@ pub struct Shipper<T> {
     batch_size: usize,
     requests: mpsc::Sender<oneshot::Sender<()>>,
     urgent: mpsc::Receiver<oneshot::Sender<()>>,
+    last_kept_reason: Option<String>,
 }
 
 impl<T: Transport> Shipper<T> {
@@ -197,6 +198,7 @@ impl<T: Transport> Shipper<T> {
             batch_size: MAX_BATCH,
             requests,
             urgent,
+            last_kept_reason: None,
         }
     }
 
@@ -224,6 +226,7 @@ impl<T: Transport> Shipper<T> {
 
         match disposition {
             Disposition::Delete { rejections } => {
+                self.last_kept_reason = None;
                 for Rejection { index, reason } in &rejections {
                     tracing::warn!(index, %reason, "the service rejected a record permanently");
                 }
@@ -236,16 +239,25 @@ impl<T: Transport> Shipper<T> {
                 Ok(Progress::Shipped { count })
             }
             Disposition::Keep { reason } => {
-                tracing::error!(%reason, count = batch.len(), "a batch was kept for retry");
+                if self.last_kept_reason.as_ref() == Some(&reason) {
+                    tracing::debug!(%reason, count = batch.len(), "a batch was kept for retry again");
+                } else {
+                    tracing::error!(%reason, count = batch.len(), "a batch was kept for retry");
+                    self.last_kept_reason = Some(reason.clone());
+                }
                 Ok(Progress::Kept { reason })
             }
             Disposition::DeadLetter { reason } => {
+                self.last_kept_reason = None;
                 let count = batch.len();
                 tracing::error!(%reason, count, "a batch was moved to the dead letter table");
                 self.buffer.dead_letter(batch, reason).await?;
                 Ok(Progress::DeadLettered { count })
             }
-            Disposition::Shrink => self.shrink(batch).await,
+            Disposition::Shrink => {
+                self.last_kept_reason = None;
+                self.shrink(batch).await
+            }
         }
     }
 

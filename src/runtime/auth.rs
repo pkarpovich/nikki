@@ -85,6 +85,7 @@ impl TokenSource {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build();
         let Ok(client) = client else {
             return Err(AuthError::Client);
@@ -423,10 +424,11 @@ mod tests {
             r#"{"access_token":"tok"}"#,
             "not json",
         ] {
-            assert!(matches!(
-                parse_token_response(200, body),
-                Err(AuthError::Unusable)
-            ));
+            match parse_token_response(200, body) {
+                Err(AuthError::Unusable) => {}
+                Ok(_) => panic!("expected Unusable, got a token"),
+                Err(error) => panic!("expected Unusable, got {error:?}"),
+            }
         }
     }
 
@@ -435,10 +437,13 @@ mod tests {
         let body = r#"{"error":"invalid_client","error_description":"secret"}"#;
         let error = parse_token_response(401, body).unwrap_err();
         let text = error.to_string();
-        assert!(matches!(
-            &error,
-            AuthError::Refused { status: 401, code: Some(code) } if code == "invalid_client"
-        ));
+        match &error {
+            AuthError::Refused { status, code } => {
+                assert_eq!(*status, 401);
+                assert_eq!(code.as_deref(), Some("invalid_client"));
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
         assert!(text.contains("401"));
         assert!(text.contains("invalid_client"));
         assert!(!text.contains("secret"));
@@ -447,13 +452,13 @@ mod tests {
     #[test]
     fn a_gateway_page_is_a_refusal_without_a_code() {
         let error = parse_token_response(502, "<html>bad gateway</html>").unwrap_err();
-        assert!(matches!(
-            error,
-            AuthError::Refused {
-                status: 502,
-                code: None
+        match error {
+            AuthError::Refused { status, code } => {
+                assert_eq!(status, 502);
+                assert_eq!(code, None);
             }
-        ));
+            other => panic!("expected Refused, got {other:?}"),
+        }
     }
 
     #[test]
@@ -463,7 +468,10 @@ mod tests {
         let error = TokenSource::new(&auth(path.clone(), "https://auth.example/t"))
             .err()
             .unwrap();
-        assert!(matches!(error, AuthError::KeyUnreadable { .. }));
+        match error {
+            AuthError::KeyUnreadable { .. } => {}
+            ref other => panic!("expected KeyUnreadable, got {other:?}"),
+        }
         assert!(error.to_string().contains(&path.display().to_string()));
     }
 
@@ -475,7 +483,10 @@ mod tests {
         let error = TokenSource::new(&auth(path.clone(), "https://auth.example/t"))
             .err()
             .unwrap();
-        assert!(matches!(error, AuthError::KeyInvalid { .. }));
+        match error {
+            AuthError::KeyInvalid { .. } => {}
+            ref other => panic!("expected KeyInvalid, got {other:?}"),
+        }
         let text = error.to_string();
         assert!(text.contains(&path.display().to_string()));
         assert!(!text.contains("hunter2"));
@@ -495,7 +506,10 @@ mod tests {
         let error = TokenSource::new(&auth(path.clone(), "https://auth.example/t"))
             .err()
             .unwrap();
-        assert!(matches!(error, AuthError::KeyInvalid { .. }));
+        match error {
+            AuthError::KeyInvalid { .. } => {}
+            ref other => panic!("expected KeyInvalid, got {other:?}"),
+        }
         let body_line = content.lines().nth(1).unwrap();
         assert!(!error.to_string().contains(body_line));
     }
@@ -512,7 +526,10 @@ mod tests {
         let error = TokenSource::new(&auth(path, "https://auth.example/t"))
             .err()
             .unwrap();
-        assert!(matches!(error, AuthError::KeyInvalid { .. }));
+        match error {
+            AuthError::KeyInvalid { .. } => {}
+            ref other => panic!("expected KeyInvalid, got {other:?}"),
+        }
     }
 
     struct TokenServer {
@@ -521,6 +538,17 @@ mod tests {
     }
 
     async fn serve(responses: Vec<(u16, &'static str)>) -> TokenServer {
+        serve_with_location(responses, None).await
+    }
+
+    async fn serve_redirect(location: &'static str) -> TokenServer {
+        serve_with_location(vec![(307, "")], Some(location)).await
+    }
+
+    async fn serve_with_location(
+        responses: Vec<(u16, &'static str)>,
+        location: Option<&'static str>,
+    ) -> TokenServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/token", listener.local_addr().unwrap());
         let requests = Arc::new(AtomicUsize::new(0));
@@ -543,8 +571,12 @@ mod tests {
                         break;
                     }
                 }
+                let location_header = match location {
+                    Some(location) => format!("location: {location}\r\n"),
+                    None => String::new(),
+                };
                 let reply = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{location_header}content-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(reply.as_bytes()).await;
@@ -591,12 +623,29 @@ mod tests {
         let server = serve(vec![(401, r#"{"error":"invalid_client"}"#), (200, GOOD)]).await;
         let source = source(&fixture, &server.url);
 
-        assert!(matches!(
-            source.token().await,
-            Err(AuthError::Refused { status: 401, .. })
-        ));
+        match source.token().await {
+            Err(AuthError::Refused { status, .. }) => assert_eq!(status, 401),
+            Ok(_) => panic!("expected Refused, got a token"),
+            Err(error) => panic!("expected Refused, got {error:?}"),
+        }
         assert_eq!(source.token().await.unwrap(), "tok");
         assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_a_refusal_and_is_never_followed() {
+        let fixture = fixture("redirect");
+        let target = serve(vec![(200, GOOD)]).await;
+        let location: &'static str = Box::leak(target.url.clone().into_boxed_str());
+        let server = serve_redirect(location).await;
+        let source = source(&fixture, &server.url);
+
+        match source.token().await {
+            Err(AuthError::Refused { status, .. }) => assert_eq!(status, 307),
+            Ok(_) => panic!("expected Refused, got a token"),
+            Err(error) => panic!("expected Refused, got {error:?}"),
+        }
+        assert_eq!(target.requests.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
