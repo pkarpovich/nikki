@@ -20,14 +20,47 @@ pub const LOCAL_STATE_FILE: &str = "Local State";
 pub const HISTORY_FILE: &str = "History";
 pub const HISTORY_JOURNAL_FILE: &str = "History-journal";
 pub const SNAPSHOT_DIR: &str = "history-snapshot";
+pub const ARDIA_ROOT_RELATIVE: &str = "Library/Application Support/com.ardia.browser/Chromium";
+pub const ARDIA_SESSION_FILE: &str = "session.json";
+pub const ARDIA_SNAPSHOT_DIR: &str = "history-snapshot-ardia";
+const ARDIA_PROFILE_PREFIX: &str = "Profile ";
 pub const PAGE_LIMIT: usize = 5_000;
 
 const CLONE_PROGRAM: &str = "/bin/cp";
 const CLONE_FLAG: &str = "-c";
 const WEBKIT_EPOCH_OFFSET_MILLIS: i64 = 11_644_473_600_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Browser {
+    Dia,
+    Ardia,
+}
+
+impl Browser {
+    pub fn root(self, home: &Path) -> PathBuf {
+        match self {
+            Browser::Dia => home.join(USER_DATA_RELATIVE),
+            Browser::Ardia => home.join(ARDIA_ROOT_RELATIVE),
+        }
+    }
+
+    pub fn snapshot_dir(self) -> &'static str {
+        match self {
+            Browser::Dia => SNAPSHOT_DIR,
+            Browser::Ardia => ARDIA_SNAPSHOT_DIR,
+        }
+    }
+
+    pub fn directory_for(self, root: &Path, profile: &str) -> Result<String, String> {
+        match self {
+            Browser::Dia => directory_for(root, profile),
+            Browser::Ardia => ardia_directory_for(root, profile),
+        }
+    }
+}
+
 pub fn user_data_dir(home: &Path) -> PathBuf {
-    home.join(USER_DATA_RELATIVE)
+    Browser::Dia.root(home)
 }
 
 pub struct BrowserHistoryProvider {
@@ -69,6 +102,7 @@ impl Provider for BrowserHistoryProvider {
             ticker.tick().await;
 
             let outcome = poll_once(
+                Browser::Dia,
                 user_data,
                 &snapshot,
                 &profile,
@@ -223,6 +257,42 @@ fn resolve_directory(text: &str, profile: &str) -> Result<String, String> {
     ))
 }
 
+pub fn ardia_directory_for(root: &Path, profile: &str) -> Result<String, String> {
+    let Some(base) = root.parent() else {
+        return Err(format!("{} has no parent directory", root.display()));
+    };
+    let path = base.join(ARDIA_SESSION_FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(source) => return Err(format!("{} could not be read: {source}", path.display())),
+    };
+    match resolve_ardia_directory(&text, profile) {
+        Ok(directory) => Ok(directory),
+        Err(reason) => Err(format!("{} {reason}", path.display())),
+    }
+}
+
+fn resolve_ardia_directory(text: &str, profile: &str) -> Result<String, String> {
+    let session: ArdiaSession = match serde_json::from_str(text) {
+        Ok(session) => session,
+        Err(error) => return Err(format!("is not valid json: {error}")),
+    };
+    let ArdiaSession { profiles } = session;
+
+    let mut known = Vec::new();
+    for (_, entry) in profiles {
+        let ArdiaProfile { id, name } = entry;
+        if name == profile {
+            return Ok(format!("{ARDIA_PROFILE_PREFIX}{id}"));
+        }
+        known.push(name);
+    }
+    Err(format!(
+        "holds no profile named `{profile}`; the profiles that exist are {}",
+        listed(&known)
+    ))
+}
+
 fn listed(known: &[String]) -> String {
     if known.is_empty() {
         return "none".to_string();
@@ -231,6 +301,7 @@ fn listed(known: &[String]) -> String {
 }
 
 async fn poll_once(
+    browser: Browser,
     user_data: &Path,
     snapshot: &Path,
     profile: &str,
@@ -239,7 +310,7 @@ async fn poll_once(
     page: usize,
 ) -> Option<PollOutcome> {
     let _held = SnapshotGuard { path: snapshot };
-    let directory = match directory_for(user_data, profile) {
+    let directory = match browser.directory_for(user_data, profile) {
         Ok(directory) => directory,
         Err(reason) => {
             tracing::warn!(
@@ -316,15 +387,17 @@ fn discard(snapshot: &Path) {
 }
 
 pub fn discard_stale_snapshot(state_dir: &Path) {
-    let snapshot = state_dir.join(SNAPSHOT_DIR);
-    if !snapshot.exists() {
-        return;
+    for browser in [Browser::Dia, Browser::Ardia] {
+        let snapshot = state_dir.join(browser.snapshot_dir());
+        if !snapshot.exists() {
+            continue;
+        }
+        tracing::warn!(
+            path = %snapshot.display(),
+            "a history clone outlived the run that made it and is discarded"
+        );
+        discard(&snapshot);
     }
-    tracing::warn!(
-        path = %snapshot.display(),
-        "a history clone outlived the run that made it and is discarded"
-    );
-    discard(&snapshot);
 }
 
 fn collect_from(
@@ -533,6 +606,17 @@ struct LocalStateProfile {
     info_cache: Map<String, Value>,
 }
 
+#[derive(Deserialize)]
+struct ArdiaSession {
+    profiles: BTreeMap<String, ArdiaProfile>,
+}
+
+#[derive(Deserialize)]
+struct ArdiaProfile {
+    id: String,
+    name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +630,7 @@ mod tests {
 
     const HISTORY: &[u8] = include_bytes!("../../fixtures/history_sample.db");
     const LOCAL_STATE: &str = include_str!("../../fixtures/dia_local_state.json");
+    const ARDIA_SESSION: &str = include_str!("../../fixtures/ardia_session.json");
 
     const PROFILE: &str = "MBP_21";
     const DIRECTORY: &str = "Default";
@@ -646,6 +731,7 @@ mod tests {
 
     async fn poll(home: &TempHome, state: Option<HistoryState>, page: usize) -> PollOutcome {
         poll_once(
+            Browser::Dia,
             &home.user_data(),
             &home.snapshot(),
             PROFILE,
@@ -934,6 +1020,7 @@ mod tests {
         assert_eq!(state.shipped.len(), 6);
 
         let narrow = poll_once(
+            Browser::Dia,
             &home.user_data(),
             &home.snapshot(),
             PROFILE,
@@ -961,6 +1048,7 @@ mod tests {
         home.leave_stale_snapshot();
 
         let outcome = poll_once(
+            Browser::Dia,
             &home.user_data(),
             &home.snapshot(),
             PROFILE,
@@ -974,6 +1062,75 @@ mod tests {
             !home.snapshot().exists(),
             "a poll that resolves no profile must still clear the clone it finds"
         );
+    }
+
+    #[test]
+    fn an_ardia_profile_name_resolves_to_its_id_directory() {
+        assert_eq!(
+            resolve_ardia_directory(ARDIA_SESSION, "MBP_21"),
+            Ok("Profile p-test-3".to_string())
+        );
+        assert_eq!(
+            resolve_ardia_directory(ARDIA_SESSION, "MBA_22"),
+            Ok("Profile p-test-2c".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unknown_ardia_profile_lists_the_names_that_exist() {
+        let reason = resolve_ardia_directory(ARDIA_SESSION, "Nowhere").expect_err("absent");
+        assert!(reason.contains("MBP_21"), "reason was {reason}");
+        assert!(reason.contains("MBA_22"), "reason was {reason}");
+    }
+
+    #[test]
+    fn a_broken_ardia_session_fails_with_the_file_named() {
+        let home = TempHome::new("ardia-broken");
+        let root = home.path.join("ardia").join("Chromium");
+        let session = home.path.join("ardia").join(ARDIA_SESSION_FILE);
+        fs::create_dir_all(&root).expect("the root could not be made");
+
+        let reason = ardia_directory_for(&root, "MBP_21").expect_err("no file");
+        assert!(reason.contains(ARDIA_SESSION_FILE), "reason was {reason}");
+
+        fs::write(&session, "not json").expect("the session could not be written");
+        let reason = ardia_directory_for(&root, "MBP_21").expect_err("bad json");
+        assert!(reason.contains(ARDIA_SESSION_FILE), "reason was {reason}");
+        assert!(reason.contains("not valid json"), "reason was {reason}");
+
+        fs::write(&session, r#"{"tabs": []}"#).expect("the session could not be written");
+        let reason = ardia_directory_for(&root, "MBP_21").expect_err("no profiles");
+        assert!(reason.contains(ARDIA_SESSION_FILE), "reason was {reason}");
+    }
+
+    #[test]
+    fn the_session_file_beside_the_root_resolves_a_profile() {
+        let home = TempHome::new("ardia-resolve");
+        let root = home.path.join("ardia").join("Chromium");
+        fs::create_dir_all(&root).expect("the root could not be made");
+        fs::write(
+            home.path.join("ardia").join(ARDIA_SESSION_FILE),
+            ARDIA_SESSION,
+        )
+        .expect("the session could not be written");
+        assert_eq!(
+            Browser::Ardia.directory_for(&root, "MBP_21"),
+            Ok("Profile p-test-3".to_string())
+        );
+    }
+
+    #[test]
+    fn a_clone_of_either_browser_that_outlived_its_run_is_discarded_at_startup() {
+        let home = TempHome::new("stale-both");
+        for browser in [Browser::Dia, Browser::Ardia] {
+            let snapshot = home.state_dir().join(browser.snapshot_dir());
+            runtime::private_dir(&snapshot).expect("the stale snapshot could not be made");
+        }
+
+        discard_stale_snapshot(&home.state_dir());
+        for browser in [Browser::Dia, Browser::Ardia] {
+            assert!(!home.state_dir().join(browser.snapshot_dir()).exists());
+        }
     }
 
     #[test]
@@ -1028,6 +1185,7 @@ mod tests {
 
         home.write_history(b"this is not a database at all, only a torn page");
         let outcome = poll_once(
+            Browser::Dia,
             &home.user_data(),
             &home.snapshot(),
             PROFILE,
@@ -1073,7 +1231,13 @@ mod tests {
         let user_data = home.user_data();
         let snapshot = home.snapshot();
         let mut poll = Box::pin(poll_once(
-            &user_data, &snapshot, PROFILE, WINDOW, None, PAGE_LIMIT,
+            Browser::Dia,
+            &user_data,
+            &snapshot,
+            PROFILE,
+            WINDOW,
+            None,
+            PAGE_LIMIT,
         ));
         let _ = tokio::time::timeout(Duration::from_millis(0), &mut poll).await;
 
@@ -1090,6 +1254,7 @@ mod tests {
         fs::remove_file(home.history()).expect("the history could not be removed");
 
         let outcome = poll_once(
+            Browser::Dia,
             &home.user_data(),
             &home.snapshot(),
             PROFILE,

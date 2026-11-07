@@ -146,12 +146,12 @@ since = "2026-11-02T05:36:00Z"     # required: RFC 3339 with offset
 - Modify: `src/providers/browser_history.rs`
 - Create: `fixtures/ardia_session.json`
 
-- [ ] Add `enum Browser { Dia, Ardia }` with the per-browser answers from Technical Details. Dia's answers reuse the existing constants and `directory_for`.
-- [ ] Add `ardia_directory_for` and its text-level parse helper.
-- [ ] Add the fixture: a minimal `session.json` with `profiles` holding two entries (`MBP_21` and `MBA_22`, ids `p-test-3` and `p-test-2c`, each with `id`, `name`, `color`, `createdAt`), plus a couple of unrelated top-level keys (`tabs: []`, `settings: {}`) to prove they are ignored.
-- [ ] Make `discard_stale_snapshot` sweep both snapshot directories.
-- [ ] Tests: `MBP_21` resolves to `Profile p-test-3`; an unknown name fails and the message lists `MBP_21, MBA_22`; invalid JSON and a missing `profiles` key fail with the file named; Dia resolution through `Local State` is unchanged (existing tests pass untouched); both stale snapshot directories are swept.
-- [ ] Run the gate.
+- [x] Add `enum Browser { Dia, Ardia }` with the per-browser answers from Technical Details. Dia's answers reuse the existing constants and `directory_for`.
+- [x] Add `ardia_directory_for` and its text-level parse helper.
+- [x] Add the fixture: a minimal `session.json` with `profiles` holding two entries (`MBP_21` and `MBA_22`, ids `p-test-3` and `p-test-2c`, each with `id`, `name`, `color`, `createdAt`), plus a couple of unrelated top-level keys (`tabs: []`, `settings: {}`) to prove they are ignored.
+- [x] Make `discard_stale_snapshot` sweep both snapshot directories.
+- [x] Tests: `MBP_21` resolves to `Profile p-test-3`; an unknown name fails and the message lists `MBP_21, MBA_22`; invalid JSON and a missing `profiles` key fail with the file named; Dia resolution through `Local State` is unchanged (existing tests pass untouched); both stale snapshot directories are swept.
+- [x] Run the gate.
 
 ### Task 3: Browser-aware keys, payload, cursor and `since` in the provider
 

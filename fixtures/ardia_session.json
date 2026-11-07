@@ -1,0 +1,18 @@
+{
+  "tabs": [],
+  "settings": {},
+  "profiles": {
+    "p-test-3": {
+      "id": "p-test-3",
+      "name": "MBP_21",
+      "color": "blue",
+      "createdAt": "2026-10-01T09:00:00Z"
+    },
+    "p-test-2c": {
+      "id": "p-test-2c",
+      "name": "MBA_22",
+      "color": "green",
+      "createdAt": "2026-10-02T09:00:00Z"
+    }
+  }
+}
