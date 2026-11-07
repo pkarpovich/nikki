@@ -148,6 +148,7 @@ fn report(application: Application, error: ScriptError) {
     match error {
         ScriptError::AutomationDenied => application.denial_warning().call_once(|| {
             tracing::warn!(
+                browser = application.name(),
                 "automation for the browser was denied, so no tab will be captured until it is granted in System Settings"
             );
         }),
@@ -283,6 +284,10 @@ mod tests {
 
     #[test]
     fn the_automation_warning_is_tracked_per_browser() {
+        assert!(!std::ptr::eq(
+            Application::Dia.denial_warning(),
+            Application::Ardia.denial_warning()
+        ));
         report(Application::Ardia, ScriptError::AutomationDenied);
         report(Application::Ardia, ScriptError::AutomationDenied);
         assert!(ARDIA_AUTOMATION_DENIED_WARNING.is_completed());

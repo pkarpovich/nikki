@@ -20,7 +20,7 @@ use crate::config::{Config, Paths};
 use crate::macos::ax::accessibility_is_trusted;
 use crate::macos::events::EventThread;
 use crate::providers::browser_history::{
-    Browser, BrowserHistoryProvider, directory_for, discard_stale_snapshot, user_data_dir,
+    Browser, BrowserHistoryProvider, directory_for, discard_stale_snapshot,
 };
 use crate::providers::claude_code::ClaudeCodeProvider;
 use crate::providers::scripted::{ScriptedSources, TEST_SOURCES_VAR};
@@ -30,7 +30,7 @@ use crate::runtime::ship::endpoint;
 use crate::runtime::{EMISSION_QUEUE, Pipeline, absorb, private_dir};
 
 const PROVIDERS: &str =
-    "windows, browser_history, claude_code, ardia_history (when [ardia] is set)";
+    "windows, browser_history (Dia, and Ardia when [ardia] is set), claude_code";
 
 /// nikki captures what happens on this Mac and ships it to the nikki service.
 #[derive(FromArgs)]
@@ -191,7 +191,7 @@ async fn run(config: Config) -> Result<(), String> {
         return Err("HOME is not set, so the browser profile cannot be resolved".to_string());
     };
 
-    let user_data = user_data_dir(&home);
+    let user_data = Browser::Dia.root(&home);
     let directory = directory_for(&user_data, &config.browser.profile)?;
 
     let endpoint = match endpoint(&config.service_url) {

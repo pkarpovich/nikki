@@ -140,13 +140,13 @@ you go to grant it the permissions it needs.
 | Automation -> Ardia | the active tab's URL, title and profile | one-time prompt on first use |
 | (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state, the process table, Claude Code transcripts under the configured roots and import folders | none |
 
-Both grants are keyed by **identity and location together**: the Developer ID team plus the
+Every grant is keyed by **identity and location together**: the Developer ID team plus the
 `dev.pkarpovich.nikki` identifier that `codesign --identifier` pins, and the place the program is
 run from. Signing alone is not enough, which cost three upgrades before this was understood - macOS
 identifies an app bundle by its bundle id at a path that does not move, and a loose binary by its
 absolute path, so a versioned Homebrew Cellar path made every version a new program. Shipping the
 app in `/Applications` is what makes the grants durable; see [Install](#install). Changing the
-identifier still loses both silently: capture keeps running, titles go null and no tab is ever read
+identifier still loses all of them silently: capture keeps running, titles go null and no tab is ever read
 again.
 
 **The process table needs no permission, and only agterm's own variables are consulted.**
@@ -203,7 +203,7 @@ all - it reads `agtermctl` and the process table.
 ## Configuration
 
 `~/.config/nikki/config.toml`, or the path in `NIKKI_CONFIG`. `NIKKI_STATE_DIR` overrides the
-directory holding `buffer.db` and the per-poll `history-snapshot/` clone (default
+directory holding `buffer.db` and the per-poll `history-snapshot/` clone (and `history-snapshot-ardia/` when `[ardia]` is set) (default
 `~/Library/Application Support/nikki`). Both overrides exist so a test harness never touches the
 operator's real state. `HOME` is still required with both of them set: the browser profile is
 resolved under `$HOME/Library/Application Support/Dia/User Data`, and Ardia's under `$HOME/Library/Application Support/com.ardia.browser`, which no variable overrides, and an
@@ -1076,7 +1076,7 @@ fixtures/              captured Dia output, an Ardia session.json, agterm JSON, 
   active display. A window straddling two displays is attributed to the one with the largest
   intersection, ties broken by the lower index.
 - The browser tab is captured only when the browser is the focused application, and only one
-  profile's history is read. A rarely-used profile still leaves tab entries in window samples.
+  profile's history is read per browser: the `[browser]` profile in Dia and the `[ardia]` profile in Ardia. A rarely-used profile still leaves tab entries in window samples.
 - `mic_active` means the input device is running, not that anyone is listening.
 - A terminal pane running a setuid or hardened binary (`sudo`, `top`) reports no `command`:
   `KERN_PROCARGS2` declines to describe it, which is the same blind spot the agterm tree has. The

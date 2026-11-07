@@ -74,10 +74,6 @@ impl Browser {
     }
 }
 
-pub fn user_data_dir(home: &Path) -> PathBuf {
-    Browser::Dia.root(home)
-}
-
 #[derive(Debug, Clone, Copy)]
 struct Source<'a> {
     browser: Browser,
@@ -146,7 +142,7 @@ impl Provider for BrowserHistoryProvider {
                 return Err(ProviderError(reason));
             }
         };
-        tracing::info!(%profile, %directory, "the browser profile resolved");
+        tracing::info!(browser = ?browser, %profile, %directory, "the browser profile resolved");
 
         let mut state = stored_state(cursors, &cursor_key).await?;
 
@@ -311,10 +307,7 @@ fn resolve_directory(text: &str, profile: &str) -> Result<String, String> {
 }
 
 pub fn ardia_directory_for(root: &Path, profile: &str) -> Result<String, String> {
-    let Some(base) = root.parent() else {
-        return Err(format!("{} has no parent directory", root.display()));
-    };
-    let path = base.join(ARDIA_SESSION_FILE);
+    let path = root.with_file_name(ARDIA_SESSION_FILE);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(source) => return Err(format!("{} could not be read: {source}", path.display())),
@@ -1003,6 +996,35 @@ mod tests {
     fn a_fresh_ardia_state_with_since_ships_every_visit_from_since_on() {
         let home = TempHome::new("ardia-since");
         let PollOutcome { records, state } = ardia_poll(&home, Some(second_visit_time()), None);
+        assert_eq!(visit_ids(&records), vec![902, 903, 904, 905, 906]);
+        assert_eq!(state.cursor, NEWEST_VISIT);
+    }
+
+    #[test]
+    fn a_fresh_ardia_state_with_since_reads_past_a_narrow_revisit_window() {
+        let home = TempHome::new("ardia-since-narrow");
+        let PollOutcome { records, .. } = collect_from(
+            &home.history(),
+            ardia(Some(second_visit_time())),
+            2,
+            None,
+            PAGE_LIMIT,
+        )
+        .expect("the history could not be read");
+        assert_eq!(visit_ids(&records), vec![902, 903, 904, 905, 906]);
+    }
+
+    #[test]
+    fn ardia_since_survives_paging() {
+        let home = TempHome::new("ardia-since-paged");
+        let PollOutcome { records, state } = collect_from(
+            &home.history(),
+            ardia(Some(second_visit_time())),
+            WINDOW,
+            None,
+            2,
+        )
+        .expect("the history could not be read");
         assert_eq!(visit_ids(&records), vec![902, 903, 904, 905, 906]);
         assert_eq!(state.cursor, NEWEST_VISIT);
     }
