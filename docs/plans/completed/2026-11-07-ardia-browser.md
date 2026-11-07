@@ -205,7 +205,7 @@ since = "2026-11-02T05:36:00Z"     # required: RFC 3339 with offset
 
 ### Task 7: [Final] Update documentation
 
-- [ ] `README.md`:
+- [x] `README.md`:
   - Configuration: the `[ardia]` example and its two field-table rows.
   - Permissions: Automation -> Ardia beside Dia, one-time prompt on first use.
   - The `browser_history` provider section: Ardia as a second instance, profile names from `session.json` and why not `Local State`, `since` and why (the seeded import), its own snapshot directory, failure restarts only the Ardia provider.
@@ -213,7 +213,7 @@ since = "2026-11-02T05:36:00Z"     # required: RFC 3339 with offset
   - Wire contract: `browser_history/visit` optional `browser` field (`ardia` today, absent for Dia), and in `### Identity` the Ardia key line `device \x1F "browser_history" \x1F "ardia" \x1F profile \x1F generation \x1F visit_id`, with the reason (ids collide with Dia's).
   - `details` on a window record: `com.ardia.browser` carries the same fields as Dia.
   - Status: the browsers it reads are Dia and Ardia.
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Move this plan to `docs/plans/completed/`.
 
 ## Post-Completion
 
