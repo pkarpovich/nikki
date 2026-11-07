@@ -174,10 +174,10 @@ audience = "https://nikki.pkarpovich.space/api"
 - Modify: `src/main.rs`
 - Modify: `src/runtime/mod.rs` (if the error type needs a variant)
 
-- [ ] An unusable key is a startup error from `Pipeline::open`, logged like the other startup errors.
-- [ ] `--check-config` also builds the `TokenSource` (reads and parses the key, makes no network call) and fails on an unusable key. The startup log line names `auth=<client_id>` or `auth=off`.
-- [ ] Tests for the `Pipeline::open` failure path with a bad key file, through the entry point the daemon uses.
-- [ ] Run the gate.
+- [x] An unusable key is a startup error from `Pipeline::open`, logged like the other startup errors.
+- [x] `--check-config` also builds the `TokenSource` (reads and parses the key, makes no network call) and fails on an unusable key. The startup log line names `auth=<client_id>` or `auth=off`.
+- [x] Tests for the `Pipeline::open` failure path with a bad key file, through the entry point the daemon uses.
+- [x] Run the gate.
 
 ### Task 5: Verify acceptance criteria
 
