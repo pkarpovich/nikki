@@ -141,16 +141,16 @@ audience = "https://nikki.pkarpovich.space/api"
 - Modify: `src/runtime/mod.rs` (declare the module)
 - Modify: `Cargo.toml`, `Cargo.lock`
 
-- [ ] Add the dependencies from Technical Details.
-- [ ] Implement `TokenSource`, `assertion`, the form builder, `parse_token_response`, `token`, `invalidate` and `AuthError` as specified.
-- [ ] Tests. Never commit a private key, not even a test one: GitGuardian fails the PR on any PEM private key. Generate the key inside the test with `aws-lc-rs` (an RSA 2048 key pair, serialised to PKCS#8 PEM for the key file and to a public PEM for `DecodingKey`), written to a temp dir:
+- [x] Add the dependencies from Technical Details.
+- [x] Implement `TokenSource`, `assertion`, the form builder, `parse_token_response`, `token`, `invalidate` and `AuthError` as specified.
+- [x] Tests. Never commit a private key, not even a test one: GitGuardian fails the PR on any PEM private key. Generate the key inside the test with `aws-lc-rs` (an RSA 2048 key pair, serialised to PKCS#8 PEM for the key file and to a public PEM for `DecodingKey`), written to a temp dir:
   - the assertion decodes with the generated public key (`jsonwebtoken::decode` with `DecodingKey::from_rsa_pem`, RS256, `aud` = token URL) and carries exactly the header and claims from Overview, with `exp - iat == 60`;
   - two assertions get different `jti`;
   - the form carries exactly the six fields, with `scope=nikki:ingest`;
   - `parse_token_response`: a good `200` yields the token and lifetime; `200` without `access_token`, with an empty one, with `expires_in: 0` and with a non-JSON body are `Unusable`; `401 {"error":"invalid_client","error_description":"secret"}` is `Refused` with code `invalid_client` and the description appears nowhere in `Display`; a `502` HTML page is `Refused` with no code;
   - `TokenSource::new` fails naming the path for a missing file, a non-PEM file and an EC key PEM, and the error text never contains the file's content;
   - caching: drive `token()` against a minimal local HTTP listener (a `tokio::net::TcpListener` in the test answering canned token responses and counting requests) - two calls within the lifetime make one request; after `invalidate()` the next call makes a new request; a failing first response caches nothing and the second call requests again. The token URL in tests may be `http://127.0.0.1:<port>` only through a test-only constructor that skips the `https` check; production config still requires `https`.
-- [ ] Run the gate.
+- [x] Run the gate.
 
 ### Task 3: Bearer on ingest
 
@@ -158,6 +158,7 @@ audience = "https://nikki.pkarpovich.space/api"
 - Modify: `src/runtime/ship.rs`
 - Modify: `src/runtime/mod.rs`
 
+- [ ] Remove the temporary `#[allow(dead_code)]` on `pub mod auth;` in `src/runtime/mod.rs` (added in Task 2 because nothing called the module yet).
 - [ ] `HttpTransport::new(service_url, Option<TokenSource>)`, the `post` behaviour from Technical Details, and `Pipeline::open` building the `TokenSource` from `config.auth`.
 - [ ] Tests against a local listener as in Task 2 (one listener can serve both the token endpoint and the ingest path):
   - with auth, the ingest request carries `Authorization: Bearer <token>` and the token endpoint is hit once for two posts;
