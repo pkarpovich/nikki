@@ -29,7 +29,8 @@ use crate::providers::{Backoff, Ctx, supervise};
 use crate::runtime::ship::endpoint;
 use crate::runtime::{EMISSION_QUEUE, Pipeline, absorb, private_dir};
 
-const PROVIDERS: &str = "windows, browser_history, claude_code";
+const PROVIDERS: &str =
+    "windows, browser_history, claude_code, ardia_history (when [ardia] is set)";
 
 /// nikki captures what happens on this Mac and ships it to the nikki service.
 #[derive(FromArgs)]
@@ -232,6 +233,14 @@ async fn run(config: Config) -> Result<(), String> {
         "nikki is running"
     );
 
+    let ardia = match &config.ardia {
+        Some(config::Ardia { profile, since }) => {
+            tracing::info!(profile = %profile, since = ?since, "ardia history is enabled");
+            Some(*since)
+        }
+        None => None,
+    };
+
     let ctx = Ctx {
         config: Arc::new(config),
     };
@@ -270,6 +279,19 @@ async fn run(config: Config) -> Result<(), String> {
         emissions.clone(),
         Backoff::default(),
     ));
+    let ardia_history = ardia.map(|since| {
+        tokio::spawn(supervise(
+            BrowserHistoryProvider::new(
+                Browser::Ardia,
+                Browser::Ardia.root(&home),
+                records.clone(),
+                Some(since),
+            ),
+            ctx.clone(),
+            emissions.clone(),
+            Backoff::default(),
+        ))
+    });
     let claude_code = tokio::spawn(supervise(
         ClaudeCodeProvider::new(records),
         ctx,
@@ -290,9 +312,15 @@ async fn run(config: Config) -> Result<(), String> {
 
     windows.abort();
     history.abort();
+    if let Some(ardia_history) = &ardia_history {
+        ardia_history.abort();
+    }
     claude_code.abort();
     let _ = windows.await;
     let _ = history.await;
+    if let Some(ardia_history) = ardia_history {
+        let _ = ardia_history.await;
+    }
     let _ = claude_code.await;
     event_thread.stop();
 

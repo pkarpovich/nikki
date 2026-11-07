@@ -192,10 +192,10 @@ since = "2026-11-02T05:36:00Z"     # required: RFC 3339 with offset
 **Files:**
 - Modify: `src/main.rs`
 
-- [ ] When `config.ardia` is `Some`, spawn a second `supervise(BrowserHistoryProvider::new(Browser::Ardia, ardia_root, records.clone(), Some(since)), ...)` beside the Dia one, abort and await it on shutdown like the others. When `None`, spawn nothing.
-- [ ] Log the Ardia profile on the startup line (or one `info` line when present). Keep `PROVIDERS` accurate.
-- [ ] Do not resolve Ardia at startup. Dia's startup resolution is unchanged.
-- [ ] The existing tests and the gate pass.
+- [x] When `config.ardia` is `Some`, spawn a second `supervise(BrowserHistoryProvider::new(Browser::Ardia, ardia_root, records.clone(), Some(since)), ...)` beside the Dia one, abort and await it on shutdown like the others. When `None`, spawn nothing.
+- [x] Log the Ardia profile on the startup line (or one `info` line when present). Keep `PROVIDERS` accurate.
+- [x] Do not resolve Ardia at startup. Dia's startup resolution is unchanged.
+- [x] The existing tests and the gate pass.
 
 ### Task 6: Verify acceptance criteria
 
