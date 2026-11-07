@@ -13,6 +13,7 @@ use tokio::time::timeout;
 pub const SUBPROCESS_DEADLINE: Duration = Duration::from_secs(2);
 
 pub const DIA_BUNDLE_ID: &str = "company.thebrowser.dia";
+pub const ARDIA_BUNDLE_ID: &str = "com.ardia.browser";
 pub const AGTERM_BUNDLE_ID: &str = "com.umputun.agterm";
 
 pub type Details = Map<String, Value>;
@@ -20,6 +21,7 @@ pub type Details = Map<String, Value>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Extractor {
     Dia,
+    Ardia,
     Agterm,
 }
 
@@ -27,6 +29,7 @@ impl Extractor {
     pub fn for_bundle_id(bundle_id: &str) -> Option<Extractor> {
         match bundle_id {
             DIA_BUNDLE_ID => Some(Extractor::Dia),
+            ARDIA_BUNDLE_ID => Some(Extractor::Ardia),
             AGTERM_BUNDLE_ID => Some(Extractor::Agterm),
             _ => None,
         }
@@ -34,7 +37,8 @@ impl Extractor {
 
     pub async fn details(self) -> Details {
         match self {
-            Extractor::Dia => dia::active_tab().await,
+            Extractor::Dia => dia::active_tab(dia::Application::Dia).await,
+            Extractor::Ardia => dia::active_tab(dia::Application::Ardia).await,
             Extractor::Agterm => agterm::active_session().await,
         }
     }
@@ -109,6 +113,10 @@ mod tests {
         assert_eq!(
             Extractor::for_bundle_id(DIA_BUNDLE_ID),
             Some(Extractor::Dia)
+        );
+        assert_eq!(
+            Extractor::for_bundle_id("com.ardia.browser"),
+            Some(Extractor::Ardia)
         );
         assert_eq!(
             Extractor::for_bundle_id(AGTERM_BUNDLE_ID),

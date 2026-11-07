@@ -181,11 +181,11 @@ since = "2026-11-02T05:36:00Z"     # required: RFC 3339 with offset
 - Modify: `src/extract/mod.rs`
 - Modify: `src/extract/dia.rs`
 
-- [ ] Add `ARDIA_BUNDLE_ID` and `Extractor::Ardia`, dispatched to the same tab code with Ardia's application name.
-- [ ] Build the script for an application name. Dia's script text is unchanged.
-- [ ] Make the Automation-denied warning once per browser.
-- [ ] Tests: `for_bundle_id("com.ardia.browser")` is `Ardia`; Ardia's script contains `tell application "Ardia"` and `running of application "Ardia"` and no `"Dia"`; Dia's script is unchanged; the existing captured-output parse test passes for both.
-- [ ] Run the gate.
+- [x] Add `ARDIA_BUNDLE_ID` and `Extractor::Ardia`, dispatched to the same tab code with Ardia's application name.
+- [x] Build the script for an application name. Dia's script text is unchanged.
+- [x] Make the Automation-denied warning once per browser.
+- [x] Tests: `for_bundle_id("com.ardia.browser")` is `Ardia`; Ardia's script contains `tell application "Ardia"` and `running of application "Ardia"` and no `"Dia"`; Dia's script is unchanged; the existing captured-output parse test passes for both.
+- [x] Run the gate.
 
 ### Task 5: Wire the Ardia provider in `main.rs`
 
