@@ -199,9 +199,9 @@ since = "2026-11-02T05:36:00Z"     # required: RFC 3339 with offset
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] Every Overview requirement against the acceptance scenario: Ardia visits after `since` with `browser: "ardia"`, Ardia tab details, Dia unchanged.
-- [ ] All pre-existing tests pass with edits limited to new parameters.
-- [ ] Run the gate. Nothing else.
+- [x] Every Overview requirement against the acceptance scenario: Ardia visits after `since` with `browser: "ardia"`, Ardia tab details, Dia unchanged.
+- [x] All pre-existing tests pass with edits limited to new parameters.
+- [x] Run the gate. Nothing else.
 
 ### Task 7: [Final] Update documentation
 
