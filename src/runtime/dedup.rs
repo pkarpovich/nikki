@@ -17,14 +17,21 @@ pub fn windows_key(device: &str, kind: Kind, ts_millis: i64, seq: u64) -> String
     ])
 }
 
-pub fn browser_key(device: &str, profile: &str, generation: u64, visit_id: i64) -> String {
-    key(&[
-        device,
-        Provider::BrowserHistory.as_str(),
-        profile,
-        &generation.to_string(),
-        &visit_id.to_string(),
-    ])
+pub fn browser_key(
+    device: &str,
+    browser: Option<&str>,
+    profile: &str,
+    generation: u64,
+    visit_id: i64,
+) -> String {
+    let generation = generation.to_string();
+    let visit_id = visit_id.to_string();
+    let mut fields = vec![device, Provider::BrowserHistory.as_str()];
+    if let Some(browser) = browser {
+        fields.push(browser);
+    }
+    fields.extend([profile, &generation, &visit_id]);
+    key(&fields)
 }
 
 pub fn claude_message_key(device: &str, session_id: &str, uuid: &str, block: u32) -> String {
@@ -100,8 +107,20 @@ mod tests {
     #[test]
     fn the_browser_key_hashes_the_unit_separator_joined_fields() {
         assert_eq!(
-            browser_key("mbp-21", "MBP_21", 1, 929_269),
+            browser_key("mbp-21", None, "MBP_21", 1, 929_269),
             expected("mbp-21\u{1f}browser_history\u{1f}MBP_21\u{1f}1\u{1f}929269")
+        );
+    }
+
+    #[test]
+    fn a_named_browser_sits_between_the_provider_and_the_profile() {
+        assert_eq!(
+            browser_key("mbp-21", Some("ardia"), "MBP_21", 1, 929_269),
+            expected("mbp-21\u{1f}browser_history\u{1f}ardia\u{1f}MBP_21\u{1f}1\u{1f}929269")
+        );
+        assert_ne!(
+            browser_key("mbp-21", Some("ardia"), "MBP_21", 1, 929_269),
+            browser_key("mbp-21", None, "MBP_21", 1, 929_269)
         );
     }
 
@@ -233,12 +252,12 @@ mod tests {
 
     #[test]
     fn every_browser_field_changes_the_key() {
-        let base = browser_key("mbp-21", "MBP_21", 1, 929_269);
+        let base = browser_key("mbp-21", None, "MBP_21", 1, 929_269);
         let variants = [
-            browser_key("mba-22", "MBP_21", 1, 929_269),
-            browser_key("mbp-21", "Intapp", 1, 929_269),
-            browser_key("mbp-21", "MBP_21", 2, 929_269),
-            browser_key("mbp-21", "MBP_21", 1, 929_270),
+            browser_key("mba-22", None, "MBP_21", 1, 929_269),
+            browser_key("mbp-21", None, "Intapp", 1, 929_269),
+            browser_key("mbp-21", None, "MBP_21", 2, 929_269),
+            browser_key("mbp-21", None, "MBP_21", 1, 929_270),
         ];
         for variant in variants {
             assert_ne!(base, variant);
@@ -248,7 +267,7 @@ mod tests {
     #[test]
     fn a_generation_of_one_is_present_rather_than_omitted() {
         assert_ne!(
-            browser_key("mbp-21", "MBP_21", 1, 929_269),
+            browser_key("mbp-21", None, "MBP_21", 1, 929_269),
             expected("mbp-21\u{1f}browser_history\u{1f}MBP_21\u{1f}929269")
         );
     }

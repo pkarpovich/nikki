@@ -20,7 +20,7 @@ use crate::config::{Config, Paths};
 use crate::macos::ax::accessibility_is_trusted;
 use crate::macos::events::EventThread;
 use crate::providers::browser_history::{
-    BrowserHistoryProvider, directory_for, discard_stale_snapshot, user_data_dir,
+    Browser, BrowserHistoryProvider, directory_for, discard_stale_snapshot, user_data_dir,
 };
 use crate::providers::claude_code::ClaudeCodeProvider;
 use crate::providers::scripted::{ScriptedSources, TEST_SOURCES_VAR};
@@ -265,7 +265,7 @@ async fn run(config: Config) -> Result<(), String> {
         }
     };
     let history = tokio::spawn(supervise(
-        BrowserHistoryProvider::new(user_data, records.clone()),
+        BrowserHistoryProvider::new(Browser::Dia, user_data, records.clone(), None),
         ctx.clone(),
         emissions.clone(),
         Backoff::default(),

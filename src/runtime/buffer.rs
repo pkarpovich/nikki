@@ -725,6 +725,7 @@ mod tests {
             degraded: false,
             payload: json!({"url": "https://example.com/", "visit_id": visit_id}),
             key: KeySource::BrowserVisit {
+                browser: None,
                 profile: "MBP_21".to_string(),
                 generation: 1,
                 visit_id,

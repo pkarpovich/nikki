@@ -160,12 +160,12 @@ since = "2026-11-02T05:36:00Z"     # required: RFC 3339 with offset
 - Modify: `src/runtime/mod.rs`
 - Modify: `src/runtime/dedup.rs`
 
-- [ ] Add `browser: Option<String>` to `KeySource::BrowserVisit` and the browser argument to `browser_key`, as in Technical Details. Update every construction site with `None` for Dia.
-- [ ] Give `BrowserHistoryProvider` its `Browser` and `since: Option<Timestamp>`. Dia is constructed with `Browser::Dia` and `None`.
-- [ ] Use the browser's resolution, snapshot dir and cursor key in `run` and `poll_once`. Ardia's resolution failure in `run` returns `ProviderError`.
-- [ ] Implement the fresh-state-at-0 rule and the per-poll `since` filter in `collect`.
-- [ ] `visit_record` adds `browser` to the payload for Ardia only.
-- [ ] Tests, through `collect` / `collect_from` on the existing `history_sample.db` fixture and through `dedup`:
+- [x] Add `browser: Option<String>` to `KeySource::BrowserVisit` and the browser argument to `browser_key`, as in Technical Details. Update every construction site with `None` for Dia.
+- [x] Give `BrowserHistoryProvider` its `Browser` and `since: Option<Timestamp>`. Dia is constructed with `Browser::Dia` and `None`.
+- [x] Use the browser's resolution, snapshot dir and cursor key in `run` and `poll_once`. Ardia's resolution failure in `run` returns `ProviderError`.
+- [x] Implement the fresh-state-at-0 rule and the per-poll `since` filter in `collect`.
+- [x] `visit_record` adds `browser` to the payload for Ardia only.
+- [x] Tests, through `collect` / `collect_from` on the existing `history_sample.db` fixture and through `dedup`:
   - a Dia key is byte-for-byte the value the existing test pins;
   - an Ardia key differs from the Dia key for the same device, profile, generation and visit id;
   - a fresh Ardia state with `since` ships every fixture visit at or after `since` and none before, and the cursor ends at the max id;
@@ -173,7 +173,7 @@ since = "2026-11-02T05:36:00Z"     # required: RFC 3339 with offset
   - a fresh Dia state still starts at the max id (existing test unchanged);
   - the Ardia payload carries `browser: "ardia"`, the Dia payload has no `browser` key;
   - the Ardia cursor key is `ardia:MBP_21`.
-- [ ] Run the gate.
+- [x] Run the gate.
 
 ### Task 4: Ardia tab extractor
 
