@@ -1363,4 +1363,44 @@ mod tests {
         assert_eq!(service.seen(TOKEN_PATH).len(), 2);
         assert_eq!(service.seen(RECORDS_PATH).len(), 2);
     }
+
+    #[tokio::test]
+    async fn only_an_ingest_401_invalidates_the_token() {
+        for status in [403, 500] {
+            let state = TempState::new("ingest-not-401");
+            let service = serve(vec![(200, GOOD_TOKEN)], (status, String::new())).await;
+            let transport = transport(&state, &service, true);
+
+            for _ in 0..2 {
+                let response = transport
+                    .post("{\"records\":[]}".to_string())
+                    .await
+                    .expect("the post gets an answer");
+                assert_eq!(response.status, status);
+            }
+
+            assert_eq!(service.seen(TOKEN_PATH).len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_token_request_is_a_form_post_carrying_a_signed_assertion() {
+        let state = TempState::new("token-wire");
+        let service = serve(vec![(200, GOOD_TOKEN)], (200, accepted(1))).await;
+        let transport = transport(&state, &service, true);
+
+        transport
+            .post("{\"records\":[]}".to_string())
+            .await
+            .expect("the post succeeds");
+
+        let token = service.seen(TOKEN_PATH);
+        assert_eq!(token.len(), 1);
+        let request = &token[0];
+        assert!(request.starts_with("post /token "));
+        assert!(request.contains("content-type: application/x-www-form-urlencoded"));
+        assert!(request.contains("grant_type=client_credentials"));
+        assert!(request.contains("scope=nikki%3aingest"));
+        assert!(request.contains("client_assertion=ey"));
+    }
 }

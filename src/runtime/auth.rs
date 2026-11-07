@@ -1,6 +1,6 @@
 use std::fmt::Write;
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
@@ -24,8 +24,8 @@ pub enum AuthError {
     KeyUnreadable { path: String },
     #[error("the oauth key file `{path}` does not hold an RSA private key in PKCS#8 PEM form")]
     KeyInvalid { path: String },
-    #[error("the http client could not be built: {0}")]
-    Client(String),
+    #[error("the http client could not be built: the platform tls stack is unavailable")]
+    Client,
     #[error("the client assertion could not be built")]
     Assertion,
     #[error("the token request failed: {0}")]
@@ -45,7 +45,7 @@ fn refused_message(status: u16, code: &Option<String>) -> String {
 
 struct CachedToken {
     value: String,
-    refresh_at: Instant,
+    refresh_at: SystemTime,
 }
 
 pub struct TokenSource {
@@ -87,11 +87,9 @@ impl TokenSource {
             .timeout(REQUEST_TIMEOUT)
             .build();
         let Ok(client) = client else {
-            return Err(AuthError::Client(
-                "the platform tls stack is unavailable".to_string(),
-            ));
+            return Err(AuthError::Client);
         };
-        Ok(TokenSource {
+        let source = TokenSource {
             client_id: auth.client_id.clone(),
             key_id: auth.key_id.clone(),
             token_url: auth.token_url.clone(),
@@ -99,13 +97,19 @@ impl TokenSource {
             key,
             client,
             cached: Mutex::new(None),
-        })
+        };
+        if source.assertion(unix_now(), "probe").is_err() {
+            return Err(AuthError::KeyInvalid {
+                path: auth.key_file.display().to_string(),
+            });
+        }
+        Ok(source)
     }
 
     pub async fn token(&self) -> Result<String, AuthError> {
         let mut cached = self.cached.lock().await;
         if let Some(token) = cached.as_ref()
-            && Instant::now() < token.refresh_at
+            && SystemTime::now() < token.refresh_at
         {
             return Ok(token.value.clone());
         }
@@ -113,7 +117,7 @@ impl TokenSource {
         let lifetime = Duration::from_secs(expires_in)
             .saturating_sub(REFRESH_MARGIN)
             .max(MIN_CACHE);
-        let Some(refresh_at) = Instant::now().checked_add(lifetime) else {
+        let Some(refresh_at) = SystemTime::now().checked_add(lifetime) else {
             return Err(AuthError::Unusable);
         };
         *cached = Some(CachedToken {
@@ -494,6 +498,21 @@ mod tests {
         assert!(matches!(error, AuthError::KeyInvalid { .. }));
         let body_line = content.lines().nth(1).unwrap();
         assert!(!error.to_string().contains(body_line));
+    }
+
+    #[test]
+    fn a_key_that_cannot_sign_is_rejected_at_startup() {
+        let dir = tempdir::Dir::new("corrupt");
+        let path = dir.path().join("key.pem");
+        let pair = KeyPair::generate(KeySize::Rsa2048).unwrap();
+        let mut der = pair.as_der().unwrap().as_ref().to_vec();
+        let last = der.len() - 8;
+        der[last] ^= 0xff;
+        std::fs::write(&path, pem("PRIVATE KEY", &der)).unwrap();
+        let error = TokenSource::new(&auth(path, "https://auth.example/t"))
+            .err()
+            .unwrap();
+        assert!(matches!(error, AuthError::KeyInvalid { .. }));
     }
 
     struct TokenServer {

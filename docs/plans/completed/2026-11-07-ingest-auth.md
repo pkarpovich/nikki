@@ -2,7 +2,7 @@
 
 ## Overview
 
-The service's ingest endpoint (`POST {service_url}/api/v1/records`) is moving behind Authelia bearer tokens: the service checks an RS256 access token with audience `https://nikki.pkarpovich.space/api` and scope `nikki:ingest`, first in a soft mode (a request without a token still passes), then required. This plan makes the daemon obtain such a token with the OAuth 2.0 `client_credentials` grant authenticated by `private_key_jwt`, cache it, and send it as `Authorization: Bearer <token>` on every ingest request.
+The service's ingest endpoint (`POST {service_url}/api/v1/records`) is moving behind Authelia bearer tokens: the service checks an RS256 access token with audience `https://nikki.example.com/api` and scope `nikki:ingest`, first in a soft mode (a request without a token still passes), then required. This plan makes the daemon obtain such a token with the OAuth 2.0 `client_credentials` grant authenticated by `private_key_jwt`, cache it, and send it as `Authorization: Bearer <token>` on every ingest request.
 
 Each Mac is its own Authelia client (`nikki-<device>`), holding an RSA private key that was generated on that Mac and never leaves it. The authorization server holds only the public half under a key id (`kid`). There is no client secret anywhere.
 
@@ -84,8 +84,8 @@ Do **not** run `./scripts/acceptance.sh`, any `-- --ignored` test or the real bi
 client_id = "nikki-mbp-21"
 key_id = "nikki-mbp-21-2026-11-07"
 key_file = "~/Library/Application Support/nikki/oauth/key.pem"
-token_url = "https://auth.pkarpovich.space/api/oidc/token"
-audience = "https://nikki.pkarpovich.space/api"
+token_url = "https://auth.example.com/api/oidc/token"
+audience = "https://nikki.example.com/api"
 ```
 
 - `Config` gains `pub auth: Option<Auth>`, `pub struct Auth { pub client_id: String, pub key_id: String, pub key_file: PathBuf, pub token_url: Url, pub audience: String }`.

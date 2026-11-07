@@ -209,7 +209,7 @@ operator's real state. `HOME` is still required with both of them set: the brows
 resolved under `$HOME/Library/Application Support/Dia/User Data`, and Ardia's under `$HOME/Library/Application Support/com.ardia.browser`, which no variable overrides, and an
 unset `HOME` is a startup failure.
 
-`nikki --check-config` loads and validates the configuration, logs the summary and exits.
+`nikki --check-config` loads and validates the configuration, reads and parses the `[auth]` key file when one is set (no network call), logs the summary and exits. An unusable key makes it fail.
 
 ```toml
 service_url = "http://alpha:8080"   # required, absolute http or https with a host
@@ -225,12 +225,12 @@ profile = "MBP_21"                  # required, the display name, not the direct
 profile = "MBP_21"                  # required, the name Ardia shows, from session.json
 since = "2026-11-02T05:36:00Z"      # required, RFC 3339 with offset
 
-[auth]                              # optional, omit to send no Authorization header
+[auth]                              # optional, omit to send no Authorization header, needs an https service_url
 client_id = "nikki-mbp-21"          # required, this Mac's OAuth client
 key_id = "nikki-mbp-21-2026-11-07"  # required, the kid the authorization server holds the public key under
 key_file = "~/Library/Application Support/nikki/oauth/key.pem"  # required, PKCS#8 RSA PEM
-token_url = "https://auth.pkarpovich.space/api/oidc/token"      # required, https with a host
-audience = "https://nikki.pkarpovich.space/api"                 # required
+token_url = "https://auth.example.com/api/oidc/token"      # required, https with a host
+audience = "https://nikki.example.com/api"                 # required
 
 [buffer]
 max_rows = 200000
@@ -290,6 +290,12 @@ drop = ["title"]
 An unknown key is a startup error rather than silence, and every validation failure names the field
 rather than the file.
 
+`tick_interval` is validated at startup because the server bounds it per record: a tick whose
+interval is absent, `<= 0` or `> 3600` is rejected, the response is still `200`, and the daemon's own
+rule then deletes it - so a misconfigured interval would destroy the whole window stream while
+`lock`, `wake` and browser visits kept succeeding, leaving the device reading `ok` on a timeline
+empty of work.
+
 ### Ingest authentication
 
 With `[auth]` the daemon gets an access token with the OAuth 2.0 `client_credentials` grant, authenticated by `private_key_jwt`, and sends it as `Authorization: Bearer <token>` on every ingest request. There is no client secret anywhere. The token is cached, fetched lazily right before a POST and refreshed two minutes before it expires. A token request that fails caches nothing, and the shipper's backoff is the retry.
@@ -304,12 +310,6 @@ openssl pkey -in ~/Library/Application\ Support/nikki/oauth/key.pem -pubout
 ```
 
 Only the public half and the key id go to the authorization server. The daemon never generates, rotates or stores keys.
-
-`tick_interval` is validated at startup because the server bounds it per record: a tick whose
-interval is absent, `<= 0` or `> 3600` is rejected, the response is still `200`, and the daemon's own
-rule then deletes it - so a misconfigured interval would destroy the whole window stream while
-`lock`, `wake` and browser visits kept succeeding, leaving the device reading `ok` on a timeline
-empty of work.
 
 ### Redaction
 
@@ -1086,14 +1086,13 @@ src/macos/             every unsafe block in the crate
 src/window/visibility.rs  the pure visible-set resolver
 src/extract/           the bundle-id-keyed extractor registry
 src/providers/         the Provider trait, the supervisor, and the three providers
-src/runtime/           buffer, dedup keys, redaction, shipping
+src/runtime/           buffer, dedup keys, redaction, shipping, the ingest token source
 fixtures/              captured Dia output, an Ardia session.json, agterm JSON, Local State, a small history database, a Claude Code transcript
 ```
 
 ## Known limitations
 
 - A token is fetched after every start, because nothing persists it. While the authorization server is down or refuses the client, no request reaches the service, the buffer grows until it is back, and the oldest records are evicted at the buffer caps.
-
 - Occlusion is not computed, so a fully covered window still counts as visible; `z` is recorded so it
   can be derived later.
 - A non-focused visible window belonging to a multi-window application has no title, flagged as

@@ -281,6 +281,15 @@ fn parse(
     let claude_code = claude_code_from(claude_code, &device, home)?;
     let ardia = ardia_from(ardia)?;
     let auth = auth_from(auth, home)?;
+    if auth.is_some() && service_url.scheme() != "https" {
+        return Err(ConfigError::Invalid {
+            field: "service_url",
+            reason: format!(
+                "scheme `{}` is not https, and the bearer token must not travel in clear text",
+                service_url.scheme()
+            ),
+        });
+    }
 
     Ok(Config {
         service_url,
@@ -1250,7 +1259,8 @@ drop = ["title"]
             let Some(value) = value else { continue };
             section.push_str(&format!("{key} = \"{value}\"\n"));
         }
-        format!("{HEAD}{BROWSER}{section}")
+        let head = HEAD.replace("http://alpha:8080", "https://alpha:8443");
+        format!("{head}{BROWSER}{section}")
     }
 
     #[test]
@@ -1269,6 +1279,15 @@ drop = ["title"]
                 audience: "https://nikki.example.com/api".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn an_auth_section_requires_an_https_service_url() {
+        let text = with_auth(&[]).replace("https://alpha:8443", "http://alpha:8080");
+        match parse_text(&text) {
+            Err(ConfigError::Invalid { field, .. }) => assert_eq!(field, "service_url"),
+            other => panic!("expected an invalid service_url, got {other:?}"),
+        }
     }
 
     #[test]
