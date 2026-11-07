@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod buffer;
 pub mod dedup;
 pub mod redact;
@@ -16,6 +17,7 @@ use tokio::sync::{mpsc, watch};
 use crate::config::Config;
 use crate::macos::events::SLEEP_FLUSH_BUDGET;
 use crate::providers::Emission;
+use crate::runtime::auth::{AuthError, TokenSource};
 use crate::runtime::buffer::{Buffer, BufferConfig, BufferError, BufferHandle};
 use crate::runtime::dedup::{
     browser_key, claude_message_key, claude_session_key, claude_touch_key, windows_key,
@@ -233,6 +235,8 @@ pub enum RuntimeError {
     Buffer(#[from] BufferError),
     #[error(transparent)]
     Ship(#[from] ShipError),
+    #[error(transparent)]
+    Auth(#[from] AuthError),
 }
 
 pub fn private_dir(path: &Path) -> io::Result<()> {
@@ -256,8 +260,13 @@ impl Pipeline {
             buffer,
             redact,
             state_dir,
+            auth,
             ..
         } = config;
+        let tokens = match auth {
+            Some(auth) => Some(TokenSource::new(auth)?),
+            None => None,
+        };
         let buffer = Buffer::open(BufferConfig {
             state_dir: state_dir.clone(),
             device: device.clone(),
@@ -265,7 +274,7 @@ impl Pipeline {
             max_bytes: buffer.max_bytes,
             redact: redact.clone(),
         })?;
-        let shipper = Shipper::new(buffer.handle(), HttpTransport::new(service_url)?);
+        let shipper = Shipper::new(buffer.handle(), HttpTransport::new(service_url, tokens)?);
         Ok(Pipeline { buffer, shipper })
     }
 
@@ -355,7 +364,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use crate::config::{Keep, RedactRule};
-    use crate::providers::tests::test_ctx;
+    use crate::providers::tests::{test_config, test_ctx};
     use crate::providers::{Backoff, Ctx, Provider as Supervised, ProviderError, supervise};
     use crate::runtime::redact::WILDCARD_HOST;
     use crate::runtime::ship::ship_now_channel;
@@ -674,6 +683,65 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         panic!("{what} did not happen in time");
+    }
+
+    fn auth_config(state: &TempState, key_file: PathBuf) -> Config {
+        let mut config = test_config(30);
+        config.state_dir = state.path.clone();
+        config.auth = Some(crate::config::Auth {
+            client_id: "nikki-mbp-21".to_string(),
+            key_id: "nikki-mbp-21-2026-11-07".to_string(),
+            key_file,
+            token_url: url::Url::parse("https://auth.example.com/api/oidc/token")
+                .expect("the test url parses"),
+            audience: "https://nikki.example.com/api".to_string(),
+        });
+        config
+    }
+
+    #[tokio::test]
+    async fn opening_the_pipeline_fails_on_a_missing_key_file() {
+        let state = TempState::new("open-missing-key");
+        let missing = state.path.join("absent.pem");
+        let config = auth_config(&state, missing.clone());
+
+        let Err(error) = Pipeline::open(&config) else {
+            panic!("a missing key file must stop the pipeline from opening");
+        };
+        match error {
+            RuntimeError::Auth(AuthError::KeyUnreadable { path }) => {
+                assert_eq!(path, missing.display().to_string());
+            }
+            other => panic!("expected an unreadable key, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_the_pipeline_fails_on_a_key_that_is_not_pem_and_never_echoes_it() {
+        let state = TempState::new("open-bad-key");
+        let key_file = state.path.join("key.pem");
+        fs::write(&key_file, "not-a-key-at-all-9f3c").expect("the key file is written");
+        let config = auth_config(&state, key_file);
+
+        let Err(error) = Pipeline::open(&config) else {
+            panic!("a malformed key file must stop the pipeline from opening");
+        };
+        assert!(!error.to_string().contains("not-a-key-at-all-9f3c"));
+        match error {
+            RuntimeError::Auth(AuthError::KeyInvalid { .. }) => {}
+            other => panic!("expected an invalid key, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_the_pipeline_accepts_a_usable_key() {
+        let state = TempState::new("open-good-key");
+        let key_file = state.path.join("key.pem");
+        auth::testing::write_rsa_key(&key_file);
+        let config = auth_config(&state, key_file);
+
+        let pipeline = Pipeline::open(&config).expect("a usable key opens the pipeline");
+        pipeline.close().await.expect("the pipeline closes");
     }
 
     #[tokio::test]

@@ -52,6 +52,9 @@ A test that reads the live machine rather than a fixture is `#[ignore]`d with a 
 where nothing in particular is open - the gate runs against committed fixtures, and the live
 assertion runs where a human is watching.
 
+A test that needs a private key generates it with `runtime::auth::testing::write_rsa_key` into a temp
+dir. No PEM private key is committed, fixtures included.
+
 ## Declare every module
 
 Every new module file is declared the moment it is created - `mod x;` in its parent `mod.rs` or in
@@ -86,6 +89,15 @@ A change to `src/providers/claude_code.rs` also requires `./scripts/acceptance.s
 transcript case is the only assertion that the real transcripts under the default roots still yield
 messages, read to their end or to a partial last line, and never ship an `isMeta` line - the fixture
 cannot notice Claude Code changing its transcript format.
+
+## Secrets
+
+The OAuth private key, the client assertion and the access token never reach a `tracing` call or an
+error `Display`. A token endpoint failure reports its status and OAuth `error` code only, and a
+reqwest error is reduced to timeout, connect or request-failed.
+
+`jsonwebtoken` stays on the `aws_lc_rs` backend: `rust_crypto` pulls the `rsa` crate, whose
+RUSTSEC-2023-0071 has no fix.
 
 ## Style
 

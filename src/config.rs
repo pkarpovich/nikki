@@ -101,6 +101,7 @@ pub struct Config {
     pub revisit_window: u32,
     pub browser: Browser,
     pub ardia: Option<Ardia>,
+    pub auth: Option<Auth>,
     pub buffer: Buffer,
     pub redact: Vec<RedactRule>,
     pub state_dir: PathBuf,
@@ -116,6 +117,15 @@ pub struct Browser {
 pub struct Ardia {
     pub profile: String,
     pub since: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Auth {
+    pub client_id: String,
+    pub key_id: String,
+    pub key_file: PathBuf,
+    pub token_url: Url,
+    pub audience: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +229,7 @@ fn parse(
         revisit_window,
         browser,
         ardia,
+        auth,
         buffer,
         redact,
         claude_code,
@@ -269,6 +280,16 @@ fn parse(
 
     let claude_code = claude_code_from(claude_code, &device, home)?;
     let ardia = ardia_from(ardia)?;
+    let auth = auth_from(auth, home)?;
+    if auth.is_some() && service_url.scheme() != "https" {
+        return Err(ConfigError::Invalid {
+            field: "service_url",
+            reason: format!(
+                "scheme `{}` is not https, and the bearer token must not travel in clear text",
+                service_url.scheme()
+            ),
+        });
+    }
 
     Ok(Config {
         service_url,
@@ -278,6 +299,7 @@ fn parse(
         revisit_window,
         browser: Browser { profile },
         ardia,
+        auth,
         buffer,
         redact,
         state_dir: state_dir.to_path_buf(),
@@ -421,6 +443,62 @@ fn ardia_from(section: Option<FileArdia>) -> Result<Option<Ardia>, ConfigError> 
     let since = required(since, "ardia.since")?;
     let since = since_from(&since, "ardia.since")?;
     Ok(Some(Ardia { profile, since }))
+}
+
+fn auth_from(section: Option<FileAuth>, home: Option<&Path>) -> Result<Option<Auth>, ConfigError> {
+    let Some(FileAuth {
+        client_id,
+        key_id,
+        key_file,
+        token_url,
+        audience,
+    }) = section
+    else {
+        return Ok(None);
+    };
+    let client_id = required(client_id, "auth.client_id")?;
+    let key_id = required(key_id, "auth.key_id")?;
+    let key_file = required(key_file, "auth.key_file")?;
+    let key_file = expand_home(&key_file, home, "auth.key_file")?;
+    let token_url = required(token_url, "auth.token_url")?;
+    let token_url = token_url_from(&token_url)?;
+    let audience = required(audience, "auth.audience")?;
+    Ok(Some(Auth {
+        client_id,
+        key_id,
+        key_file,
+        token_url,
+        audience,
+    }))
+}
+
+fn token_url_from(value: &str) -> Result<Url, ConfigError> {
+    let field = "auth.token_url";
+    let url = match Url::parse(value) {
+        Ok(url) => url,
+        Err(error) => {
+            return Err(ConfigError::Invalid {
+                field,
+                reason: format!("is not an absolute url: {error}"),
+            });
+        }
+    };
+    if url.scheme() != "https" {
+        return Err(ConfigError::Invalid {
+            field,
+            reason: format!(
+                "scheme `{}` is not https, and the client assertion must not travel in clear text",
+                url.scheme()
+            ),
+        });
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(ConfigError::Invalid {
+            field,
+            reason: "has no host".to_string(),
+        });
+    }
+    Ok(url)
 }
 
 fn pull_from(command: Vec<String>, every: u64, home: Option<&Path>) -> Result<Pull, ConfigError> {
@@ -590,6 +668,7 @@ struct FileConfig {
     #[serde(default)]
     browser: FileBrowser,
     ardia: Option<FileArdia>,
+    auth: Option<FileAuth>,
     #[serde(default)]
     buffer: Buffer,
     #[serde(default = "default_redact")]
@@ -609,6 +688,16 @@ struct FileBrowser {
 struct FileArdia {
     profile: Option<String>,
     since: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileAuth {
+    client_id: Option<String>,
+    key_id: Option<String>,
+    key_file: Option<String>,
+    token_url: Option<String>,
+    audience: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1140,6 +1229,136 @@ drop = ["title"]
             Err(ConfigError::Parse { source, .. }) => {
                 assert!(
                     source.to_string().contains("profle"),
+                    "message was {source}"
+                )
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+
+    const AUTH_LINES: [(&str, &str); 5] = [
+        ("client_id", "nikki-mbp-21"),
+        ("key_id", "nikki-mbp-21-2026-11-07"),
+        (
+            "key_file",
+            "~/Library/Application Support/nikki/oauth/key.pem",
+        ),
+        ("token_url", "https://auth.example.com/api/oidc/token"),
+        ("audience", "https://nikki.example.com/api"),
+    ];
+
+    fn with_auth(overrides: &[(&str, Option<&str>)]) -> String {
+        let mut section = String::from("\n[auth]\n");
+        for (key, value) in AUTH_LINES {
+            let mut value = Some(value);
+            for (name, replacement) in overrides {
+                if *name == key {
+                    value = *replacement;
+                }
+            }
+            let Some(value) = value else { continue };
+            section.push_str(&format!("{key} = \"{value}\"\n"));
+        }
+        let head = HEAD.replace("http://alpha:8080", "https://alpha:8443");
+        format!("{head}{BROWSER}{section}")
+    }
+
+    #[test]
+    fn a_full_auth_section_parses_with_the_key_file_expanded() {
+        let config = parse_text(&with_auth(&[])).expect("a full section parses");
+        assert_eq!(
+            config.auth,
+            Some(Auth {
+                client_id: "nikki-mbp-21".to_string(),
+                key_id: "nikki-mbp-21-2026-11-07".to_string(),
+                key_file: PathBuf::from(
+                    "/Users/someone/Library/Application Support/nikki/oauth/key.pem"
+                ),
+                token_url: Url::parse("https://auth.example.com/api/oidc/token")
+                    .expect("the test url parses"),
+                audience: "https://nikki.example.com/api".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_auth_section_requires_an_https_service_url() {
+        let text = with_auth(&[]).replace("https://alpha:8443", "http://alpha:8080");
+        match parse_text(&text) {
+            Err(ConfigError::Invalid { field, .. }) => assert_eq!(field, "service_url"),
+            other => panic!("expected an invalid service_url, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn without_an_auth_section_auth_is_off() {
+        let config = parse_text(&minimal()).expect("minimal config parses");
+        assert_eq!(config.auth, None);
+    }
+
+    #[test]
+    fn a_missing_auth_field_is_reported_as_missing() {
+        for (key, _) in AUTH_LINES {
+            let field = format!("auth.{key}");
+            match parse_text(&with_auth(&[(key, None)])) {
+                Err(ConfigError::Missing { field: got }) => assert_eq!(got, field),
+                other => panic!("expected `{field}` to be missing, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_invalid_auth_field_names_itself() {
+        let cases = [
+            ("auth.client_id", ("client_id", Some(""))),
+            ("auth.key_id", ("key_id", Some("  "))),
+            ("auth.key_file", ("key_file", Some(""))),
+            ("auth.key_file", ("key_file", Some("oauth/key.pem"))),
+            ("auth.token_url", ("token_url", Some(""))),
+            (
+                "auth.token_url",
+                ("token_url", Some("http://auth.example.com/token")),
+            ),
+            (
+                "auth.token_url",
+                ("token_url", Some("auth.example.com/token")),
+            ),
+            ("auth.token_url", ("token_url", Some("https://"))),
+            ("auth.audience", ("audience", Some(""))),
+        ];
+        for (field, replacement) in cases {
+            match parse_text(&with_auth(&[replacement])) {
+                Err(ConfigError::Invalid { field: got, .. }) => {
+                    assert_eq!(got, field, "for {replacement:?}")
+                }
+                other => panic!("expected `{field}` to be invalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_home_relative_key_file_without_home_is_rejected() {
+        let text = with_auth(&[]).replace("\n[auth]", "\n[claude_code]\nroots = []\n\n[auth]");
+        let error = parse(
+            &text,
+            Path::new("config.toml"),
+            Path::new("/tmp/nikki-state"),
+            None,
+        )
+        .expect_err("a ~/ key file without HOME is rejected");
+        match error {
+            ConfigError::Invalid { field, .. } => assert_eq!(field, "auth.key_file"),
+            other => panic!("expected an invalid auth.key_file, got {other}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_in_the_auth_section_is_rejected() {
+        let text = format!("{}secret = \"x\"\n", with_auth(&[]));
+        match parse_text(&text) {
+            Err(ConfigError::Parse { source, .. }) => {
+                assert!(
+                    source.to_string().contains("secret"),
                     "message was {source}"
                 )
             }

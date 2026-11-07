@@ -26,6 +26,7 @@ use crate::providers::claude_code::ClaudeCodeProvider;
 use crate::providers::scripted::{ScriptedSources, TEST_SOURCES_VAR};
 use crate::providers::windows::{MacSources, WindowProvider};
 use crate::providers::{Backoff, Ctx, supervise};
+use crate::runtime::auth::TokenSource;
 use crate::runtime::ship::endpoint;
 use crate::runtime::{EMISSION_QUEUE, Pipeline, absorb, private_dir};
 
@@ -116,11 +117,17 @@ async fn main() -> ExitCode {
         history_poll_interval,
         browser,
         state_dir,
+        auth,
         ..
     } = &config;
+    let auth_label = match auth {
+        Some(config::Auth { client_id, .. }) => client_id.as_str(),
+        None => "off",
+    };
     tracing::info!(
         %device,
         %service_url,
+        auth = auth_label,
         tick_interval,
         history_poll_interval,
         profile = %browser.profile,
@@ -129,6 +136,12 @@ async fn main() -> ExitCode {
     );
 
     if check_config {
+        if let Some(auth) = auth
+            && let Err(error) = TokenSource::new(auth)
+        {
+            tracing::error!(%error, "the oauth key is not usable");
+            return ExitCode::FAILURE;
+        }
         return ExitCode::SUCCESS;
     }
 
