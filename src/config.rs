@@ -100,6 +100,7 @@ pub struct Config {
     pub history_poll_interval: u64,
     pub revisit_window: u32,
     pub browser: Browser,
+    pub ardia: Option<Ardia>,
     pub buffer: Buffer,
     pub redact: Vec<RedactRule>,
     pub state_dir: PathBuf,
@@ -109,6 +110,12 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Browser {
     pub profile: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ardia {
+    pub profile: String,
+    pub since: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +218,7 @@ fn parse(
         history_poll_interval,
         revisit_window,
         browser,
+        ardia,
         buffer,
         redact,
         claude_code,
@@ -260,6 +268,7 @@ fn parse(
     }
 
     let claude_code = claude_code_from(claude_code, &device, home)?;
+    let ardia = ardia_from(ardia)?;
 
     Ok(Config {
         service_url,
@@ -268,6 +277,7 @@ fn parse(
         history_poll_interval,
         revisit_window,
         browser: Browser { profile },
+        ardia,
         buffer,
         redact,
         state_dir: state_dir.to_path_buf(),
@@ -363,15 +373,7 @@ fn claude_import_from(
     let projects = expand_home(&dir, home, "claude_code.import.dir")?;
 
     let since = required(since, "claude_code.import.since")?;
-    let since = match DateTime::parse_from_rfc3339(&since) {
-        Ok(since) => Timestamp::from_millis(since.timestamp_millis()),
-        Err(error) => {
-            return Err(ConfigError::Invalid {
-                field: "claude_code.import.since",
-                reason: format!("`{since}` is not an RFC 3339 time with an offset: {error}"),
-            });
-        }
-    };
+    let since = since_from(&since, "claude_code.import.since")?;
 
     let pull = match (command, every) {
         (None, None) => None,
@@ -399,6 +401,26 @@ fn claude_import_from(
         since,
         pull,
     })
+}
+
+fn since_from(since: &str, field: &'static str) -> Result<Timestamp, ConfigError> {
+    match DateTime::parse_from_rfc3339(since) {
+        Ok(since) => Ok(Timestamp::from_millis(since.timestamp_millis())),
+        Err(error) => Err(ConfigError::Invalid {
+            field,
+            reason: format!("`{since}` is not an RFC 3339 time with an offset: {error}"),
+        }),
+    }
+}
+
+fn ardia_from(section: Option<FileArdia>) -> Result<Option<Ardia>, ConfigError> {
+    let Some(FileArdia { profile, since }) = section else {
+        return Ok(None);
+    };
+    let profile = required(profile, "ardia.profile")?;
+    let since = required(since, "ardia.since")?;
+    let since = since_from(&since, "ardia.since")?;
+    Ok(Some(Ardia { profile, since }))
 }
 
 fn pull_from(command: Vec<String>, every: u64, home: Option<&Path>) -> Result<Pull, ConfigError> {
@@ -567,6 +589,7 @@ struct FileConfig {
     revisit_window: u32,
     #[serde(default)]
     browser: FileBrowser,
+    ardia: Option<FileArdia>,
     #[serde(default)]
     buffer: Buffer,
     #[serde(default = "default_redact")]
@@ -579,6 +602,13 @@ struct FileConfig {
 #[serde(deny_unknown_fields)]
 struct FileBrowser {
     profile: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileArdia {
+    profile: Option<String>,
+    since: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1035,6 +1065,85 @@ drop = ["title"]
                 field,
                 "for {lines}"
             );
+        }
+    }
+
+    fn with_ardia(section: &str) -> String {
+        format!("{HEAD}{BROWSER}\n[ardia]\n{section}\n")
+    }
+
+    #[test]
+    fn a_full_ardia_section_parses() {
+        let config = parse_text(&with_ardia(
+            "profile = \"MBP_21\"\nsince = \"2026-10-19T00:00:00+02:00\"",
+        ))
+        .expect("a full section parses");
+        assert_eq!(
+            config.ardia,
+            Some(Ardia {
+                profile: "MBP_21".to_string(),
+                since: Timestamp::from_millis(IMPORT_SINCE_MILLIS),
+            })
+        );
+    }
+
+    #[test]
+    fn without_an_ardia_section_ardia_is_off() {
+        let config = parse_text(&minimal()).expect("minimal config parses");
+        assert_eq!(config.ardia, None);
+    }
+
+    #[test]
+    fn an_invalid_ardia_section_names_its_field() {
+        let valid_since = "since = \"2026-10-19T00:00:00Z\"";
+        let cases = [
+            ("ardia.profile", format!("profile = \"\"\n{valid_since}")),
+            (
+                "ardia.since",
+                "profile = \"MBP_21\"\nsince = \"\"".to_string(),
+            ),
+            (
+                "ardia.since",
+                "profile = \"MBP_21\"\nsince = \"yesterday\"".to_string(),
+            ),
+            (
+                "ardia.since",
+                "profile = \"MBP_21\"\nsince = \"2026-10-19T00:00:00\"".to_string(),
+            ),
+        ];
+        for (field, section) in cases {
+            match parse_text(&with_ardia(&section)) {
+                Err(ConfigError::Invalid { field: got, .. }) => assert_eq!(got, field),
+                other => panic!("expected `{field}` to be invalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_ardia_field_is_reported_as_missing() {
+        let cases = [
+            ("ardia.profile", "since = \"2026-10-19T00:00:00Z\""),
+            ("ardia.since", "profile = \"MBP_21\""),
+        ];
+        for (field, section) in cases {
+            match parse_text(&with_ardia(section)) {
+                Err(ConfigError::Missing { field: got }) => assert_eq!(got, field),
+                other => panic!("expected `{field}` to be missing, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_in_the_ardia_section_is_rejected() {
+        let section = "profile = \"MBP_21\"\nsince = \"2026-10-19T00:00:00Z\"\nprofle = \"x\"";
+        match parse_text(&with_ardia(section)) {
+            Err(ConfigError::Parse { source, .. }) => {
+                assert!(
+                    source.to_string().contains("profle"),
+                    "message was {source}"
+                )
+            }
+            other => panic!("expected a parse error, got {other:?}"),
         }
     }
 

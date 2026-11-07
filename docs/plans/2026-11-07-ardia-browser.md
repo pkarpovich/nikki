@@ -134,11 +134,11 @@ since = "2026-11-02T05:36:00Z"     # required: RFC 3339 with offset
 - Modify: `src/config.rs`
 - Modify: `src/providers/mod.rs` (the `test_config` literal)
 
-- [ ] Add `Ardia { profile, since }`, `Config.ardia: Option<Ardia>`, and `FileArdia` with `deny_unknown_fields`.
-- [ ] Validate as in Technical Details, reusing the RFC 3339 parsing used by `claude_code.import.since`.
-- [ ] Update every `Config` literal with `ardia: None`.
-- [ ] Tests: a full section parses; an absent section is `None`; empty `profile`, missing `profile`, missing `since`, unparseable `since` and an unknown key are each rejected with the field named.
-- [ ] Run the gate.
+- [x] Add `Ardia { profile, since }`, `Config.ardia: Option<Ardia>`, and `FileArdia` with `deny_unknown_fields`.
+- [x] Validate as in Technical Details, reusing the RFC 3339 parsing used by `claude_code.import.since`.
+- [x] Update every `Config` literal with `ardia: None`.
+- [x] Tests: a full section parses; an absent section is `None`; empty `profile`, missing `profile`, missing `since`, unparseable `since` and an unknown key are each rejected with the field named.
+- [x] Run the gate.
 
 ### Task 2: Browser value and Ardia profile resolution
 
