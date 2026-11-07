@@ -187,11 +187,11 @@ audience = "https://nikki.pkarpovich.space/api"
 
 ### Task 6: [Final] Update documentation
 
-- [ ] `README.md`:
+- [x] `README.md`:
   - Configuration: the `[auth]` example and its five field-table rows, and how the key is made (`openssl genpkey ...`, `0600`, outside any repository) and that only the public half and key id go to the authorization server.
   - The wire contract's request: the optional `Authorization: Bearer` header, scope `nikki:ingest`, and that `401`/`403` keep the batch (already in the response table) while a `401` also refreshes the token.
   - Known limitations: a token is fetched after every start; Authelia down means the buffer grows until it is back.
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Move this plan to `docs/plans/completed/`.
 
 ## Post-Completion
 

@@ -225,6 +225,13 @@ profile = "MBP_21"                  # required, the display name, not the direct
 profile = "MBP_21"                  # required, the name Ardia shows, from session.json
 since = "2026-11-02T05:36:00Z"      # required, RFC 3339 with offset
 
+[auth]                              # optional, omit to send no Authorization header
+client_id = "nikki-mbp-21"          # required, this Mac's OAuth client
+key_id = "nikki-mbp-21-2026-11-07"  # required, the kid the authorization server holds the public key under
+key_file = "~/Library/Application Support/nikki/oauth/key.pem"  # required, PKCS#8 RSA PEM
+token_url = "https://auth.pkarpovich.space/api/oidc/token"      # required, https with a host
+audience = "https://nikki.pkarpovich.space/api"                 # required
+
 [buffer]
 max_rows = 200000
 max_bytes = 536870912
@@ -263,6 +270,11 @@ drop = ["title"]
 | `browser.profile` | none, required | resolved to a directory through `Local State` on every poll; a name absent at startup is fatal and lists the names that do exist. The browser itself is not configurable - the read is always Dia's user data |
 | `ardia.profile` | none, required when `[ardia]` is present | the profile name Ardia shows, resolved through `session.json` on every poll. A name that does not resolve fails only the Ardia provider, which the supervisor restarts with backoff |
 | `ardia.since` | none, required when `[ardia]` is present | RFC 3339 with offset. Visits before it are never shipped. With no stored cursor the read starts at id 0 and skips everything older than `since` |
+| `auth.client_id` | none, required when `[auth]` is present | non-empty. Each Mac is its own client, for example `nikki-mbp-21`. It is the `iss` and `sub` of the client assertion |
+| `auth.key_id` | none, required when `[auth]` is present | non-empty. Sent as the `kid` header of the client assertion |
+| `auth.key_file` | none, required when `[auth]` is present | a leading `~/` expands against `HOME`, the result must be absolute. Read and parsed once at startup and by `--check-config`. An unreadable file or a key that is not RSA is a startup error naming the path |
+| `auth.token_url` | none, required when `[auth]` is present | an absolute `https` URL with a host. It is also the `aud` of the client assertion |
+| `auth.audience` | none, required when `[auth]` is present | non-empty. Sent as the `audience` field of the token request. The scope is always `nikki:ingest` |
 | `buffer.max_rows` | 200000 | roughly seven weeks at the real record rate; at least 1, because a cap of zero evicts every record as it arrives |
 | `buffer.max_bytes` | 536870912 | 500 MB; must exceed the 512 bytes held back for the overflow record, for the same reason |
 | `claude_code.roots` | `["~/.claude", "~/.claude-work"]` | a leading `~/` expands against `HOME`, an absolute path is taken as is, any other relative path is an error. Each root's transcripts are read from `<root>/projects`, and its profile name is the directory's final component with one leading `.` stripped (`claude`, `claude-work`); two roots with the same profile name are an error. An empty list disables the provider |
@@ -277,6 +289,21 @@ drop = ["title"]
 
 An unknown key is a startup error rather than silence, and every validation failure names the field
 rather than the file.
+
+### Ingest authentication
+
+With `[auth]` the daemon gets an access token with the OAuth 2.0 `client_credentials` grant, authenticated by `private_key_jwt`, and sends it as `Authorization: Bearer <token>` on every ingest request. There is no client secret anywhere. The token is cached, fetched lazily right before a POST and refreshed two minutes before it expires. A token request that fails caches nothing, and the shipper's backoff is the retry.
+
+The private key is made by hand on the Mac that uses it, stays on that Mac with mode `0600`, and lives outside any repository:
+
+```
+mkdir -p ~/Library/Application\ Support/nikki/oauth
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out ~/Library/Application\ Support/nikki/oauth/key.pem
+chmod 600 ~/Library/Application\ Support/nikki/oauth/key.pem
+openssl pkey -in ~/Library/Application\ Support/nikki/oauth/key.pem -pubout
+```
+
+Only the public half and the key id go to the authorization server. The daemon never generates, rotates or stores keys.
 
 `tick_interval` is validated at startup because the server bounds it per record: a tick whose
 interval is absent, `<= 0` or `> 3600` is rejected, the response is still `200`, and the daemon's own
@@ -559,7 +586,7 @@ Add an extractor only when it answers a question the window title cannot.
 The boundary between this repository and the service. **The service repository carries the identical
 section, and any change here must be mirrored there in the same pass.**
 
-**Request** - `POST {service_url}/api/v1/records`, `Content-Type: application/json`:
+**Request** - `POST {service_url}/api/v1/records`, `Content-Type: application/json`, and with `[auth]` configured `Authorization: Bearer <access token>`. The token is an RS256 access token for the configured audience with scope `nikki:ingest`:
 
 ```json
 {
@@ -904,7 +931,7 @@ Always `200` when the request parsed:
 |---|---|
 | `200`, well-formed body | delete every record of the batch **including those in `rejected`**, and log each rejection at warn. A rejected record will never be accepted by retrying, so keeping it would block the queue forever. |
 | `200`, body that does not parse or whose counts do not add up | treat as `5xx`: keep and retry. Deleting on the strength of a status line alone would discard records to any proxy that answers 200 with something else. |
-| `401`, `403`, `404`, `405`, `407` | **keep** the batch, back off, log at error every time. These are configuration - a wrong `service_url`, a proxy, a service not deployed yet - and dead-lettering here would feed the entire capture into a bin one batch at a time while the daemon looked healthy. |
+| `401`, `403`, `404`, `405`, `407` | **keep** the batch, back off, log at error every time. A `401` also drops the cached token, so the next attempt fetches a fresh one. These are configuration - a wrong `service_url`, a proxy, a service not deployed yet - and dead-lettering here would feed the entire capture into a bin one batch at a time while the daemon looked healthy. |
 | `408`, `425`, `429` | **keep** the batch and back off. These ask for the same bytes again later - a throttling gateway in front of the service is not a malformed batch, and dead-lettering one would destroy the capture exactly while the service was busiest. |
 | other `4xx` (400, 409, 422) | move to `dead_letter`, log at error, continue with the next batch. |
 | `413` | halve the batch size and retry, down to a floor of 10 records; below that, dead-letter. |
@@ -1064,6 +1091,8 @@ fixtures/              captured Dia output, an Ardia session.json, agterm JSON, 
 ```
 
 ## Known limitations
+
+- A token is fetched after every start, because nothing persists it. While the authorization server is down or refuses the client, no request reaches the service, the buffer grows until it is back, and the oldest records are evicted at the buffer caps.
 
 - Occlusion is not computed, so a fully covered window still counts as visible; `z` is recorded so it
   can be derived later.
