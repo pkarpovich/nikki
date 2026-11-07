@@ -181,9 +181,9 @@ audience = "https://nikki.pkarpovich.space/api"
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] With `[auth]`: every ingest carries a bearer; token failures keep records buffered. Without `[auth]`: byte-for-byte today's requests.
-- [ ] Grep the diff: no `tracing` call or error `Display` includes the token, the assertion or key bytes.
-- [ ] Run the gate. Nothing else.
+- [x] With `[auth]`: every ingest carries a bearer; token failures keep records buffered. Without `[auth]`: byte-for-byte today's requests.
+- [x] Grep the diff: no `tracing` call or error `Display` includes the token, the assertion or key bytes.
+- [x] Run the gate. Nothing else.
 
 ### Task 6: [Final] Update documentation
 
