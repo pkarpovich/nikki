@@ -21,7 +21,7 @@ against a record that was kept for you - which is the whole difference from a ti
 ## Status
 
 Personal, single-user, and specific about its machine: Apple Silicon only, one daemon per Mac,
-records shipped to one self-hosted service over the local network. The browser it reads is Dia; the
+records shipped to one self-hosted service over the local network. The browsers it reads are Dia and Ardia; the
 terminal it understands in detail is agterm; the agent transcripts it reads are Claude Code's, under
 `~/.claude` and `~/.claude-work`. Everything else is still captured, just with less inside `details`.
 
@@ -137,15 +137,16 @@ you go to grant it the permissions it needs.
 |---|---|---|
 | Accessibility | which application is focused, window titles, the focused window, `AXDocument` paths, activation and title-change events | none |
 | Automation -> Dia | the active tab's URL, title and profile | one-time prompt on first use |
+| Automation -> Ardia | the active tab's URL, title and profile | one-time prompt on first use |
 | (none needed) | window list, geometry, z-order, displays, idle seconds, input counters, lock, sleep, microphone state, the process table, Claude Code transcripts under the configured roots and import folders | none |
 
-Both grants are keyed by **identity and location together**: the Developer ID team plus the
+Every grant is keyed by **identity and location together**: the Developer ID team plus the
 `dev.pkarpovich.nikki` identifier that `codesign --identifier` pins, and the place the program is
 run from. Signing alone is not enough, which cost three upgrades before this was understood - macOS
 identifies an app bundle by its bundle id at a path that does not move, and a loose binary by its
 absolute path, so a versioned Homebrew Cellar path made every version a new program. Shipping the
 app in `/Applications` is what makes the grants durable; see [Install](#install). Changing the
-identifier still loses both silently: capture keeps running, titles go null and no tab is ever read
+identifier still loses all of them silently: capture keeps running, titles go null and no tab is ever read
 again.
 
 **The process table needs no permission, and only agterm's own variables are consulted.**
@@ -180,11 +181,11 @@ the default input device is running without opening it, so no Microphone permiss
 no orange indicator lights. It means "the device is running", not "someone is listening" - some
 applications hold it open idle - so `mic_active` is a hint and nothing more.
 
-**Automation is what the Dia extractor needs.** The embedded `Info.plist` must carry a non-empty
+**Automation is what the Dia and Ardia extractors need.** The embedded `Info.plist` must carry a non-empty
 `NSAppleEventsUsageDescription`; without that string macOS never shows the prompt, the extractor is
 denied for the life of the binary, and the only symptom is a `-1743` in the log. A declined prompt is
 logged once at warn level, because no tab will ever be captured until a human fixes it in System
-Settings.
+Settings. The warning is logged once per browser, so a denial for one does not hide a denial for the other.
 
 ### Degraded capture
 
@@ -196,16 +197,16 @@ observer can attach, so a switch is noticed by the next tick rather than at the 
 The window title and the `AXDocument` path go null, `visible[]` entries lose their titles, and the
 record carries `degraded: true`, which reaches the service and the API - a degraded day must not be
 indistinguishable from a quiet one to whoever reads the timeline later. Extractor `details` survive,
-because neither extractor touches Accessibility: Dia needs Automation, and agterm needs nothing at
+because no extractor touches Accessibility: Dia and Ardia need Automation, and agterm needs nothing at
 all - it reads `agtermctl` and the process table.
 
 ## Configuration
 
 `~/.config/nikki/config.toml`, or the path in `NIKKI_CONFIG`. `NIKKI_STATE_DIR` overrides the
-directory holding `buffer.db` and the per-poll `history-snapshot/` clone (default
+directory holding `buffer.db` and the per-poll `history-snapshot/` clone (and `history-snapshot-ardia/` when `[ardia]` is set) (default
 `~/Library/Application Support/nikki`). Both overrides exist so a test harness never touches the
 operator's real state. `HOME` is still required with both of them set: the browser profile is
-resolved under `$HOME/Library/Application Support/Dia/User Data`, which no variable overrides, and an
+resolved under `$HOME/Library/Application Support/Dia/User Data`, and Ardia's under `$HOME/Library/Application Support/com.ardia.browser`, which no variable overrides, and an
 unset `HOME` is a startup failure.
 
 `nikki --check-config` loads and validates the configuration, logs the summary and exits.
@@ -219,6 +220,10 @@ revisit_window = 500                # visit rows re-read on each poll
 
 [browser]
 profile = "MBP_21"                  # required, the display name, not the directory name
+
+[ardia]                             # optional, omit to leave Ardia unread
+profile = "MBP_21"                  # required, the name Ardia shows, from session.json
+since = "2026-11-02T05:36:00Z"      # required, RFC 3339 with offset
 
 [buffer]
 max_rows = 200000
@@ -256,6 +261,8 @@ drop = ["title"]
 | `history_poll_interval` | 300 | at least 1 second: a poll timer of zero panics the browser history provider on every supervised restart |
 | `revisit_window` | 500 | rows re-read below the cursor so a filled-in `visit_duration` is picked up |
 | `browser.profile` | none, required | resolved to a directory through `Local State` on every poll; a name absent at startup is fatal and lists the names that do exist. The browser itself is not configurable - the read is always Dia's user data |
+| `ardia.profile` | none, required when `[ardia]` is present | the profile name Ardia shows, resolved through `session.json` on every poll. A name that does not resolve fails only the Ardia provider, which the supervisor restarts with backoff |
+| `ardia.since` | none, required when `[ardia]` is present | RFC 3339 with offset. Visits before it are never shipped. With no stored cursor the read starts at id 0 and skips everything older than `since` |
 | `buffer.max_rows` | 200000 | roughly seven weeks at the real record rate; at least 1, because a cap of zero evicts every record as it arrives |
 | `buffer.max_bytes` | 536870912 | 500 MB; must exceed the 512 bytes held back for the overflow record, for the same reason |
 | `claude_code.roots` | `["~/.claude", "~/.claude-work"]` | a leading `~/` expands against `HOME`, an absolute path is taken as is, any other relative path is an error. Each root's transcripts are read from `<root>/projects`, and its profile name is the directory's final component with one leading `.` stripped (`claude`, `claude-work`); two roots with the same profile name are an error. An empty list disables the provider |
@@ -386,6 +393,8 @@ inside a poll, so one found at startup belongs to a run that was killed outright
 anything else happens - before the config file is even read, so a config that has become unusable
 cannot leave the clone on disk across restarts. `--check-config` is the one invocation that does not
 sweep, because a validation run must not delete the clone a running daemon is reading.
+
+When `[ardia]` is configured a second instance of the same provider reads Ardia, which is also a Chromium browser with the same `visits` and `urls` schema. It has its own snapshot directory, `history-snapshot-ardia`, so two polls never clone into the same place, and the startup sweep removes both. Ardia never writes the names the user sees into `Local State`: its `profile.info_cache` still says `Person 1`. The names live in `session.json` beside the `Chromium` directory, under `profiles`, and the history of profile id `<id>` is `Chromium/Profile <id>`. The profile is resolved on every poll, and a name that does not resolve fails only the Ardia provider, which the supervisor restarts with backoff. Dia's resolution stays fatal at startup. The Ardia profile was seeded by importing Dia's history, which is already stored under Dia, so `since` cuts the first read off at the end of the import. The cursor is stored under `ardia:<profile>`, and every record carries `browser: "ardia"`.
 
 Each poll reads `id > cursor - revisit_window` rather than `id > cursor`, because Chromium fills
 `visit_duration` in by updating the row it wrote when the visit began. A re-read row is emitted
@@ -530,7 +539,7 @@ bundle id in `src/extract/mod.rs` and is invoked **only for the focused applicat
 
 - `document.rs` - the universal `AXDocument` probe, applied to every focused window, keeping the
   value only when it is non-empty and its scheme is `file`.
-- `dia.rs` - AppleScript against `company.thebrowser.dia`, producing `{url, tab, profile, pinned}`.
+- `dia.rs` - AppleScript against `company.thebrowser.dia` and `com.ardia.browser`, producing `{url, tab, profile, pinned}`. The script text is the same for both, with the application name swapped.
 - `agterm.rs` - `agtermctl tree --json` against `com.umputun.agterm`, joined against the process
   table, producing `{workspace, session, surface, command, cwd}` plus a conditional `foreground`.
   The tree names the active workspace and session; the surface the session calls active and visible
@@ -625,7 +634,7 @@ retried** - so a kind missing from this table is destroyed permanently the first
 | `windows` | `state_change` | `app`, `bundle_id`, `display` | `title`, `path`, `details`, `visible` |
 | `windows` | `lock`, `unlock`, `sleep`, `wake` | none | none |
 | `windows` | `buffer_overflow` | `details` carrying `dropped`, `dropped_from`, `dropped_to` | none |
-| `browser_history` | `visit` | `url`, `profile`, `visit_id` | `title`, `transition`, `duration_ms` |
+| `browser_history` | `visit` | `url`, `profile`, `visit_id` | `title`, `transition`, `duration_ms`, `browser` |
 | `claude_code` | `message` | `session_id`, `uuid`, `block`, `role`, `message_kind`, `text`, `cwd`, `profile` | `git_branch` |
 | `claude_code` | `session` | `session_id`, `field`, `value` | none |
 | `claude_code` | `touch` | `session_id`, `uuid`, `repo`, `action` | none |
@@ -797,7 +806,7 @@ opaque JSON and validates nothing inside it, so a new key needs no service chang
 this daemon actually sends are documented here, and any change to them is mirrored into the service
 repository in the same pass.
 
-`company.thebrowser.dia` carries `url`, `tab`, `profile` and `pinned`. `url` is post-redaction.
+`company.thebrowser.dia` and `com.ardia.browser` carry `url`, `tab`, `profile` and `pinned`. `url` is post-redaction.
 
 `com.umputun.agterm` carries `workspace`, `session`, `surface`, `command`, `cwd` and, conditionally,
 `foreground`:
@@ -855,6 +864,7 @@ day, and the collisions would be reported as duplicates - which looks like succe
 ```
 windows:  device \x1F "windows" \x1F kind \x1F ts_millis \x1F seq
 browser:  device \x1F "browser_history" \x1F profile \x1F generation \x1F visit_id
+ardia:    device \x1F "browser_history" \x1F "ardia" \x1F profile \x1F generation \x1F visit_id
 message:  device \x1F "claude_code" \x1F "message" \x1F session_id \x1F uuid \x1F block
 session:  device \x1F "claude_code" \x1F "session" \x1F session_id \x1F field \x1F value
 touch:    device \x1F "claude_code" \x1F "touch" \x1F session_id \x1F uuid \x1F repo \x1F action
@@ -872,6 +882,8 @@ the server recognises it as a correction. It includes `generation` - a per-profi
 incremented whenever `max(id) < cursor` reveals the history database was replaced - because the new
 database's ids restart from 1 and would otherwise collide with visits already stored under the old
 one, and the server would silently merge two unrelated visits under the older one's identity.
+
+Ardia's key carries the browser name because its visit ids start from 1 like Dia's and both profiles can share a name, so the two would otherwise collide and the service would drop Ardia visits as duplicates of Dia's. Dia's key is unchanged, because adding the browser to it would stop every stored Dia visit from matching its later revisions. The payload `browser` field is `ardia` for Ardia and absent for Dia.
 
 An imported record's keys use the import's `device`, not this Mac's. A session that moves between
 machines is therefore stored once per device unless `since` is set to the hand-over moment.
@@ -1048,7 +1060,7 @@ src/window/visibility.rs  the pure visible-set resolver
 src/extract/           the bundle-id-keyed extractor registry
 src/providers/         the Provider trait, the supervisor, and the three providers
 src/runtime/           buffer, dedup keys, redaction, shipping
-fixtures/              captured Dia output, agterm JSON, Local State, a small history database, a Claude Code transcript
+fixtures/              captured Dia output, an Ardia session.json, agterm JSON, Local State, a small history database, a Claude Code transcript
 ```
 
 ## Known limitations
@@ -1064,7 +1076,7 @@ fixtures/              captured Dia output, agterm JSON, Local State, a small hi
   active display. A window straddling two displays is attributed to the one with the largest
   intersection, ties broken by the lower index.
 - The browser tab is captured only when the browser is the focused application, and only one
-  profile's history is read. A rarely-used profile still leaves tab entries in window samples.
+  profile's history is read per browser: the `[browser]` profile in Dia and the `[ardia]` profile in Ardia. A rarely-used profile still leaves tab entries in window samples.
 - `mic_active` means the input device is running, not that anyone is listening.
 - A terminal pane running a setuid or hardened binary (`sudo`, `top`) reports no `command`:
   `KERN_PROCARGS2` declines to describe it, which is the same blind spot the agterm tree has. The

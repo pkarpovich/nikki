@@ -134,6 +134,7 @@ pub struct Cursor {
 pub enum KeySource {
     Windows,
     BrowserVisit {
+        browser: Option<String>,
         profile: String,
         generation: u64,
         visit_id: i64,
@@ -179,10 +180,11 @@ impl RecordDraft {
         let dedup_key = match key {
             KeySource::Windows => windows_key(device, kind, ts.millis(), seq),
             KeySource::BrowserVisit {
+                browser,
                 profile,
                 generation,
                 visit_id,
-            } => browser_key(device, &profile, generation, visit_id),
+            } => browser_key(device, browser.as_deref(), &profile, generation, visit_id),
             KeySource::ClaudeMessage {
                 session_id,
                 uuid,
@@ -387,6 +389,7 @@ mod tests {
             degraded: false,
             payload: json!({"url": "https://example.com/"}),
             key: KeySource::BrowserVisit {
+                browser: None,
                 profile: "MBP_21".to_string(),
                 generation,
                 visit_id,

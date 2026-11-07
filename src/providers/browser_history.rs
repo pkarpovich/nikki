@@ -20,24 +20,87 @@ pub const LOCAL_STATE_FILE: &str = "Local State";
 pub const HISTORY_FILE: &str = "History";
 pub const HISTORY_JOURNAL_FILE: &str = "History-journal";
 pub const SNAPSHOT_DIR: &str = "history-snapshot";
+pub const ARDIA_ROOT_RELATIVE: &str = "Library/Application Support/com.ardia.browser/Chromium";
+pub const ARDIA_SESSION_FILE: &str = "session.json";
+pub const ARDIA_SNAPSHOT_DIR: &str = "history-snapshot-ardia";
+const ARDIA_NAME: &str = "ardia";
+const ARDIA_PROFILE_PREFIX: &str = "Profile ";
 pub const PAGE_LIMIT: usize = 5_000;
 
 const CLONE_PROGRAM: &str = "/bin/cp";
 const CLONE_FLAG: &str = "-c";
 const WEBKIT_EPOCH_OFFSET_MILLIS: i64 = 11_644_473_600_000;
 
-pub fn user_data_dir(home: &Path) -> PathBuf {
-    home.join(USER_DATA_RELATIVE)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Browser {
+    Dia,
+    Ardia,
+}
+
+impl Browser {
+    pub fn root(self, home: &Path) -> PathBuf {
+        match self {
+            Browser::Dia => home.join(USER_DATA_RELATIVE),
+            Browser::Ardia => home.join(ARDIA_ROOT_RELATIVE),
+        }
+    }
+
+    pub fn snapshot_dir(self) -> &'static str {
+        match self {
+            Browser::Dia => SNAPSHOT_DIR,
+            Browser::Ardia => ARDIA_SNAPSHOT_DIR,
+        }
+    }
+
+    pub fn name(self) -> Option<&'static str> {
+        match self {
+            Browser::Dia => None,
+            Browser::Ardia => Some(ARDIA_NAME),
+        }
+    }
+
+    pub fn cursor_key(self, profile: &str) -> String {
+        match self {
+            Browser::Dia => profile.to_string(),
+            Browser::Ardia => format!("{ARDIA_NAME}:{profile}"),
+        }
+    }
+
+    pub fn directory_for(self, root: &Path, profile: &str) -> Result<String, String> {
+        match self {
+            Browser::Dia => directory_for(root, profile),
+            Browser::Ardia => ardia_directory_for(root, profile),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Source<'a> {
+    browser: Browser,
+    profile: &'a str,
+    since: Option<Timestamp>,
 }
 
 pub struct BrowserHistoryProvider {
+    browser: Browser,
     user_data: PathBuf,
     cursors: BufferHandle,
+    since: Option<Timestamp>,
 }
 
 impl BrowserHistoryProvider {
-    pub fn new(user_data: PathBuf, cursors: BufferHandle) -> BrowserHistoryProvider {
-        BrowserHistoryProvider { user_data, cursors }
+    pub fn new(
+        browser: Browser,
+        user_data: PathBuf,
+        cursors: BufferHandle,
+        since: Option<Timestamp>,
+    ) -> BrowserHistoryProvider {
+        BrowserHistoryProvider {
+            browser,
+            user_data,
+            cursors,
+            since,
+        }
     }
 }
 
@@ -47,21 +110,41 @@ impl Provider for BrowserHistoryProvider {
     }
 
     async fn run(&mut self, ctx: Ctx, out: Sender<Emission>) -> Result<(), ProviderError> {
-        let BrowserHistoryProvider { user_data, cursors } = self;
-        let profile = ctx.config.browser.profile.clone();
+        let BrowserHistoryProvider {
+            browser,
+            user_data,
+            cursors,
+            since,
+        } = self;
+        let browser = *browser;
+        let profile = match (browser, &ctx.config.ardia) {
+            (Browser::Dia, _) => ctx.config.browser.profile.clone(),
+            (Browser::Ardia, Some(ardia)) => ardia.profile.clone(),
+            (Browser::Ardia, None) => {
+                return Err(ProviderError(
+                    "the config has no [ardia] section".to_string(),
+                ));
+            }
+        };
+        let source = Source {
+            browser,
+            profile: &profile,
+            since: *since,
+        };
+        let cursor_key = browser.cursor_key(&profile);
         let revisit_window = ctx.config.revisit_window as i64;
-        let snapshot = ctx.config.state_dir.join(SNAPSHOT_DIR);
+        let snapshot = ctx.config.state_dir.join(browser.snapshot_dir());
 
-        let directory = match directory_for(user_data, &profile) {
+        let directory = match browser.directory_for(user_data, &profile) {
             Ok(directory) => directory,
             Err(reason) => {
                 discard(&snapshot);
                 return Err(ProviderError(reason));
             }
         };
-        tracing::info!(%profile, %directory, "the browser profile resolved");
+        tracing::info!(browser = ?browser, %profile, %directory, "the browser profile resolved");
 
-        let mut state = stored_state(cursors, &profile).await?;
+        let mut state = stored_state(cursors, &cursor_key).await?;
 
         let mut ticker = interval(Duration::from_secs(ctx.config.history_poll_interval));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -69,9 +152,9 @@ impl Provider for BrowserHistoryProvider {
             ticker.tick().await;
 
             let outcome = poll_once(
+                source,
                 user_data,
                 &snapshot,
-                &profile,
                 revisit_window,
                 state.clone(),
                 PAGE_LIMIT,
@@ -87,7 +170,7 @@ impl Provider for BrowserHistoryProvider {
 
             let cursor = Cursor {
                 provider: runtime::Provider::BrowserHistory,
-                key: profile.clone(),
+                key: cursor_key.clone(),
                 value: polled.encode(),
             };
             let (emission, committed) = Emission::awaiting_commit(records, Some(cursor));
@@ -223,6 +306,39 @@ fn resolve_directory(text: &str, profile: &str) -> Result<String, String> {
     ))
 }
 
+pub fn ardia_directory_for(root: &Path, profile: &str) -> Result<String, String> {
+    let path = root.with_file_name(ARDIA_SESSION_FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(source) => return Err(format!("{} could not be read: {source}", path.display())),
+    };
+    match resolve_ardia_directory(&text, profile) {
+        Ok(directory) => Ok(directory),
+        Err(reason) => Err(format!("{} {reason}", path.display())),
+    }
+}
+
+fn resolve_ardia_directory(text: &str, profile: &str) -> Result<String, String> {
+    let session: ArdiaSession = match serde_json::from_str(text) {
+        Ok(session) => session,
+        Err(error) => return Err(format!("is not valid json: {error}")),
+    };
+    let ArdiaSession { profiles } = session;
+
+    let mut known = Vec::new();
+    for (_, entry) in profiles {
+        let ArdiaProfile { id, name } = entry;
+        if name == profile {
+            return Ok(format!("{ARDIA_PROFILE_PREFIX}{id}"));
+        }
+        known.push(name);
+    }
+    Err(format!(
+        "holds no profile named `{profile}`; the profiles that exist are {}",
+        listed(&known)
+    ))
+}
+
 fn listed(known: &[String]) -> String {
     if known.is_empty() {
         return "none".to_string();
@@ -231,15 +347,15 @@ fn listed(known: &[String]) -> String {
 }
 
 async fn poll_once(
+    source: Source<'_>,
     user_data: &Path,
     snapshot: &Path,
-    profile: &str,
     revisit_window: i64,
     state: Option<HistoryState>,
     page: usize,
 ) -> Option<PollOutcome> {
     let _held = SnapshotGuard { path: snapshot };
-    let directory = match directory_for(user_data, profile) {
+    let directory = match source.browser.directory_for(user_data, source.profile) {
         Ok(directory) => directory,
         Err(reason) => {
             tracing::warn!(
@@ -251,7 +367,7 @@ async fn poll_once(
     };
 
     let copy = clone_history(&user_data.join(directory), snapshot).await?;
-    collect_from(&copy, profile, revisit_window, state, page)
+    collect_from(&copy, source, revisit_window, state, page)
 }
 
 struct SnapshotGuard<'a> {
@@ -316,26 +432,28 @@ fn discard(snapshot: &Path) {
 }
 
 pub fn discard_stale_snapshot(state_dir: &Path) {
-    let snapshot = state_dir.join(SNAPSHOT_DIR);
-    if !snapshot.exists() {
-        return;
+    for browser in [Browser::Dia, Browser::Ardia] {
+        let snapshot = state_dir.join(browser.snapshot_dir());
+        if !snapshot.exists() {
+            continue;
+        }
+        tracing::warn!(
+            path = %snapshot.display(),
+            "a history clone outlived the run that made it and is discarded"
+        );
+        discard(&snapshot);
     }
-    tracing::warn!(
-        path = %snapshot.display(),
-        "a history clone outlived the run that made it and is discarded"
-    );
-    discard(&snapshot);
 }
 
 fn collect_from(
     path: &Path,
-    profile: &str,
+    source: Source<'_>,
     revisit_window: i64,
     state: Option<HistoryState>,
     page: usize,
 ) -> Option<PollOutcome> {
     let connection = open_snapshot(path)?;
-    match collect(&connection, profile, revisit_window, state, page) {
+    match collect(&connection, source, revisit_window, state, page) {
         Ok(outcome) => Some(outcome),
         Err(error) => {
             tracing::warn!(%error, "the history snapshot could not be read, so this poll is skipped");
@@ -377,14 +495,22 @@ fn open_snapshot(path: &Path) -> Option<Connection> {
 
 fn collect(
     connection: &Connection,
-    profile: &str,
+    source: Source<'_>,
     revisit_window: i64,
     state: Option<HistoryState>,
     page: usize,
 ) -> Result<PollOutcome, rusqlite::Error> {
+    let Source {
+        browser,
+        profile,
+        since,
+    } = source;
     let highest = highest_visit_id(connection)?;
     let mut state = match state {
-        None => HistoryState::fresh(highest),
+        None => match since {
+            Some(_) => HistoryState::fresh(0),
+            None => HistoryState::fresh(highest),
+        },
         Some(state) if highest < state.cursor => {
             tracing::warn!(
                 profile,
@@ -408,12 +534,17 @@ fn collect(
             if row.url.is_empty() {
                 continue;
             }
+            if let Some(since) = since
+                && unix_millis(row.visit_time) < since.millis()
+            {
+                continue;
+            }
             let digest = digest(&row);
             if state.shipped.get(&row.id) == Some(&digest) {
                 continue;
             }
             state.shipped.insert(row.id, digest);
-            records.push(visit_record(profile, state.generation, row));
+            records.push(visit_record(browser, profile, state.generation, row));
         }
         if read < page {
             break;
@@ -474,7 +605,7 @@ fn digest(row: &VisitRow) -> String {
     key(&[title, &transition.to_string(), &visit_duration.to_string()])
 }
 
-fn visit_record(profile: &str, generation: u64, row: VisitRow) -> RecordDraft {
+fn visit_record(browser: Browser, profile: &str, generation: u64, row: VisitRow) -> RecordDraft {
     let VisitRow {
         id,
         visit_time,
@@ -492,6 +623,9 @@ fn visit_record(profile: &str, generation: u64, row: VisitRow) -> RecordDraft {
         payload.insert("title".to_string(), Value::String(title));
     }
     payload.insert("profile".to_string(), Value::String(profile.to_string()));
+    if let Some(name) = browser.name() {
+        payload.insert("browser".to_string(), Value::String(name.to_string()));
+    }
     payload.insert("transition".to_string(), json!(transition));
     payload.insert("visit_id".to_string(), json!(id));
     payload.insert(
@@ -506,6 +640,7 @@ fn visit_record(profile: &str, generation: u64, row: VisitRow) -> RecordDraft {
         degraded: false,
         payload: Value::Object(payload),
         key: KeySource::BrowserVisit {
+            browser: browser.name().map(str::to_string),
             profile: profile.to_string(),
             generation,
             visit_id: id,
@@ -533,6 +668,17 @@ struct LocalStateProfile {
     info_cache: Map<String, Value>,
 }
 
+#[derive(Deserialize)]
+struct ArdiaSession {
+    profiles: BTreeMap<String, ArdiaProfile>,
+}
+
+#[derive(Deserialize)]
+struct ArdiaProfile {
+    id: String,
+    name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +692,7 @@ mod tests {
 
     const HISTORY: &[u8] = include_bytes!("../../fixtures/history_sample.db");
     const LOCAL_STATE: &str = include_str!("../../fixtures/dia_local_state.json");
+    const ARDIA_SESSION: &str = include_str!("../../fixtures/ardia_session.json");
 
     const PROFILE: &str = "MBP_21";
     const DIRECTORY: &str = "Default";
@@ -644,11 +791,27 @@ mod tests {
         }
     }
 
+    fn dia() -> Source<'static> {
+        Source {
+            browser: Browser::Dia,
+            profile: PROFILE,
+            since: None,
+        }
+    }
+
+    fn ardia(since: Option<Timestamp>) -> Source<'static> {
+        Source {
+            browser: Browser::Ardia,
+            profile: PROFILE,
+            since,
+        }
+    }
+
     async fn poll(home: &TempHome, state: Option<HistoryState>, page: usize) -> PollOutcome {
         poll_once(
+            dia(),
             &home.user_data(),
             &home.snapshot(),
-            PROFILE,
             WINDOW,
             state,
             page,
@@ -808,11 +971,111 @@ mod tests {
         assert_eq!(
             key,
             KeySource::BrowserVisit {
+                browser: None,
                 profile: PROFILE.to_string(),
                 generation: 1,
                 visit_id: 904,
             }
         );
+    }
+
+    fn ardia_poll(
+        home: &TempHome,
+        since: Option<Timestamp>,
+        state: Option<HistoryState>,
+    ) -> PollOutcome {
+        collect_from(&home.history(), ardia(since), WINDOW, state, PAGE_LIMIT)
+            .expect("the history could not be read")
+    }
+
+    fn second_visit_time() -> Timestamp {
+        Timestamp::from_millis(1_787_666_216_000)
+    }
+
+    #[test]
+    fn a_fresh_ardia_state_with_since_ships_every_visit_from_since_on() {
+        let home = TempHome::new("ardia-since");
+        let PollOutcome { records, state } = ardia_poll(&home, Some(second_visit_time()), None);
+        assert_eq!(visit_ids(&records), vec![902, 903, 904, 905, 906]);
+        assert_eq!(state.cursor, NEWEST_VISIT);
+    }
+
+    #[test]
+    fn a_fresh_ardia_state_with_since_reads_past_a_narrow_revisit_window() {
+        let home = TempHome::new("ardia-since-narrow");
+        let PollOutcome { records, .. } = collect_from(
+            &home.history(),
+            ardia(Some(second_visit_time())),
+            2,
+            None,
+            PAGE_LIMIT,
+        )
+        .expect("the history could not be read");
+        assert_eq!(visit_ids(&records), vec![902, 903, 904, 905, 906]);
+    }
+
+    #[test]
+    fn ardia_since_survives_paging() {
+        let home = TempHome::new("ardia-since-paged");
+        let PollOutcome { records, state } = collect_from(
+            &home.history(),
+            ardia(Some(second_visit_time())),
+            WINDOW,
+            None,
+            2,
+        )
+        .expect("the history could not be read");
+        assert_eq!(visit_ids(&records), vec![902, 903, 904, 905, 906]);
+        assert_eq!(state.cursor, NEWEST_VISIT);
+    }
+
+    #[test]
+    fn a_second_ardia_poll_on_the_same_data_ships_nothing() {
+        let home = TempHome::new("ardia-twice");
+        let since = Some(second_visit_time());
+        let PollOutcome { state, .. } = ardia_poll(&home, since, None);
+        let PollOutcome { records, .. } = ardia_poll(&home, since, Some(state));
+        assert_eq!(visit_ids(&records), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn a_revisit_of_a_row_before_since_never_ships() {
+        let home = TempHome::new("ardia-old-revisit");
+        let since = Some(second_visit_time());
+        let PollOutcome { state, .. } = ardia_poll(&home, since, None);
+        home.source()
+            .execute("UPDATE urls SET title = 'Edited' WHERE id = 1", [])
+            .expect("the title could not be rewritten");
+        let PollOutcome { records, .. } = ardia_poll(&home, since, Some(state));
+        assert!(!visit_ids(&records).contains(&901));
+    }
+
+    #[test]
+    fn the_ardia_payload_names_the_browser_and_the_dia_payload_does_not() {
+        let home = TempHome::new("ardia-payload");
+        let PollOutcome { records, .. } = ardia_poll(&home, Some(second_visit_time()), None);
+        let ardia_record = record_with(&records, 904);
+        assert_eq!(ardia_record.payload["browser"], "ardia");
+        assert_eq!(
+            ardia_record.key,
+            KeySource::BrowserVisit {
+                browser: Some("ardia".to_string()),
+                profile: PROFILE.to_string(),
+                generation: 1,
+                visit_id: 904,
+            }
+        );
+
+        let PollOutcome { records, .. } =
+            collect_from(&home.history(), dia(), WINDOW, None, PAGE_LIMIT)
+                .expect("the history could not be read");
+        assert_eq!(record_with(&records, 904).payload.get("browser"), None);
+    }
+
+    #[test]
+    fn the_cursor_key_carries_the_browser_for_ardia_only() {
+        assert_eq!(Browser::Ardia.cursor_key(PROFILE), "ardia:MBP_21");
+        assert_eq!(Browser::Dia.cursor_key(PROFILE), PROFILE);
     }
 
     #[tokio::test]
@@ -897,6 +1160,7 @@ mod tests {
         assert_eq!(
             records[0].key,
             KeySource::BrowserVisit {
+                browser: None,
                 profile: PROFILE.to_string(),
                 generation: 1,
                 visit_id: 903,
@@ -934,9 +1198,9 @@ mod tests {
         assert_eq!(state.shipped.len(), 6);
 
         let narrow = poll_once(
+            dia(),
             &home.user_data(),
             &home.snapshot(),
-            PROFILE,
             2,
             Some(HistoryState {
                 cursor: 0,
@@ -961,9 +1225,9 @@ mod tests {
         home.leave_stale_snapshot();
 
         let outcome = poll_once(
+            dia(),
             &home.user_data(),
             &home.snapshot(),
-            PROFILE,
             WINDOW,
             None,
             PAGE_LIMIT,
@@ -974,6 +1238,75 @@ mod tests {
             !home.snapshot().exists(),
             "a poll that resolves no profile must still clear the clone it finds"
         );
+    }
+
+    #[test]
+    fn an_ardia_profile_name_resolves_to_its_id_directory() {
+        assert_eq!(
+            resolve_ardia_directory(ARDIA_SESSION, "MBP_21"),
+            Ok("Profile p-test-3".to_string())
+        );
+        assert_eq!(
+            resolve_ardia_directory(ARDIA_SESSION, "MBA_22"),
+            Ok("Profile p-test-2c".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unknown_ardia_profile_lists_the_names_that_exist() {
+        let reason = resolve_ardia_directory(ARDIA_SESSION, "Nowhere").expect_err("absent");
+        assert!(reason.contains("MBP_21"), "reason was {reason}");
+        assert!(reason.contains("MBA_22"), "reason was {reason}");
+    }
+
+    #[test]
+    fn a_broken_ardia_session_fails_with_the_file_named() {
+        let home = TempHome::new("ardia-broken");
+        let root = home.path.join("ardia").join("Chromium");
+        let session = home.path.join("ardia").join(ARDIA_SESSION_FILE);
+        fs::create_dir_all(&root).expect("the root could not be made");
+
+        let reason = ardia_directory_for(&root, "MBP_21").expect_err("no file");
+        assert!(reason.contains(ARDIA_SESSION_FILE), "reason was {reason}");
+
+        fs::write(&session, "not json").expect("the session could not be written");
+        let reason = ardia_directory_for(&root, "MBP_21").expect_err("bad json");
+        assert!(reason.contains(ARDIA_SESSION_FILE), "reason was {reason}");
+        assert!(reason.contains("not valid json"), "reason was {reason}");
+
+        fs::write(&session, r#"{"tabs": []}"#).expect("the session could not be written");
+        let reason = ardia_directory_for(&root, "MBP_21").expect_err("no profiles");
+        assert!(reason.contains(ARDIA_SESSION_FILE), "reason was {reason}");
+    }
+
+    #[test]
+    fn the_session_file_beside_the_root_resolves_a_profile() {
+        let home = TempHome::new("ardia-resolve");
+        let root = home.path.join("ardia").join("Chromium");
+        fs::create_dir_all(&root).expect("the root could not be made");
+        fs::write(
+            home.path.join("ardia").join(ARDIA_SESSION_FILE),
+            ARDIA_SESSION,
+        )
+        .expect("the session could not be written");
+        assert_eq!(
+            Browser::Ardia.directory_for(&root, "MBP_21"),
+            Ok("Profile p-test-3".to_string())
+        );
+    }
+
+    #[test]
+    fn a_clone_of_either_browser_that_outlived_its_run_is_discarded_at_startup() {
+        let home = TempHome::new("stale-both");
+        for browser in [Browser::Dia, Browser::Ardia] {
+            let snapshot = home.state_dir().join(browser.snapshot_dir());
+            runtime::private_dir(&snapshot).expect("the stale snapshot could not be made");
+        }
+
+        discard_stale_snapshot(&home.state_dir());
+        for browser in [Browser::Dia, Browser::Ardia] {
+            assert!(!home.state_dir().join(browser.snapshot_dir()).exists());
+        }
     }
 
     #[test]
@@ -1028,9 +1361,9 @@ mod tests {
 
         home.write_history(b"this is not a database at all, only a torn page");
         let outcome = poll_once(
+            dia(),
             &home.user_data(),
             &home.snapshot(),
-            PROFILE,
             WINDOW,
             Some(state),
             PAGE_LIMIT,
@@ -1073,7 +1406,12 @@ mod tests {
         let user_data = home.user_data();
         let snapshot = home.snapshot();
         let mut poll = Box::pin(poll_once(
-            &user_data, &snapshot, PROFILE, WINDOW, None, PAGE_LIMIT,
+            dia(),
+            &user_data,
+            &snapshot,
+            WINDOW,
+            None,
+            PAGE_LIMIT,
         ));
         let _ = tokio::time::timeout(Duration::from_millis(0), &mut poll).await;
 
@@ -1090,9 +1428,9 @@ mod tests {
         fs::remove_file(home.history()).expect("the history could not be removed");
 
         let outcome = poll_once(
+            dia(),
             &home.user_data(),
             &home.snapshot(),
-            PROFILE,
             WINDOW,
             None,
             PAGE_LIMIT,
@@ -1107,7 +1445,8 @@ mod tests {
     async fn the_provider_emits_its_visits_with_the_cursor_they_advance_it_to() {
         let home = TempHome::new("provider-run");
         let buffer = home.buffer();
-        let mut provider = BrowserHistoryProvider::new(home.user_data(), buffer.handle());
+        let mut provider =
+            BrowserHistoryProvider::new(Browser::Dia, home.user_data(), buffer.handle(), None);
         let (out, mut emissions): (_, Receiver<Emission>) = channel(4);
 
         let ctx = home.ctx();
@@ -1143,7 +1482,8 @@ mod tests {
     async fn visits_that_were_never_buffered_are_read_again_on_the_next_poll() {
         let home = TempHome::new("uncommitted");
         let buffer = home.buffer();
-        let mut provider = BrowserHistoryProvider::new(home.user_data(), buffer.handle());
+        let mut provider =
+            BrowserHistoryProvider::new(Browser::Dia, home.user_data(), buffer.handle(), None);
         let (out, mut emissions): (_, Receiver<Emission>) = channel(4);
 
         let mut config = home.config();
@@ -1178,7 +1518,8 @@ mod tests {
         home.write_local_state(r#"{"profile":{"info_cache":{"Profile 1":{"name":"MBA_22"}}}}"#);
         home.leave_stale_snapshot();
         let buffer = home.buffer();
-        let mut provider = BrowserHistoryProvider::new(home.user_data(), buffer.handle());
+        let mut provider =
+            BrowserHistoryProvider::new(Browser::Dia, home.user_data(), buffer.handle(), None);
         let (out, _emissions) = channel(4);
 
         let ProviderError(reason) = provider

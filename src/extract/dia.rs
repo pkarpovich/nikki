@@ -5,8 +5,33 @@ use serde_json::Value;
 
 use crate::extract::{CommandOutput, Details, SUBPROCESS_DEADLINE, run_with_deadline};
 
-pub const SCRIPT: &str = r#"if not (running of application "Dia") then return ""
-tell application "Dia"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Application {
+    Dia,
+    Ardia,
+}
+
+impl Application {
+    fn name(self) -> &'static str {
+        match self {
+            Application::Dia => "Dia",
+            Application::Ardia => "Ardia",
+        }
+    }
+
+    fn denial_warning(self) -> &'static Once {
+        match self {
+            Application::Dia => &DIA_AUTOMATION_DENIED_WARNING,
+            Application::Ardia => &ARDIA_AUTOMATION_DENIED_WARNING,
+        }
+    }
+}
+
+fn script(application: Application) -> String {
+    let name = application.name();
+    format!(
+        r#"if not (running of application "{name}") then return ""
+tell application "{name}"
   set w to front window
   set t to active tab of w
   set u to (URL of t) as text
@@ -15,7 +40,9 @@ tell application "Dia"
   set pn to (isPinned of t) as text
 end tell
 set AppleScript's text item delimiters to (ASCII character 31)
-return {u, ti, pr, pn} as text"#;
+return {{u, ti, pr, pn}} as text"#
+    )
+}
 
 const OSASCRIPT: &str = "/usr/bin/osascript";
 const UNIT_SEPARATOR: char = '\u{1f}';
@@ -24,25 +51,27 @@ const AUTOMATION_DENIED: i32 = -1743;
 const NO_FRONT_WINDOW: i32 = -1728;
 const APPLE_EVENT_TIMEOUT: i32 = -1712;
 
-static AUTOMATION_DENIED_WARNING: Once = Once::new();
+static DIA_AUTOMATION_DENIED_WARNING: Once = Once::new();
+static ARDIA_AUTOMATION_DENIED_WARNING: Once = Once::new();
 
-pub async fn active_tab() -> Details {
+pub async fn active_tab(application: Application) -> Details {
+    let script = script(application);
     let output =
-        run_with_deadline(Path::new(OSASCRIPT), &["-e", SCRIPT], SUBPROCESS_DEADLINE).await;
+        run_with_deadline(Path::new(OSASCRIPT), &["-e", &script], SUBPROCESS_DEADLINE).await;
     let Some(output) = output else {
         return Details::new();
     };
-    details_from(output)
+    details_from(application, output)
 }
 
-fn details_from(output: CommandOutput) -> Details {
+fn details_from(application: Application, output: CommandOutput) -> Details {
     let CommandOutput {
         succeeded,
         stdout,
         stderr,
     } = output;
     if !succeeded {
-        report(script_error(&stderr));
+        report(application, script_error(&stderr));
         return Details::new();
     }
     parse_tab(&stdout)
@@ -115,10 +144,11 @@ fn trailing_code(stderr: &str) -> Option<i32> {
     Some(code)
 }
 
-fn report(error: ScriptError) {
+fn report(application: Application, error: ScriptError) {
     match error {
-        ScriptError::AutomationDenied => AUTOMATION_DENIED_WARNING.call_once(|| {
+        ScriptError::AutomationDenied => application.denial_warning().call_once(|| {
             tracing::warn!(
+                browser = application.name(),
                 "automation for the browser was denied, so no tab will be captured until it is granted in System Settings"
             );
         }),
@@ -243,27 +273,60 @@ mod tests {
             "something else entirely\n",
         ];
         for stderr in stderrs {
-            assert!(
-                details_from(failed(stderr)).is_empty(),
-                "stderr was {stderr}"
-            );
+            for application in [Application::Dia, Application::Ardia] {
+                assert!(
+                    details_from(application, failed(stderr)).is_empty(),
+                    "stderr was {stderr}"
+                );
+            }
         }
     }
 
     #[test]
-    fn the_automation_warning_is_emitted_once_per_process() {
-        report(ScriptError::AutomationDenied);
-        report(ScriptError::AutomationDenied);
-        assert!(AUTOMATION_DENIED_WARNING.is_completed());
+    fn the_automation_warning_is_tracked_per_browser() {
+        assert!(!std::ptr::eq(
+            Application::Dia.denial_warning(),
+            Application::Ardia.denial_warning()
+        ));
+        report(Application::Ardia, ScriptError::AutomationDenied);
+        report(Application::Ardia, ScriptError::AutomationDenied);
+        assert!(ARDIA_AUTOMATION_DENIED_WARNING.is_completed());
+        report(Application::Dia, ScriptError::AutomationDenied);
+        assert!(DIA_AUTOMATION_DENIED_WARNING.is_completed());
     }
 
     #[test]
     fn the_script_guards_against_launching_the_browser_before_it_talks_to_it() {
-        let first = SCRIPT.lines().next().expect("the script has a first line");
+        let script = script(Application::Dia);
+        let first = script.lines().next().expect("the script has a first line");
         assert_eq!(
             first,
             r#"if not (running of application "Dia") then return """#
         );
-        assert!(SCRIPT.contains("ASCII character 31"));
+        assert!(script.contains("ASCII character 31"));
+    }
+
+    #[test]
+    fn the_dia_script_keeps_its_text() {
+        let expected = r#"if not (running of application "Dia") then return ""
+tell application "Dia"
+  set w to front window
+  set t to active tab of w
+  set u to (URL of t) as text
+  set ti to (title of t) as text
+  set pr to (name of active profile of w) as text
+  set pn to (isPinned of t) as text
+end tell
+set AppleScript's text item delimiters to (ASCII character 31)
+return {u, ti, pr, pn} as text"#;
+        assert_eq!(script(Application::Dia), expected);
+    }
+
+    #[test]
+    fn the_ardia_script_talks_only_to_ardia() {
+        let script = script(Application::Ardia);
+        assert!(script.contains(r#"tell application "Ardia""#));
+        assert!(script.contains(r#"running of application "Ardia""#));
+        assert!(!script.contains(r#""Dia""#));
     }
 }

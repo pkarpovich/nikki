@@ -20,7 +20,7 @@ use crate::config::{Config, Paths};
 use crate::macos::ax::accessibility_is_trusted;
 use crate::macos::events::EventThread;
 use crate::providers::browser_history::{
-    BrowserHistoryProvider, directory_for, discard_stale_snapshot, user_data_dir,
+    Browser, BrowserHistoryProvider, directory_for, discard_stale_snapshot,
 };
 use crate::providers::claude_code::ClaudeCodeProvider;
 use crate::providers::scripted::{ScriptedSources, TEST_SOURCES_VAR};
@@ -29,7 +29,8 @@ use crate::providers::{Backoff, Ctx, supervise};
 use crate::runtime::ship::endpoint;
 use crate::runtime::{EMISSION_QUEUE, Pipeline, absorb, private_dir};
 
-const PROVIDERS: &str = "windows, browser_history, claude_code";
+const PROVIDERS: &str =
+    "windows, browser_history (Dia, and Ardia when [ardia] is set), claude_code";
 
 /// nikki captures what happens on this Mac and ships it to the nikki service.
 #[derive(FromArgs)]
@@ -190,7 +191,7 @@ async fn run(config: Config) -> Result<(), String> {
         return Err("HOME is not set, so the browser profile cannot be resolved".to_string());
     };
 
-    let user_data = user_data_dir(&home);
+    let user_data = Browser::Dia.root(&home);
     let directory = directory_for(&user_data, &config.browser.profile)?;
 
     let endpoint = match endpoint(&config.service_url) {
@@ -232,6 +233,14 @@ async fn run(config: Config) -> Result<(), String> {
         "nikki is running"
     );
 
+    let ardia = match &config.ardia {
+        Some(config::Ardia { profile, since }) => {
+            tracing::info!(profile = %profile, since = ?since, "ardia history is enabled");
+            Some(*since)
+        }
+        None => None,
+    };
+
     let ctx = Ctx {
         config: Arc::new(config),
     };
@@ -265,11 +274,24 @@ async fn run(config: Config) -> Result<(), String> {
         }
     };
     let history = tokio::spawn(supervise(
-        BrowserHistoryProvider::new(user_data, records.clone()),
+        BrowserHistoryProvider::new(Browser::Dia, user_data, records.clone(), None),
         ctx.clone(),
         emissions.clone(),
         Backoff::default(),
     ));
+    let ardia_history = ardia.map(|since| {
+        tokio::spawn(supervise(
+            BrowserHistoryProvider::new(
+                Browser::Ardia,
+                Browser::Ardia.root(&home),
+                records.clone(),
+                Some(since),
+            ),
+            ctx.clone(),
+            emissions.clone(),
+            Backoff::default(),
+        ))
+    });
     let claude_code = tokio::spawn(supervise(
         ClaudeCodeProvider::new(records),
         ctx,
@@ -290,9 +312,15 @@ async fn run(config: Config) -> Result<(), String> {
 
     windows.abort();
     history.abort();
+    if let Some(ardia_history) = &ardia_history {
+        ardia_history.abort();
+    }
     claude_code.abort();
     let _ = windows.await;
     let _ = history.await;
+    if let Some(ardia_history) = ardia_history {
+        let _ = ardia_history.await;
+    }
     let _ = claude_code.await;
     event_thread.stop();
 
