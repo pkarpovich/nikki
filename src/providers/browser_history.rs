@@ -25,6 +25,8 @@ pub const ARDIA_SESSION_FILE: &str = "session.json";
 pub const ARDIA_SNAPSHOT_DIR: &str = "history-snapshot-ardia";
 const ARDIA_NAME: &str = "ardia";
 const ARDIA_PROFILE_PREFIX: &str = "Profile ";
+const ARDIA_DEFAULT_PROFILE_ID: &str = "default";
+const ARDIA_DEFAULT_DIRECTORY: &str = "Default";
 pub const PAGE_LIMIT: usize = 5_000;
 
 const CLONE_PROGRAM: &str = "/bin/cp";
@@ -327,9 +329,13 @@ fn resolve_ardia_directory(text: &str, profile: &str) -> Result<String, String> 
 
     let mut known = Vec::new();
     for (_, entry) in profiles {
-        let ArdiaProfile { id, name } = entry;
+        let ArdiaProfile { id, data_id, name } = entry;
         if name == profile {
-            return Ok(format!("{ARDIA_PROFILE_PREFIX}{id}"));
+            let data_id = data_id.unwrap_or(id);
+            if data_id == ARDIA_DEFAULT_PROFILE_ID {
+                return Ok(ARDIA_DEFAULT_DIRECTORY.to_string());
+            }
+            return Ok(format!("{ARDIA_PROFILE_PREFIX}{data_id}"));
         }
         known.push(name);
     }
@@ -676,6 +682,8 @@ struct ArdiaSession {
 #[derive(Deserialize)]
 struct ArdiaProfile {
     id: String,
+    #[serde(rename = "dataId")]
+    data_id: Option<String>,
     name: String,
 }
 
@@ -1249,6 +1257,22 @@ mod tests {
         assert_eq!(
             resolve_ardia_directory(ARDIA_SESSION, "MBA_22"),
             Ok("Profile p-test-2c".to_string())
+        );
+    }
+
+    #[test]
+    fn the_default_ardia_profile_lives_in_the_chromium_default_directory() {
+        assert_eq!(
+            resolve_ardia_directory(ARDIA_SESSION, "Personal"),
+            Ok("Default".to_string())
+        );
+    }
+
+    #[test]
+    fn an_ardia_profile_with_a_data_id_lives_under_that_id() {
+        assert_eq!(
+            resolve_ardia_directory(ARDIA_SESSION, "Work"),
+            Ok("Profile p-test-1".to_string())
         );
     }
 
