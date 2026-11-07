@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 pub mod auth;
 pub mod buffer;
 pub mod dedup;
@@ -18,6 +17,7 @@ use tokio::sync::{mpsc, watch};
 use crate::config::Config;
 use crate::macos::events::SLEEP_FLUSH_BUDGET;
 use crate::providers::Emission;
+use crate::runtime::auth::{AuthError, TokenSource};
 use crate::runtime::buffer::{Buffer, BufferConfig, BufferError, BufferHandle};
 use crate::runtime::dedup::{
     browser_key, claude_message_key, claude_session_key, claude_touch_key, windows_key,
@@ -235,6 +235,8 @@ pub enum RuntimeError {
     Buffer(#[from] BufferError),
     #[error(transparent)]
     Ship(#[from] ShipError),
+    #[error(transparent)]
+    Auth(#[from] AuthError),
 }
 
 pub fn private_dir(path: &Path) -> io::Result<()> {
@@ -258,8 +260,13 @@ impl Pipeline {
             buffer,
             redact,
             state_dir,
+            auth,
             ..
         } = config;
+        let tokens = match auth {
+            Some(auth) => Some(TokenSource::new(auth)?),
+            None => None,
+        };
         let buffer = Buffer::open(BufferConfig {
             state_dir: state_dir.clone(),
             device: device.clone(),
@@ -267,7 +274,7 @@ impl Pipeline {
             max_bytes: buffer.max_bytes,
             redact: redact.clone(),
         })?;
-        let shipper = Shipper::new(buffer.handle(), HttpTransport::new(service_url)?);
+        let shipper = Shipper::new(buffer.handle(), HttpTransport::new(service_url, tokens)?);
         Ok(Pipeline { buffer, shipper })
     }
 

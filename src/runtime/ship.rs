@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 use url::Url;
 
+use super::auth::TokenSource;
 use super::buffer::{BufferError, BufferHandle, PendingRecord};
 
 pub const RECORDS_PATH: &str = "/api/v1/records";
@@ -328,10 +329,12 @@ impl<T: Transport> Shipper<T> {
 pub struct HttpTransport {
     client: reqwest::Client,
     endpoint: Url,
+    tokens: Option<TokenSource>,
+    last_token_failure: std::sync::Mutex<Option<String>>,
 }
 
 impl HttpTransport {
-    pub fn new(service_url: &Url) -> Result<HttpTransport, ShipError> {
+    pub fn new(service_url: &Url, tokens: Option<TokenSource>) -> Result<HttpTransport, ShipError> {
         let endpoint = endpoint(service_url)?;
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -342,24 +345,60 @@ impl HttpTransport {
                 "the platform tls stack is unavailable".to_string(),
             ));
         };
-        Ok(HttpTransport { client, endpoint })
+        Ok(HttpTransport {
+            client,
+            endpoint,
+            tokens,
+            last_token_failure: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn remember_token_failure(&self, failure: Option<String>) {
+        let mut last = self
+            .last_token_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *last == failure {
+            return;
+        }
+        if let Some(failure) = &failure {
+            tracing::warn!(%failure, "an ingest token could not be had, so the batch waits");
+        }
+        *last = failure;
     }
 }
 
 impl Transport for HttpTransport {
     async fn post(&self, body: String) -> Result<HttpResponse, TransportError> {
-        let response = self
+        let mut request = self
             .client
             .post(self.endpoint.clone())
             .header("content-type", "application/json")
-            .body(body)
-            .send()
-            .await;
+            .body(body);
+        if let Some(tokens) = &self.tokens {
+            match tokens.token().await {
+                Ok(token) => {
+                    self.remember_token_failure(None);
+                    request = request.bearer_auth(token);
+                }
+                Err(error) => {
+                    let failure = error.to_string();
+                    self.remember_token_failure(Some(failure.clone()));
+                    return Err(TransportError(failure));
+                }
+            }
+        }
+        let response = request.send().await;
         let response = match response {
             Ok(response) => response,
             Err(error) => return Err(TransportError(error.to_string())),
         };
         let status = response.status().as_u16();
+        if status == 401
+            && let Some(tokens) = &self.tokens
+        {
+            tokens.invalidate().await;
+        }
         let body = match response.text().await {
             Ok(body) => body,
             Err(error) => return Err(TransportError(error.to_string())),
@@ -371,7 +410,7 @@ impl Transport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Keep, RedactRule};
+    use crate::config::{Auth, Keep, RedactRule};
     use crate::runtime::buffer::{Buffer, BufferConfig, DATABASE_FILE};
     use crate::runtime::redact::WILDCARD_HOST;
     use crate::runtime::{KeySource, Kind, Provider, RecordDraft, Timestamp};
@@ -379,7 +418,9 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     struct Scripted {
         answers: Mutex<Vec<Result<HttpResponse, TransportError>>>,
@@ -1142,5 +1183,184 @@ mod tests {
         assert!(!sealed[0].dedup_key.contains("secret"));
 
         buffer.close().await.expect("the buffer did not close");
+    }
+
+    const TOKEN_PATH: &str = "/token";
+    const GOOD_TOKEN: &str = r#"{"access_token":"tok","token_type":"bearer","expires_in":900}"#;
+
+    struct Service {
+        base: String,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Service {
+        fn seen(&self, path: &str) -> Vec<String> {
+            let requests = self.requests.lock().expect("the request log is poisoned");
+            let mut seen = Vec::new();
+            for request in requests.iter() {
+                let line = request.lines().next().unwrap_or_default();
+                if line.split(' ').nth(1) == Some(path) {
+                    seen.push(request.to_ascii_lowercase());
+                }
+            }
+            seen
+        }
+    }
+
+    fn request_complete(received: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(received);
+        let Some((head, body)) = text.split_once("\r\n\r\n") else {
+            return false;
+        };
+        let mut length = 0;
+        for line in head.lines() {
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        body.len() >= length
+    }
+
+    async fn serve(tokens: Vec<(u16, &'static str)>, ingest: (u16, String)) -> Service {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the test listener binds");
+        let base = format!(
+            "http://{}",
+            listener.local_addr().expect("the listener has an address")
+        );
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&requests);
+        tokio::spawn(async move {
+            let mut token_requests = 0;
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut received = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while let Ok(read) = stream.read(&mut chunk).await {
+                    if read == 0 {
+                        break;
+                    }
+                    received.extend_from_slice(&chunk[..read]);
+                    if request_complete(&received) {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&received).to_string();
+                let line = text.lines().next().unwrap_or_default();
+                let (status, body) = if line.split(' ').nth(1) == Some(TOKEN_PATH) {
+                    let (status, body) = tokens[token_requests.min(tokens.len() - 1)];
+                    token_requests += 1;
+                    (status, body.to_string())
+                } else {
+                    ingest.clone()
+                };
+                log.lock().expect("the request log is poisoned").push(text);
+                let reply = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        Service { base, requests }
+    }
+
+    fn transport(state: &TempState, service: &Service, authenticated: bool) -> HttpTransport {
+        let service_url = Url::parse(&service.base).expect("the service url parses");
+        if !authenticated {
+            return HttpTransport::new(&service_url, None).expect("the transport builds");
+        }
+        let key_file = state.path.join("key.pem");
+        crate::runtime::auth::testing::write_rsa_key(&key_file);
+        let auth = Auth {
+            client_id: "nikki-test".to_string(),
+            key_id: "nikki-test-2026".to_string(),
+            key_file,
+            token_url: Url::parse(&format!("{}{TOKEN_PATH}", service.base))
+                .expect("the token url parses"),
+            audience: "https://nikki.example/api".to_string(),
+        };
+        let tokens = TokenSource::new(&auth).expect("the token source builds");
+        HttpTransport::new(&service_url, Some(tokens)).expect("the transport builds")
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_post_carries_a_bearer_and_fetches_one_token_for_two_posts() {
+        let state = TempState::new("bearer");
+        let service = serve(vec![(200, GOOD_TOKEN)], (200, accepted(1))).await;
+        let transport = transport(&state, &service, true);
+
+        for _ in 0..2 {
+            let response = transport
+                .post("{\"records\":[]}".to_string())
+                .await
+                .expect("the post succeeds");
+            assert_eq!(response.status, 200);
+        }
+
+        let ingest = service.seen(RECORDS_PATH);
+        assert_eq!(ingest.len(), 2);
+        for request in &ingest {
+            assert!(request.contains("authorization: bearer tok\r\n"));
+        }
+        assert_eq!(service.seen(TOKEN_PATH).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_post_without_auth_sends_no_authorization_header() {
+        let state = TempState::new("no-bearer");
+        let service = serve(vec![(200, GOOD_TOKEN)], (200, accepted(1))).await;
+        let transport = transport(&state, &service, false);
+
+        transport
+            .post("{\"records\":[]}".to_string())
+            .await
+            .expect("the post succeeds");
+
+        let ingest = service.seen(RECORDS_PATH);
+        assert_eq!(ingest.len(), 1);
+        assert!(!ingest[0].contains("authorization"));
+        assert!(service.seen(TOKEN_PATH).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_token_failure_fails_the_post_without_reaching_the_service() {
+        let state = TempState::new("token-failure");
+        let service = serve(
+            vec![(401, r#"{"error":"invalid_client"}"#)],
+            (200, accepted(1)),
+        )
+        .await;
+        let transport = transport(&state, &service, true);
+
+        let TransportError(reason) = transport
+            .post("{\"records\":[]}".to_string())
+            .await
+            .expect_err("the post fails");
+
+        assert!(reason.contains("invalid_client"));
+        assert!(service.seen(RECORDS_PATH).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_ingest_401_invalidates_the_token() {
+        let state = TempState::new("ingest-401");
+        let service = serve(vec![(200, GOOD_TOKEN)], (401, String::new())).await;
+        let transport = transport(&state, &service, true);
+
+        for _ in 0..2 {
+            let response = transport
+                .post("{\"records\":[]}".to_string())
+                .await
+                .expect("the post gets an answer");
+            assert_eq!(response.status, 401);
+        }
+
+        assert_eq!(service.seen(TOKEN_PATH).len(), 2);
+        assert_eq!(service.seen(RECORDS_PATH).len(), 2);
     }
 }

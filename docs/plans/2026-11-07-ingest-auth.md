@@ -158,15 +158,15 @@ audience = "https://nikki.pkarpovich.space/api"
 - Modify: `src/runtime/ship.rs`
 - Modify: `src/runtime/mod.rs`
 
-- [ ] Remove the temporary `#[allow(dead_code)]` on `pub mod auth;` in `src/runtime/mod.rs` (added in Task 2 because nothing called the module yet).
-- [ ] `HttpTransport::new(service_url, Option<TokenSource>)`, the `post` behaviour from Technical Details, and `Pipeline::open` building the `TokenSource` from `config.auth`.
-- [ ] Tests against a local listener as in Task 2 (one listener can serve both the token endpoint and the ingest path):
+- [x] Remove the temporary `#[allow(dead_code)]` on `pub mod auth;` in `src/runtime/mod.rs` (added in Task 2 because nothing called the module yet).
+- [x] `HttpTransport::new(service_url, Option<TokenSource>)`, the `post` behaviour from Technical Details, and `Pipeline::open` building the `TokenSource` from `config.auth`.
+- [x] Tests against a local listener as in Task 2 (one listener can serve both the token endpoint and the ingest path):
   - with auth, the ingest request carries `Authorization: Bearer <token>` and the token endpoint is hit once for two posts;
   - without auth, the ingest request has no `Authorization` header (existing behaviour);
   - a token endpoint failure makes `post` return `Err` and the ingest path is never hit;
   - an ingest `401` invalidates the token: the next `post` fetches a new one;
   - the existing `decide` tests pass unchanged.
-- [ ] Run the gate.
+- [x] Run the gate.
 
 ### Task 4: Startup and `--check-config`
 

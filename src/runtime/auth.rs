@@ -233,6 +233,28 @@ fn parse_token_response(status: u16, body: &str) -> Result<(String, u64), AuthEr
 }
 
 #[cfg(test)]
+pub mod testing {
+    use std::path::Path;
+
+    use aws_lc_rs::encoding::AsDer;
+    use aws_lc_rs::rsa::{KeyPair, KeySize};
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    pub fn write_rsa_key(path: &Path) {
+        let pair = KeyPair::generate(KeySize::Rsa2048).expect("a test key is generated");
+        let der = pair.as_der().expect("a test key is encoded");
+        let mut text = String::from("-----BEGIN PRIVATE KEY-----\n");
+        for line in STANDARD.encode(der.as_ref()).as_bytes().chunks(64) {
+            text.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
+            text.push('\n');
+        }
+        text.push_str("-----END PRIVATE KEY-----\n");
+        std::fs::write(path, text).expect("the test key file is written");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -261,7 +283,7 @@ mod tests {
     }
 
     struct Fixture {
-        dir: tempdir::Dir,
+        _dir: tempdir::Dir,
         key_file: PathBuf,
         public_pem: String,
     }
@@ -302,7 +324,7 @@ mod tests {
         let key_file = dir.path().join("key.pem");
         std::fs::write(&key_file, pem("PRIVATE KEY", private.as_ref())).unwrap();
         Fixture {
-            dir,
+            _dir: dir,
             key_file,
             public_pem: pem("PUBLIC KEY", public.as_ref()),
         }
