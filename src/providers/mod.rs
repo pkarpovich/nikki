@@ -194,6 +194,7 @@ pub(crate) mod tests {
                 profile: "MBP_21".to_string(),
             },
             ardia: None,
+            auth: None,
             buffer: Buffer {
                 max_rows: 200_000,
                 max_bytes: 536_870_912,

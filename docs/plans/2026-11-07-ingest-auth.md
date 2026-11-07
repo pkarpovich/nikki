@@ -128,11 +128,11 @@ audience = "https://nikki.pkarpovich.space/api"
 - Modify: `src/config.rs`
 - Modify: `src/providers/mod.rs` (the `test_config` literal)
 
-- [ ] Add `Auth`, `Config.auth: Option<Auth>` and `FileAuth` with `deny_unknown_fields`.
-- [ ] Validate as in Technical Details, reusing the existing `~/` expansion.
-- [ ] Update every `Config` literal with `auth: None`.
-- [ ] Tests: a full section parses with `~/` expanded; an absent section is `None`; each missing field, an empty field, a relative `key_file`, an `http://` token URL, an unparseable token URL and an unknown key are rejected with the field named.
-- [ ] Run the gate.
+- [x] Add `Auth`, `Config.auth: Option<Auth>` and `FileAuth` with `deny_unknown_fields`.
+- [x] Validate as in Technical Details, reusing the existing `~/` expansion.
+- [x] Update every `Config` literal with `auth: None`.
+- [x] Tests: a full section parses with `~/` expanded; an absent section is `None`; each missing field, an empty field, a relative `key_file`, an `http://` token URL, an unparseable token URL and an unknown key are rejected with the field named.
+- [x] Run the gate.
 
 ### Task 2: The token source
 
