@@ -13,6 +13,19 @@
       "name": "MBA_22",
       "color": "green",
       "createdAt": "2026-10-02T09:00:00Z"
+    },
+    "default": {
+      "id": "default",
+      "name": "Personal",
+      "color": "plum",
+      "createdAt": 0
+    },
+    "p-test-9": {
+      "id": "p-test-9",
+      "dataId": "p-test-1",
+      "name": "Work",
+      "color": "red",
+      "createdAt": "2026-10-03T09:00:00Z"
     }
   }
 }
