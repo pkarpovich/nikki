@@ -51,6 +51,7 @@ struct CachedToken {
 pub struct TokenSource {
     client_id: String,
     key_id: String,
+    issuer: String,
     token_url: Url,
     audience: String,
     key: EncodingKey,
@@ -93,6 +94,7 @@ impl TokenSource {
         let source = TokenSource {
             client_id: auth.client_id.clone(),
             key_id: auth.key_id.clone(),
+            issuer: auth.issuer.clone(),
             token_url: auth.token_url.clone(),
             audience: auth.audience.clone(),
             key,
@@ -152,7 +154,7 @@ impl TokenSource {
         let claims = AssertionClaims {
             iss: &self.client_id,
             sub: &self.client_id,
-            aud: self.token_url.as_str(),
+            aud: &self.issuer,
             jti,
             iat: now,
             exp: now + ASSERTION_LIFETIME_SECONDS,
@@ -166,7 +168,7 @@ impl TokenSource {
             ("client_id", self.client_id.clone()),
             ("client_assertion_type", ASSERTION_TYPE.to_string()),
             ("client_assertion", assertion.to_string()),
-            ("audience", self.audience.clone()),
+            ("resource", self.audience.clone()),
             ("scope", SCOPE.to_string()),
         ]
     }
@@ -340,6 +342,7 @@ mod tests {
             client_id: "nikki-test".to_string(),
             key_id: "nikki-test-2026".to_string(),
             key_file,
+            issuer: "https://auth.example".to_string(),
             token_url: Url::parse(token_url).unwrap(),
             audience: "https://nikki.example/api".to_string(),
         }
@@ -361,7 +364,7 @@ mod tests {
         assert_eq!(header.kid.as_deref(), Some("nikki-test-2026"));
 
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_audience(&["https://auth.example/api/oidc/token"]);
+        validation.set_audience(&["https://auth.example"]);
         validation.validate_exp = false;
         let key = DecodingKey::from_rsa_pem(fixture.public_pem.as_bytes()).unwrap();
         let claims = jsonwebtoken::decode::<Value>(&assertion, &key, &validation)
@@ -371,7 +374,7 @@ mod tests {
         assert_eq!(claims.len(), 6);
         assert_eq!(claims["iss"], "nikki-test");
         assert_eq!(claims["sub"], "nikki-test");
-        assert_eq!(claims["aud"], "https://auth.example/api/oidc/token");
+        assert_eq!(claims["aud"], "https://auth.example");
         assert_eq!(claims["jti"], "abc123");
         assert_eq!(claims["iat"], 1_000);
         assert_eq!(claims["exp"], 1_060);
@@ -399,7 +402,7 @@ mod tests {
                 "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
             ),
             ("client_assertion", "the-assertion".to_string()),
-            ("audience", "https://nikki.example/api".to_string()),
+            ("resource", "https://nikki.example/api".to_string()),
             ("scope", "nikki:ingest".to_string()),
         ];
         assert_eq!(form, expected);

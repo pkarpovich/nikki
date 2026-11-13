@@ -1292,6 +1292,7 @@ mod tests {
             client_id: "nikki-test".to_string(),
             key_id: "nikki-test-2026".to_string(),
             key_file,
+            issuer: service.base.clone(),
             token_url: Url::parse(&format!("{}{TOKEN_PATH}", service.base))
                 .expect("the token url parses"),
             audience: "https://nikki.example/api".to_string(),
@@ -1412,6 +1413,8 @@ mod tests {
         assert!(request.starts_with("post /token "));
         assert!(request.contains("content-type: application/x-www-form-urlencoded"));
         assert!(request.contains("grant_type=client_credentials"));
+        assert!(request.contains("resource=https%3a%2f%2fnikki.example%2fapi"));
+        assert!(!request.contains("audience="));
         assert!(request.contains("scope=nikki%3aingest"));
         assert!(request.contains("client_assertion=ey"));
     }
