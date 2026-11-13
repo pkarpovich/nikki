@@ -229,6 +229,7 @@ since = "2026-11-02T05:36:00Z"      # required, RFC 3339 with offset
 client_id = "nikki-mbp-21"          # required, this Mac's OAuth client
 key_id = "nikki-mbp-21-2026-11-07"  # required, the kid the authorization server holds the public key under
 key_file = "~/Library/Application Support/nikki/oauth/key.pem"  # required, PKCS#8 RSA PEM
+issuer = "https://auth.example.com"                        # required, the issuer identifier of the authorization server
 token_url = "https://auth.example.com/api/oidc/token"      # required, https with a host
 audience = "https://nikki.example.com/api"                 # required
 
@@ -273,8 +274,9 @@ drop = ["title"]
 | `auth.client_id` | none, required when `[auth]` is present | non-empty. Each Mac is its own client, for example `nikki-mbp-21`. It is the `iss` and `sub` of the client assertion |
 | `auth.key_id` | none, required when `[auth]` is present | non-empty. Sent as the `kid` header of the client assertion |
 | `auth.key_file` | none, required when `[auth]` is present | a leading `~/` expands against `HOME`, the result must be absolute. Read and parsed once at startup and by `--check-config`. An unreadable file or a key that is not RSA is a startup error naming the path |
-| `auth.token_url` | none, required when `[auth]` is present | an absolute `https` URL with a host. It is also the `aud` of the client assertion |
-| `auth.audience` | none, required when `[auth]` is present | non-empty. Sent as the `audience` field of the token request. The scope is always `nikki:ingest` |
+| `auth.issuer` | none, required when `[auth]` is present | non-empty. The issuer identifier of the authorization server, exactly as its metadata states it. It is the only `aud` of the client assertion, as RFC 10070 requires |
+| `auth.token_url` | none, required when `[auth]` is present | an absolute `https` URL with a host. The token request goes there |
+| `auth.audience` | none, required when `[auth]` is present | non-empty. The identifier of the service the token is for, sent as the `resource` field of the token request (RFC 8707). The scope is always `nikki:ingest` |
 | `buffer.max_rows` | 200000 | roughly seven weeks at the real record rate; at least 1, because a cap of zero evicts every record as it arrives |
 | `buffer.max_bytes` | 536870912 | 500 MB; must exceed the 512 bytes held back for the overflow record, for the same reason |
 | `claude_code.roots` | `["~/.claude", "~/.claude-work"]` | a leading `~/` expands against `HOME`, an absolute path is taken as is, any other relative path is an error. Each root's transcripts are read from `<root>/projects`, and its profile name is the directory's final component with one leading `.` stripped (`claude`, `claude-work`); two roots with the same profile name are an error. An empty list disables the provider |

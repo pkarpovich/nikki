@@ -124,6 +124,7 @@ pub struct Auth {
     pub client_id: String,
     pub key_id: String,
     pub key_file: PathBuf,
+    pub issuer: String,
     pub token_url: Url,
     pub audience: String,
 }
@@ -450,6 +451,7 @@ fn auth_from(section: Option<FileAuth>, home: Option<&Path>) -> Result<Option<Au
         client_id,
         key_id,
         key_file,
+        issuer,
         token_url,
         audience,
     }) = section
@@ -460,6 +462,7 @@ fn auth_from(section: Option<FileAuth>, home: Option<&Path>) -> Result<Option<Au
     let key_id = required(key_id, "auth.key_id")?;
     let key_file = required(key_file, "auth.key_file")?;
     let key_file = expand_home(&key_file, home, "auth.key_file")?;
+    let issuer = required(issuer, "auth.issuer")?;
     let token_url = required(token_url, "auth.token_url")?;
     let token_url = token_url_from(&token_url)?;
     let audience = required(audience, "auth.audience")?;
@@ -467,6 +470,7 @@ fn auth_from(section: Option<FileAuth>, home: Option<&Path>) -> Result<Option<Au
         client_id,
         key_id,
         key_file,
+        issuer,
         token_url,
         audience,
     }))
@@ -696,6 +700,7 @@ struct FileAuth {
     client_id: Option<String>,
     key_id: Option<String>,
     key_file: Option<String>,
+    issuer: Option<String>,
     token_url: Option<String>,
     audience: Option<String>,
 }
@@ -1236,13 +1241,14 @@ drop = ["title"]
         }
     }
 
-    const AUTH_LINES: [(&str, &str); 5] = [
+    const AUTH_LINES: [(&str, &str); 6] = [
         ("client_id", "nikki-mbp-21"),
         ("key_id", "nikki-mbp-21-2026-11-07"),
         (
             "key_file",
             "~/Library/Application Support/nikki/oauth/key.pem",
         ),
+        ("issuer", "https://auth.example.com"),
         ("token_url", "https://auth.example.com/api/oidc/token"),
         ("audience", "https://nikki.example.com/api"),
     ];
@@ -1274,6 +1280,7 @@ drop = ["title"]
                 key_file: PathBuf::from(
                     "/Users/someone/Library/Application Support/nikki/oauth/key.pem"
                 ),
+                issuer: "https://auth.example.com".to_string(),
                 token_url: Url::parse("https://auth.example.com/api/oidc/token")
                     .expect("the test url parses"),
                 audience: "https://nikki.example.com/api".to_string(),
@@ -1314,6 +1321,7 @@ drop = ["title"]
             ("auth.key_id", ("key_id", Some("  "))),
             ("auth.key_file", ("key_file", Some(""))),
             ("auth.key_file", ("key_file", Some("oauth/key.pem"))),
+            ("auth.issuer", ("issuer", Some(" "))),
             ("auth.token_url", ("token_url", Some(""))),
             (
                 "auth.token_url",

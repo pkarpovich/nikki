@@ -692,6 +692,7 @@ mod tests {
             client_id: "nikki-mbp-21".to_string(),
             key_id: "nikki-mbp-21-2026-11-07".to_string(),
             key_file,
+            issuer: "https://auth.example.com".to_string(),
             token_url: url::Url::parse("https://auth.example.com/api/oidc/token")
                 .expect("the test url parses"),
             audience: "https://nikki.example.com/api".to_string(),
